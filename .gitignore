@@ -1,0 +1,9 @@
+# IDEs
+.vscode/
+.cursor/
+
+# Pycache
+__pycache__/
+
+# Checkpoints
+checkpoints/
