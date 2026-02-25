@@ -50,6 +50,7 @@ class BaseTrainer(ABC):
     ) -> None:
         self.ckpt_dir = Path(ckpt_dir)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+        self._log_file = open(self.ckpt_dir / "train.log", "w", encoding="utf-8")
         self.log_every = log_every
         self.ckpt_every = ckpt_every
         self.batch_size = batch_size
@@ -75,6 +76,12 @@ class BaseTrainer(ABC):
         else:
             self.writer = None
 
+    def _tee(self, msg: str) -> None:
+        """Print to terminal and append to train.log."""
+        print(msg)
+        self._log_file.write(msg + "\n")
+        self._log_file.flush()
+
     def _next_batch(self) -> Any:
         try:
             batch = next(self._data_iter)
@@ -94,37 +101,40 @@ class BaseTrainer(ABC):
         resume_from: str | None = None,
     ) -> None:
         """Run training loop for n_iterations."""
-        if resume_from:
-            self._load_checkpoint(resume_from)
+        try:
+            if resume_from:
+                self._load_checkpoint(resume_from)
 
-        self.model.train()
-        t0 = time.time()
-        loss_accum: dict[str, float] = {}
+            self.model.train()
+            t0 = time.time()
+            loss_accum: dict[str, float] = {}
 
-        while self.global_step < n_iterations:
-            batch = self._next_batch()
-            loss_dict = self._step(batch, self.global_step, n_iterations)
-            self.global_step += 1
+            while self.global_step < n_iterations:
+                batch = self._next_batch()
+                loss_dict = self._step(batch, self.global_step, n_iterations)
+                self.global_step += 1
 
-            for k, v in loss_dict.items():
-                loss_accum[k] = loss_accum.get(k, 0.0) + v
+                for k, v in loss_dict.items():
+                    loss_accum[k] = loss_accum.get(k, 0.0) + v
 
-            if self.global_step % self.log_every == 0:
-                elapsed = time.time() - t0
-                avg = {k: v / self.log_every for k, v in loss_accum.items()}
-                self._last_avg = avg
-                its_sec = self.log_every / elapsed
-                self._log(avg, its_sec)
-                if self.writer:
-                    for k, v in avg.items():
-                        self.writer.add_scalar(f"train/{k}", v, self.global_step)
-                loss_accum = {}
-                t0 = time.time()
+                if self.global_step % self.log_every == 0:
+                    elapsed = time.time() - t0
+                    avg = {k: v / self.log_every for k, v in loss_accum.items()}
+                    self._last_avg = avg
+                    its_sec = self.log_every / elapsed
+                    self._log(avg, its_sec)
+                    if self.writer:
+                        for k, v in avg.items():
+                            self.writer.add_scalar(f"train/{k}", v, self.global_step)
+                    loss_accum = {}
+                    t0 = time.time()
 
-            if self.global_step % self.ckpt_every == 0:
-                self._save_checkpoint(tag=None, avg=self._last_avg)
+                if self.global_step % self.ckpt_every == 0:
+                    self._save_checkpoint(tag=None, avg=self._last_avg)
 
-        self._save_checkpoint(tag="final", avg=self._last_avg)
+            self._save_checkpoint(tag="final", avg=self._last_avg)
+        finally:
+            self._log_file.close()
 
     def _log(self, avg: dict[str, float], its_sec: float) -> None:
         """Override in subclass for custom logging. Default: print keys and values."""

@@ -37,7 +37,7 @@ class sDSRConfig:
     anomaly_strength_min: float = 0.2
     anomaly_strength_max: float = 1.0
     zero_mask_prob: float = 0.5
-    use_subspace_restriction: bool = False
+    use_subspace_restriction: bool = True
 
 
 class sDSR(nn.Module):
@@ -155,7 +155,8 @@ class sDSR(nn.Module):
         """
         Training forward pass (stage 2).
 
-        Generates anomaly map M if not provided, augments q with synthetic
+        Generates anomaly map M if not provided (per sample with 50% probability
+        of zero mask, no fixed half-batch split), augments q with synthetic
         anomalies, and returns outputs for loss computation.
 
         Args:
@@ -178,13 +179,9 @@ class sDSR(nn.Module):
         )
 
         if M_gt is None:
-            # Paper: half batch anomaly-free, half with simulated anomalies
-            half = batch_size // 2
-            M_zeros = torch.zeros(half, 1, q_shape[0], q_shape[1], device=device)
-            M_anom = self._anomaly_map_generator.generate(
-                batch_size - half, device, force_anomaly=True
+            M = self._anomaly_map_generator.generate(
+                batch_size, device, force_anomaly=False
             )
-            M = torch.cat([M_zeros, M_anom], dim=0)
         else:
             M = F.interpolate(
                 M_gt.float(), size=q_shape, mode="nearest"
@@ -215,27 +212,25 @@ class sDSR(nn.Module):
         use_lo = torch.randint(
             0, 2, (batch_size,), device=device
         ).float().view(batch_size, 1, 1, 1)
-
-        half = batch_size // 2
-        use_both_anom = use_both[half:]
-        use_lo_anom = use_lo[half:]
         # use_both=1 -> both anomalous; use_both=0, use_lo=1 -> top only; use_both=0, use_lo=0 -> bottom only
-        q_bot_final_anom = (
-            use_both_anom * q_bot_a[half:]
-            + (1 - use_both_anom) * (use_lo_anom * q_bot[half:] + (1 - use_lo_anom) * q_bot_a[half:])
+        q_bot_final = (
+            use_both * q_bot_a
+            + (1 - use_both) * (use_lo * q_bot + (1 - use_lo) * q_bot_a)
         )
-        q_top_final_anom = (
-            use_both_anom * q_top_a[half:]
-            + (1 - use_both_anom) * (use_lo_anom * q_top_a[half:] + (1 - use_lo_anom) * q_top[half:])
+        q_top_final = (
+            use_both * q_top_a
+            + (1 - use_both) * (use_lo * q_top_a + (1 - use_lo) * q_top)
         )
+
+        has_anomaly = (M.sum(dim=(1, 2, 3)) > 0).view(batch_size, 1, 1, 1).float()
+        q_bot_used = has_anomaly * q_bot_final + (1 - has_anomaly) * q_bot
+        q_top_used = has_anomaly * q_top_final + (1 - has_anomaly) * q_top
 
         with torch.no_grad():
-            x_g_normal = self._vq_vae.decode_general(q_bot[:half], q_top[:half])
-            x_g_anom = self._vq_vae.decode_general(q_bot_final_anom, q_top_final_anom)
-            x_g = torch.cat([x_g_normal, x_g_anom], dim=0)
+            x_g = self._vq_vae.decode_general(q_bot_used, q_top_used)
 
-        q_top_batch = torch.cat([q_top[:half], q_top_final_anom], dim=0)
-        q_bot_batch = torch.cat([q_bot[:half], q_bot_final_anom], dim=0)
+        q_top_batch = q_top_used
+        q_bot_batch = q_bot_used
         out_dec = self._object_decoder(
             q_top_batch, q_bot_batch,
             vq_top, vq_bot,

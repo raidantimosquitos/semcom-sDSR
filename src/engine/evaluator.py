@@ -57,12 +57,20 @@ class AnomalyEvaluator:
         )
         self.machine_type = getattr(test_dataset, "machine_type", "unknown")
 
-    def _anomaly_score(self, m_out: torch.Tensor) -> torch.Tensor:
-        """Aggregate M_out to per-clip anomaly score: mean of anomaly channel over spatial dims."""
+    def _anomaly_scores(self, m_out: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Aggregate M_out to per-clip anomaly scores with three methods.
+        Returns (scores_mean, scores_max, scores_p95), each (B,).
+        """
         # m_out: (B, 2, H, W), channel 1 = anomaly
         logits_anomaly = m_out[:, 1]  # (B, H, W)
-        scores = logits_anomaly.view(m_out.shape[0], -1).mean(dim=1)
-        return scores.cpu()
+        B = logits_anomaly.shape[0]
+        flat = logits_anomaly.view(B, -1)
+        scores_mean = flat.mean(dim=1).cpu()
+        scores_max = flat.max(dim=1).values.cpu()
+        # 95th percentile per sample
+        p95 = torch.quantile(flat.float(), 0.95, dim=1).cpu()
+        return scores_mean, scores_max, p95
 
     def evaluate(self) -> dict[str, Any]:
         """
@@ -70,7 +78,8 @@ class AnomalyEvaluator:
             {machine_type: {id: {auc, pauc}, "average": {auc, pauc}}, ...}
         """
         self.model.eval()
-        scores_by_id: dict[str, list[tuple[float, int]]] = defaultdict(list)
+        # list of (score_mean, score_max, score_p95, label) per clip
+        scores_by_id: dict[str, list[tuple[float, float, float, int]]] = defaultdict(list)
 
         with torch.no_grad():
             for batch in self.loader:
@@ -81,30 +90,59 @@ class AnomalyEvaluator:
                     machine_ids = [""] * x.shape[0]
                 x = x.to(self.device)
                 m_out = self.model(x)
-                sc = self._anomaly_score(m_out)
+                sc_mean, sc_max, sc_p95 = self._anomaly_scores(m_out)
                 for i in range(x.shape[0]):
                     mid = machine_ids[i] if isinstance(machine_ids[i], str) else str(machine_ids[i])
-                    scores_by_id[mid].append((sc[i].item(), int(labels[i].item())))
+                    label = int(labels[i].item())
+                    scores_by_id[mid].append((sc_mean[i].item(), sc_max[i].item(), sc_p95[i].item(), label))
 
         result: dict[str, Any] = {self.machine_type: {}}
-        all_scores, all_labels = [], []
+        all_mean, all_max, all_p95, all_labels = [], [], [], []
 
         for mid in sorted(scores_by_id.keys()):
             pairs = scores_by_id[mid]
-            y_true = [p[1] for p in pairs]
-            y_score = [p[0] for p in pairs]
-            all_scores.extend(y_score)
+            y_true = [p[3] for p in pairs]
+            y_mean = [p[0] for p in pairs]
+            y_max = [p[1] for p in pairs]
+            y_p95 = [p[2] for p in pairs]
+            all_mean.extend(y_mean)
+            all_max.extend(y_max)
+            all_p95.extend(y_p95)
             all_labels.extend(y_true)
 
-            auc = roc_auc_score(y_true, y_score) if roc_auc_score else float("nan")
-            pauc = _partial_auc(y_true, y_score, self.pauc_max_fpr)
-            result[self.machine_type][mid] = {"auc": auc, "pauc": pauc}
+            auc_mean = roc_auc_score(y_true, y_mean) if roc_auc_score else float("nan")
+            pauc_mean = _partial_auc(y_true, y_mean, self.pauc_max_fpr)
+            auc_max = roc_auc_score(y_true, y_max) if roc_auc_score else float("nan")
+            pauc_max = _partial_auc(y_true, y_max, self.pauc_max_fpr)
+            auc_p95 = roc_auc_score(y_true, y_p95) if roc_auc_score else float("nan")
+            pauc_p95 = _partial_auc(y_true, y_p95, self.pauc_max_fpr)
 
-        if all_scores and all_labels:
-            avg_auc = roc_auc_score(all_labels, all_scores) if roc_auc_score else float("nan")
-            avg_pauc = _partial_auc(all_labels, all_scores, self.pauc_max_fpr)
+            result[self.machine_type][mid] = {
+                "auc": auc_mean,
+                "pauc": pauc_mean,
+                "auc_max": auc_max,
+                "pauc_max": pauc_max,
+                "auc_p95": auc_p95,
+                "pauc_p95": pauc_p95,
+            }
+
+        if all_mean and all_labels:
+            avg_auc = roc_auc_score(all_labels, all_mean) if roc_auc_score else float("nan")
+            avg_pauc = _partial_auc(all_labels, all_mean, self.pauc_max_fpr)
+            avg_auc_max = roc_auc_score(all_labels, all_max) if roc_auc_score else float("nan")
+            avg_pauc_max = _partial_auc(all_labels, all_max, self.pauc_max_fpr)
+            avg_auc_p95 = roc_auc_score(all_labels, all_p95) if roc_auc_score else float("nan")
+            avg_pauc_p95 = _partial_auc(all_labels, all_p95, self.pauc_max_fpr)
         else:
-            avg_auc = avg_pauc = float("nan")
-        result[self.machine_type]["average"] = {"auc": avg_auc, "pauc": avg_pauc}
+            avg_auc = avg_pauc = avg_auc_max = avg_pauc_max = avg_auc_p95 = avg_pauc_p95 = float("nan")
+
+        result[self.machine_type]["average"] = {
+            "auc": avg_auc,
+            "pauc": avg_pauc,
+            "auc_max": avg_auc_max,
+            "pauc_max": avg_pauc_max,
+            "auc_p95": avg_auc_p95,
+            "pauc_p95": avg_pauc_p95,
+        }
 
         return result

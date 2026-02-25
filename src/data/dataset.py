@@ -12,11 +12,12 @@ from torch.utils.data import DataLoader, Dataset
 class DCASE2020Task2LogMelDataset(Dataset):
     """
     Training dataset: pre-computes log-mel spectrograms into RAM.
-    Single machine type; machine_id parsed from filenames (normal_id_XX_....wav).
+    Single machine type or multiple (machine_types); machine_id parsed from filenames (normal_id_XX_....wav).
     All training samples are normal (no anomalies), so label is always 0.
 
-    Normalization (mean, std) and target_T are computed here and must be passed
-    to DCASE2020Task2TestDataset for consistent evaluation.
+    Normalization (mean, std) and target_T: for a single machine_type they are computed on that type;
+    for multiple machine_types, normalization is applied per machine_type (each type's own mean/std),
+    then data are concatenated. .mean and .std are set to the first type's for API compatibility.
 
     __getitem__ returns (spectrogram, label, machine_id) with label 0 = normal.
 
@@ -29,7 +30,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
     def __init__(
         self,
         root: str,
-        machine_type: str,
+        machine_type: str | None = None,
+        machine_types: list[str] | None = None,
         sample_rate:   int   = 16_000,
         n_fft:         int   = 1024,
         hop_length:    int   = 512,
@@ -39,29 +41,26 @@ class DCASE2020Task2LogMelDataset(Dataset):
         top_db:        float = 80.0,
         normalize:     bool  = True,
     ):
-        self.mel_transform = T.MelSpectrogram(
-            sample_rate = sample_rate,
-            n_fft       = n_fft,
-            hop_length  = hop_length,
-            n_mels      = n_mels,
-            f_min       = f_min,
-            f_max       = f_max,
-        )
-        self.to_db = T.AmplitudeToDB(top_db=top_db)
-        self.machine_type = machine_type
+        if machine_types is not None:
+            self._init_multi(root, machine_types, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, normalize)
+        elif machine_type is not None:
+            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, normalize)
+        else:
+            raise ValueError("Provide either machine_type or machine_types")
 
-        audio_dir = Path(root) / machine_type / "train"
+    def _load_mel_for_dir(
+        self,
+        audio_dir: Path,
+        sample_rate: int,
+    ) -> tuple[list[torch.Tensor], list[str]]:
         files = sorted(audio_dir.glob("*.wav"))
         assert files, f"No .wav files found in {audio_dir}"
-
-        spectrograms = []
+        spectrograms: list[torch.Tensor] = []
         machine_id_strs: list[str] = []
-
         for path in files:
             m = self._FILENAME_RE.match(path.name)
             mid = m.group(1) if m else "id_00"
             machine_id_strs.append(mid)
-
             wav, sr = torchaudio.load(path)
             if sr != sample_rate:
                 wav = torchaudio.functional.resample(wav, sr, sample_rate)
@@ -70,6 +69,34 @@ class DCASE2020Task2LogMelDataset(Dataset):
             mel = self.mel_transform(wav)
             log_mel = self.to_db(mel)
             spectrograms.append(log_mel)
+        return spectrograms, machine_id_strs
+
+    def _init_single(
+        self,
+        root: str,
+        machine_type: str,
+        sample_rate: int,
+        n_fft: int,
+        hop_length: int,
+        n_mels: int,
+        f_min: float,
+        f_max: float,
+        top_db: float,
+        normalize: bool,
+    ) -> None:
+        self.mel_transform = T.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            f_min=f_min,
+            f_max=f_max,
+        )
+        self.to_db = T.AmplitudeToDB(top_db=top_db)
+        self.machine_type = machine_type
+
+        audio_dir = Path(root) / machine_type / "train"
+        spectrograms, machine_id_strs = self._load_mel_for_dir(audio_dir, sample_rate)
 
         self.data = torch.stack(spectrograms)
         self.machine_ids = sorted(set(machine_id_strs))
@@ -93,6 +120,80 @@ class DCASE2020Task2LogMelDataset(Dataset):
 
         print(
             f"DCASE2020Task2LogMelDataset: {machine_type} | {len(self.data)} spectrograms, "
+            f"shape {tuple(self.data.shape)} | IDs: {self.machine_ids} | "
+            f"{self.data.nbytes / 1e9:.2f} GB in RAM"
+        )
+
+    def _init_multi(
+        self,
+        root: str,
+        machine_types: list[str],
+        sample_rate: int,
+        n_fft: int,
+        hop_length: int,
+        n_mels: int,
+        f_min: float,
+        f_max: float,
+        top_db: float,
+        normalize: bool,
+    ) -> None:
+        self.mel_transform = T.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            f_min=f_min,
+            f_max=f_max,
+        )
+        self.to_db = T.AmplitudeToDB(top_db=top_db)
+        self.machine_type = "+".join(sorted(machine_types))
+
+        root_path = Path(root)
+        all_spectrograms: list[torch.Tensor] = []
+        all_machine_id_strs: list[str] = []
+        max_T = 0
+        first_mean = first_std = None
+
+        for mt in sorted(machine_types):
+            audio_dir = root_path / mt / "train"
+            spectrograms, machine_id_strs = self._load_mel_for_dir(audio_dir, sample_rate)
+            data_mt = torch.stack(spectrograms)
+            t_len = data_mt.shape[-1]
+            max_T = max(max_T, t_len)
+
+            if normalize:
+                mean_mt = data_mt.mean(dim=(0, 2, 3), keepdim=True)
+                std_mt = data_mt.std(dim=(0, 2, 3), keepdim=True)
+                data_mt = (data_mt - mean_mt) / (std_mt + 1e-8)
+                if first_mean is None:
+                    first_mean, first_std = mean_mt, std_mt
+            else:
+                shape = (1, 1, data_mt.shape[2], 1)
+                mean_mt = torch.zeros(shape, dtype=data_mt.dtype, device=data_mt.device)
+                std_mt = torch.ones(shape, dtype=data_mt.dtype, device=data_mt.device)
+                if first_mean is None:
+                    first_mean, first_std = mean_mt, std_mt
+
+            all_spectrograms.append(data_mt)
+            all_machine_id_strs.extend(machine_id_strs)
+
+        target_T = math.ceil(max_T / 16) * 16
+        self.target_T = target_T
+        padded = []
+        for data_mt in all_spectrograms:
+            if data_mt.shape[-1] != target_T:
+                pad = target_T - data_mt.shape[-1]
+                data_mt = F.pad(data_mt, (0, pad))
+            padded.append(data_mt)
+        self.data = torch.cat(padded, dim=0)
+        self._machine_id_strs = all_machine_id_strs
+        self.machine_ids = sorted(set(self._machine_id_strs))
+
+        self.mean = first_mean if first_mean is not None else torch.zeros(1, 1, self.data.shape[2], 1, dtype=self.data.dtype, device=self.data.device)
+        self.std = first_std if first_std is not None else torch.ones(1, 1, self.data.shape[2], 1, dtype=self.data.dtype, device=self.data.device)
+
+        print(
+            f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (per-type norm), "
             f"shape {tuple(self.data.shape)} | IDs: {self.machine_ids} | "
             f"{self.data.nbytes / 1e9:.2f} GB in RAM"
         )

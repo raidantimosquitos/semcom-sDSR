@@ -1,0 +1,6 @@
+# Core
+torch
+torchaudio
+numpy
+scipy
+scikit-learn

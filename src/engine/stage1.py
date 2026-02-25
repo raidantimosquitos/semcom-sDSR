@@ -34,7 +34,7 @@ class Stage1Trainer(BaseTrainer):
         model: nn.Module,
         dataset: Any,
         machine_type: str = "unknown",
-        lambda_recon: float = 1.0,
+        lambda_recon: float = 0.25,
         lr: float = 1e-4,
         lr_warmup_iters: int = 500,
         lr_min: float = 1e-6,
@@ -75,7 +75,7 @@ class Stage1Trainer(BaseTrainer):
         self._last_ckpt_path: Path | None = None
 
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Stage1 | Device: {self.device} | AMP: {self.use_amp} | Params: {n_params:,}")
+        self._tee(f"Stage1 | Device: {self.device} | AMP: {self.use_amp} | Params: {n_params:,}")
 
     def _get_lr(self, step: int, total_steps: int) -> float:
         if step < self.lr_warmup_iters:
@@ -118,19 +118,19 @@ class Stage1Trainer(BaseTrainer):
             "total": total_loss.item(),
             "recon": recon_loss.item(),
             "loss_b": loss_b.item(),
-            "loss_t": loss_t.item(),
-            "lr": lr,
-            "perplexity_t": perp_t.item(),
+            "loss_t": loss_t.item(),            
             "perplexity_b": perp_b.item(),
+            "perplexity_t": perp_t.item(),
+            "lr": lr,
         }
 
     def _log(self, avg: dict[str, float], its_sec: float) -> None:
-        print(
+        self._tee(
             f"[{self.global_step:>6d}] "
             f"loss={avg['total']:.4f}  recon={avg['recon']:.4f}  "
             f"loss_b={avg['loss_b']:.4f}  loss_t={avg['loss_t']:.4f}  "
-            f"lr={avg['lr']:.2e}  perp_t={avg['perplexity_t']:.2f}  "
-            f"perp_b={avg['perplexity_b']:.2f}  ({its_sec:.1f} it/s)"
+            f"perp_b={avg['perplexity_b']:.2f} perp_t={avg['perplexity_t']:.2f}"
+            f"lr={avg['lr']:.2e} ({its_sec:.1f} it/s)"
         )
 
     def _save_checkpoint(
@@ -149,12 +149,12 @@ class Stage1Trainer(BaseTrainer):
         latest_path = self.ckpt_dir / f"stage1_{self.machine_type}_{tag}.pt"
         if self._last_ckpt_path is not None and self._last_ckpt_path.exists():
             self._last_ckpt_path.unlink()
-            print(f"  Deleted previous checkpoint: {self._last_ckpt_path}")
+            self._tee(f"  Deleted previous checkpoint: {self._last_ckpt_path}")
 
         # 2. Save current model as latest
         torch.save(payload, latest_path)
         self._last_ckpt_path = latest_path
-        print(f"  Checkpoint saved: {latest_path}")
+        self._tee(f"  Checkpoint saved: {latest_path}")
 
         # 3. Update best_model if we improved
         total_loss = avg.get("total", float("inf")) if avg else float("inf")
@@ -162,7 +162,7 @@ class Stage1Trainer(BaseTrainer):
             self.best_total_loss = total_loss
             best_path = self.ckpt_dir / f"stage1_{self.machine_type}_best.pt"
             torch.save(payload, best_path)
-            print(f"  New best model saved: {best_path} (loss={total_loss:.4f})")
+            self._tee(f"  New best model saved: {best_path} (loss={total_loss:.4f})")
 
     def _load_checkpoint(self, path: str) -> None:
         ckpt = torch.load(path, map_location=self.device)
@@ -172,7 +172,7 @@ class Stage1Trainer(BaseTrainer):
         self.global_step = ckpt["global_step"]
         if "best_total_loss" in ckpt:
             self.best_total_loss = ckpt["best_total_loss"]
-        print(f"Resumed from {path} at step {self.global_step}")
+        self._tee(f"Resumed from {path} at step {self.global_step}")
 
 
 # Backward compatibility alias

@@ -14,6 +14,7 @@ from typing import Literal
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.ndimage import rotate as ndimage_rotate
 
 from .perlin import rand_perlin_2d_np
 
@@ -21,7 +22,8 @@ from .perlin import rand_perlin_2d_np
 class PerlinNoiseStrategy:
     """
     Generate anomaly map by thresholding Perlin noise (sDSR / MVTec style).
-    Produces blob-like anomaly regions.
+    Produces blob-like anomaly regions. Optionally rotates the noise before
+    thresholding (matching original DSR) for more varied blob orientations.
     """
 
     def __init__(
@@ -30,6 +32,8 @@ class PerlinNoiseStrategy:
         q_shape: tuple[int, int],
         threshold: float = 0.5,
         perlin_scale_range: tuple[int, int] = (0, 6),
+        rotate: bool = True,
+        rotation_range: tuple[float, float] = (-90.0, 90.0),
     ) -> None:
         """
         Args:
@@ -37,11 +41,15 @@ class PerlinNoiseStrategy:
             q_shape: (H_q, W_q) quantized feature map spatial dimensions
             threshold: binarization threshold
             perlin_scale_range: (min_exp, max_exp) for res = 2^randint(min_exp, max_exp)
+            rotate: if True, apply random 2D rotation to noise before thresholding
+            rotation_range: (min_deg, max_deg) for rotation angle in degrees
         """
         self.spectrogram_shape = spectrogram_shape
         self.q_shape = q_shape
         self.threshold = threshold
         self.perlin_scale_range = perlin_scale_range
+        self.rotate = rotate
+        self.rotation_range = rotation_range
 
     def __call__(
         self,
@@ -49,7 +57,8 @@ class PerlinNoiseStrategy:
         device: torch.device | str,
     ) -> torch.Tensor:
         """
-        Generate anomaly map M.
+        Generate anomaly map M. Each mask uses Perlin noise (optionally rotated)
+        then binarized and resized to q_shape.
 
         Returns:
             M: (B, 1, H_q, W_q) binary mask
@@ -60,6 +69,11 @@ class PerlinNoiseStrategy:
             res_x = 2 ** random.randint(*self.perlin_scale_range)
             res = (res_y, res_x)
             noise = rand_perlin_2d_np(self.spectrogram_shape, res)
+            if self.rotate:
+                angle = random.uniform(*self.rotation_range)
+                noise = ndimage_rotate(
+                    noise, angle, reshape=False, order=1, mode="constant", cval=0
+                )
             binary = (noise > self.threshold).astype(np.float32)
             mask = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)
             masks.append(mask)
@@ -143,6 +157,8 @@ class AudioSpecificStrategy:
 class AnomalyMapGenerator:
     """
     Generate anomaly map M for training using one of two strategies.
+    When force_anomaly=False, each sample gets an independent draw: with
+    probability zero_mask_prob a zero mask (no anomaly), else a generated mask.
     """
 
     def __init__(
@@ -160,7 +176,7 @@ class AnomalyMapGenerator:
             spectrogram_shape: (n_mels, T)
             q_shape: (H_q, W_q)
             n_mels, T: required for audio_specific
-            zero_mask_prob: probability of returning all-zero mask (no anomaly)
+            zero_mask_prob: per-sample probability of returning a zero mask (no anomaly)
         """
         self.strategy_name = strategy
         self.zero_mask_prob = zero_mask_prob
@@ -176,6 +192,20 @@ class AnomalyMapGenerator:
             else None
         )
 
+    def _generate_one(self, device: torch.device | str) -> torch.Tensor:
+        """Generate a single non-zero mask (1, 1, H, W)."""
+        if self.strategy_name == "perlin":
+            assert self.perlin is not None
+            return self.perlin(1, device)
+        if self.strategy_name == "audio_specific":
+            assert self.audio_specific is not None
+            return self.audio_specific(1, device)
+        if random.random() < 0.5:
+            assert self.perlin is not None
+            return self.perlin(1, device)
+        assert self.audio_specific is not None
+        return self.audio_specific(1, device)
+
     def generate(
         self,
         batch_size: int,
@@ -185,23 +215,39 @@ class AnomalyMapGenerator:
         """
         Generate anomaly map M.
 
+        When force_anomaly=False, each sample is decided independently: with
+        probability zero_mask_prob the mask is all zeros, else one mask from
+        the strategy (per-sample 50% no-anomaly, matching original DSR).
+
         Args:
             batch_size: number of masks to generate
             device: torch device
             force_anomaly: if True, skip zero_mask_prob and always generate real masks
-                          (used when half the batch must have simulated anomalies)
 
         Returns:
             M: (B, 1, H_q, W_q) binary mask
         """
-        if not force_anomaly and random.random() < self.zero_mask_prob:
-            return torch.zeros(
-                batch_size, 1, self.q_shape[0], self.q_shape[1], device=device
-            )
-        if self.strategy_name == "perlin":
-            return self.perlin(batch_size, device)
-        if self.strategy_name == "audio_specific":
+        if force_anomaly:
+            if self.strategy_name == "perlin":
+                assert self.perlin is not None
+                return self.perlin(batch_size, device)
+            if self.strategy_name == "audio_specific":
+                assert self.audio_specific is not None
+                return self.audio_specific(batch_size, device)
+            if random.random() < 0.5:
+                assert self.perlin is not None
+                return self.perlin(batch_size, device)
+            assert self.audio_specific is not None
             return self.audio_specific(batch_size, device)
-        if random.random() < 0.5:
-            return self.perlin(batch_size, device)
-        return self.audio_specific(batch_size, device)
+
+        masks = []
+        for _ in range(batch_size):
+            if random.random() < self.zero_mask_prob:
+                masks.append(
+                    torch.zeros(
+                        1, 1, self.q_shape[0], self.q_shape[1], device=device
+                    )
+                )
+            else:
+                masks.append(self._generate_one(device))
+        return torch.cat(masks, dim=0)
