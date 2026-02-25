@@ -4,7 +4,7 @@ Base trainer: shared training loop, checkpointing, and logging.
 Designed for generalization: subclasses implement _step(batch, step, total_steps).
 Model interfaces (for swapping encoder/DSR implementations):
   - Stage 1: forward(x) -> (loss_b, loss_t, recon, q_top, q_bot, perp_t, perp_b)
-  - Stage 2: forward_train(x) -> dict with m_out, x_s, M, x
+  - Stage 2: forward_train(x, M_gt) -> dict with m_out, x_s, M, x
   - Evaluation: forward(x) -> M_out (B, 2, H, W) segmentation logits
 """
 

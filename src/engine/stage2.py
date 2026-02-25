@@ -1,7 +1,7 @@
 """
 Stage 2 trainer: sDSR anomaly detection.
 
-Model interface: forward_train(x) -> dict with m_out, x_s, M, x
+Model interface: forward_train(x, M_gt) -> dict with m_out, x_s, M, x
 Requires pre-trained encoder (vq_vae) loaded from Stage 1.
 """
 
@@ -24,7 +24,7 @@ class Stage2Trainer(BaseTrainer):
     """
     Trainer for Stage 2 (sDSR anomaly detection).
 
-    Model must implement forward_train(x) returning dict with:
+    Model must implement forward_train(x, M_gt) returning dict with:
         m_out, x_s, M, x
     Only trainable params (object_decoder, anomaly_detection) are optimized.
     """
@@ -97,11 +97,8 @@ class Stage2Trainer(BaseTrainer):
         return self.lr_min + cosine * (self.lr - self.lr_min)
 
     def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
-        if isinstance(batch, (list, tuple)):
-            x = batch[0]
-        else:
-            x = batch
-        x = x.to(self.device, non_blocking=True)
+        x = batch["image"].to(self.device, non_blocking=True)
+        M_gt = batch["anomaly_mask"].to(self.device, non_blocking=True)
 
         lr = self._get_lr(step, total_steps)
         for pg in self.optimizer.param_groups:
@@ -110,7 +107,7 @@ class Stage2Trainer(BaseTrainer):
         self.optimizer.zero_grad(set_to_none=True)
 
         with autocast(device_type=self.device.type, enabled=self.use_amp):
-            out = self.model.forward_train(x)
+            out = self.model.forward_train(x, M_gt=M_gt)
             m_out = out["m_out"]
             x_s = out["x_s"]
             M = out["M"]

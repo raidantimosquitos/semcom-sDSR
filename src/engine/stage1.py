@@ -173,7 +173,3 @@ class Stage1Trainer(BaseTrainer):
         if "best_total_loss" in ckpt:
             self.best_total_loss = ckpt["best_total_loss"]
         self._tee(f"Resumed from {path} at step {self.global_step}")
-
-
-# Backward compatibility alias
-VQ_VAE_2LayerTrainer = Stage1Trainer
