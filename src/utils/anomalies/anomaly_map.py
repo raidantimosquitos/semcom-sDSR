@@ -1,9 +1,11 @@
 """
 Anomaly map generation for sDSR training.
 
-Two strategies (paper Section):
-1. PerlinNoiseStrategy: threshold/binarize Perlin noise (DSR-style)
-2. AudioSpecificStrategy: choose frequency band + time segments
+Two strategies (same interface as original DSR mask generation):
+1. PerlinNoiseStrategy: threshold/binarize Perlin noise (DSR-style, from
+   VitjanZ/DSR_anomaly_detection perlin.py)
+2. AudioSpecificStrategy: choose frequency band + time segments (audio-domain
+   analogue; same output format: __call__(batch_size, device) -> (B, 1, H, W))
 """
 
 from __future__ import annotations

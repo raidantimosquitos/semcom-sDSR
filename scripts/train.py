@@ -16,7 +16,7 @@ from pathlib import Path
 
 import torch
 
-from src.data.dataset import DCASE2020Task2LogMelDataset
+from src.data.dataset import DCASE2020Task2LogMelDataset, AudDSRAnomTrainDataset
 from src.engine.stage1 import Stage1Trainer
 from src.engine.stage2 import Stage2Trainer
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     s2.add_argument("--lambda_recon", type=float, default=10.0)
     s2.add_argument("--lambda_focal", type=float, default=1.0)
     s2.add_argument("--lambda_sub", type=float, default=1.0, help="Weight for subspace restriction loss L2(F̃, Q)")
+    s2.add_argument("--anomaly_strategy", type=str, default="both", choices=["perlin", "audio_specific", "both"], help="Synthetic anomaly mask strategy at dataset level")
     s2.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
     # Full
@@ -135,6 +136,12 @@ def run_stage2(args: argparse.Namespace) -> None:
     )
     _, _, n_mels, T = q_vae_dataset.data.shape
 
+    train_dataset = AudDSRAnomTrainDataset(
+        q_vae_dataset,
+        strategy=args.anomaly_strategy,
+        zero_mask_prob=0.5,
+    )
+
     # Load VQ-VAE from Stage 1
     vq_vae = build_vq_vae(n_mels, T)
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu")
@@ -143,7 +150,7 @@ def run_stage2(args: argparse.Namespace) -> None:
     model = build_s_dsr(vq_vae, n_mels, T)
     trainer = Stage2Trainer(
         model=model,
-        dataset=q_vae_dataset,
+        dataset=train_dataset,
         machine_type=args.machine_type,
         lambda_recon=args.lambda_recon,
         lambda_focal=args.lambda_focal,
@@ -197,6 +204,7 @@ def run_full(args: argparse.Namespace) -> None:
         lambda_recon=10.0,
         lambda_focal=1.0,
         lambda_sub=1.0,
+        anomaly_strategy="both",
         resume=None,
     )
     run_stage2(stage2_args)

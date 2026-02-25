@@ -15,7 +15,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..vq_vae.autoencoders import VQ_VAE_2Layer
-from ...utils.anomalies import AnomalyMapGenerator
 
 from .object_specific_decoder import ObjectSpecificDecoder
 from .anomaly_generation import AnomalyGeneration
@@ -32,11 +31,9 @@ class sDSRConfig:
     num_residual_hiddens: int = 64
     n_mels: int = 128
     T: int = 320
-    anomaly_map_strategy: Literal["perlin", "audio_specific", "both"] = "both"
     anomaly_sampling: Literal["distant", "uniform"] = "uniform"
     anomaly_strength_min: float = 0.2
     anomaly_strength_max: float = 1.0
-    zero_mask_prob: float = 0.5
     use_subspace_restriction: bool = True
 
 
@@ -83,17 +80,7 @@ class sDSR(nn.Module):
             base_width=64,
         )
 
-        # Anomaly map and anomaly generation (training only)
-        q_shape = self._get_q_shape(cfg.n_mels, cfg.T)
-        spectrogram_shape = (cfg.n_mels, cfg.T)
-        self._anomaly_map_generator = AnomalyMapGenerator(
-            strategy=cfg.anomaly_map_strategy,
-            spectrogram_shape=spectrogram_shape,
-            q_shape=q_shape,
-            n_mels=cfg.n_mels,
-            T=cfg.T,
-            zero_mask_prob=cfg.zero_mask_prob,
-        )
+        # Anomaly generation (training only): codebook replacement using dataset-provided mask
         self._anomaly_generation = AnomalyGeneration(sampling=cfg.anomaly_sampling)
 
         self._freeze_stage1()
@@ -150,25 +137,24 @@ class sDSR(nn.Module):
     def forward_train(
         self,
         x: torch.Tensor,
-        M_gt: torch.Tensor | None = None,
+        M_gt: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """
         Training forward pass (stage 2).
 
-        Generates anomaly map M if not provided (per sample with 50% probability
-        of zero mask, no fixed half-batch split), augments q with synthetic
-        anomalies, and returns outputs for loss computation.
+        Uses the dataset-provided anomaly map M_gt to augment q with synthetic
+        anomalies (codebook replacement), then returns outputs for loss computation.
 
         Args:
             x: (B, 1, n_mels, T) Mel spectrogram (normal)
-            M_gt: (B, 1, H, W) optional ground-truth anomaly map; if None, generated
+            M_gt: (B, 1, n_mels, T) ground-truth anomaly map from dataset
 
         Returns:
             dict with:
                 m_out: (B, 2, n_mels, T) segmentation logits
                 x_g: (B, 1, n_mels, T) general reconstruction
                 x_s: (B, 1, n_mels, T) object-specific reconstruction
-                M: (B, 1, H_q, W_q) anomaly map used for augmentation (for focal loss target)
+                M: (B, 1, n_mels, T) anomaly map for focal loss target
                 x: input (for L2 target)
         """
         batch_size = x.shape[0]
@@ -177,15 +163,7 @@ class sDSR(nn.Module):
             self.config.n_mels if x.shape[-2] == self.config.n_mels else x.shape[-2],
             x.shape[-1],
         )
-
-        if M_gt is None:
-            M = self._anomaly_map_generator.generate(
-                batch_size, device, force_anomaly=False
-            )
-        else:
-            M = F.interpolate(
-                M_gt.float(), size=q_shape, mode="nearest"
-            )
+        M = F.interpolate(M_gt.float(), size=q_shape, mode="nearest")
 
         q_bot, q_top, z_bot, z_top = self._vq_vae.encode_with_prequant(x)
         vq_bot = self._vq_vae._vq_bot
@@ -320,7 +298,9 @@ if __name__ == "__main__":
     print("Training path shapes:")
     print("-" * 50)
     model.train()
-    out = model.forward_train(x)
+    M_gt = _torch.zeros(2, 1, 128, 320, device=device)
+    M_gt[0] = 1.0  # one sample with anomaly mask for testing
+    out = model.forward_train(x, M_gt=M_gt)
     _print_shape("forward_train -> m_out", out["m_out"])
     _print_shape("forward_train -> x_g", out["x_g"])
     _print_shape("forward_train -> x_s", out["x_s"])

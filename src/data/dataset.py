@@ -1,12 +1,16 @@
+import random
 import re
 import math
 from pathlib import Path
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
 import torchaudio
 import torchaudio.transforms as T
 from torch.utils.data import DataLoader, Dataset
+
+from ..utils.anomalies import AnomalyMapGenerator
 
 
 class DCASE2020Task2LogMelDataset(Dataset):
@@ -210,6 +214,65 @@ class DCASE2020Task2LogMelDataset(Dataset):
     
     def _denormalize(self, data: torch.Tensor) -> torch.Tensor:
         return data * (self.std + 1e-8) + self.mean
+
+
+class AudDSRAnomTrainDataset(Dataset):
+    """
+    Stage-2 training dataset: wraps a normal spectrogram dataset and adds
+    synthetic anomaly masks at dataset level (DSR-style).
+
+    Each __getitem__ returns a dict: image (spectrogram), anomaly_mask,
+    has_anomaly, label, machine_id. With probability zero_mask_prob the mask
+    is zero (normal); otherwise a mask is generated with the chosen strategy
+    (perlin, audio_specific, or both). The model uses the mask for codebook
+    replacement in feature space.
+    """
+
+    def __init__(
+        self,
+        base_dataset: DCASE2020Task2LogMelDataset,
+        strategy: Literal["perlin", "audio_specific", "both"] = "both",
+        zero_mask_prob: float = 0.5,
+    ) -> None:
+        self.base = base_dataset
+        self.strategy = strategy
+        self.zero_mask_prob = zero_mask_prob
+        self.machine_type = getattr(base_dataset, "machine_type", None)
+        # Spectrogram space: (n_mels, T); mask shape (1, 1, n_mels, T)
+        _, _, n_mels, T = base_dataset.data.shape
+        self.n_mels = n_mels
+        self.T = T
+        spectrogram_shape = (n_mels, T)
+        self._mask_generator = AnomalyMapGenerator(
+            strategy=strategy,
+            spectrogram_shape=spectrogram_shape,
+            q_shape=spectrogram_shape,
+            n_mels=n_mels,
+            T=T,
+            zero_mask_prob=0.0,
+        )
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor | int | str]:
+        spectrogram, label, machine_id = self.base[idx]
+        n_mels, T = self.n_mels, self.T
+        if random.random() < self.zero_mask_prob:
+            mask = torch.zeros(1, 1, n_mels, T, dtype=torch.float32)
+            has_anomaly = 0.0
+        else:
+            mask = self._mask_generator.generate(
+                1, device="cpu", force_anomaly=True
+            )
+            has_anomaly = 1.0
+        return {
+            "image": spectrogram,
+            "anomaly_mask": mask.squeeze(0),
+            "has_anomaly": torch.tensor(has_anomaly, dtype=torch.float32),
+            "label": label,
+            "machine_id": machine_id,
+        }
 
 
 class DCASE2020Task2TestDataset(Dataset):
