@@ -13,6 +13,7 @@ from typing import Any
 
 import torch
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
 try:
     from sklearn.metrics import roc_auc_score
@@ -66,10 +67,11 @@ class AnomalyEvaluator:
         logits_anomaly = m_out[:, 1]  # (B, H, W)
         B = logits_anomaly.shape[0]
         flat = logits_anomaly.view(B, -1)
-        scores_mean = flat.mean(dim=1).cpu()
-        scores_max = flat.max(dim=1).values.cpu()
+        smoothed = F.avg_pool2d(flat, kernel_size=21, stride=1, padding=10)
+        scores_mean = smoothed.mean(dim=1).cpu()
+        scores_max = smoothed.max(dim=1).values.cpu()
         # 95th percentile per sample
-        p95 = torch.quantile(flat.float(), 0.95, dim=1).cpu()
+        p95 = torch.quantile(smoothed.float(), 0.95, dim=1).cpu()
         return scores_mean, scores_max, p95
 
     def evaluate(self) -> dict[str, Any]:
