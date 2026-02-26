@@ -155,7 +155,10 @@ class sDSR(nn.Module):
                 x_g: (B, 1, n_mels, T) general reconstruction
                 x_s: (B, 1, n_mels, T) object-specific reconstruction
                 M: (B, 1, n_mels, T) anomaly map for focal loss target
-                x: input (for L2 target)
+                x: input (for L2 reconstruction target)
+                When subspace restriction is enabled, also:
+                recon_feat_bot, recon_feat_top, q_bot, q_top — for full-batch
+                subspace loss (all samples: normal and anomalous).
         """
         batch_size = x.shape[0]
         device = x.device
@@ -183,7 +186,7 @@ class sDSR(nn.Module):
             strength_bot=strength_bot, strength_top=strength_top,
         )
 
-        # Per-sample randomization: anomaly on both levels, only top, or only bottom (original DSR)
+        # Per-sample randomization: anomaly on both levels, only top, or only bottom
         use_both = torch.randint(
             0, 2, (batch_size,), device=device
         ).float().view(batch_size, 1, 1, 1)
@@ -217,7 +220,7 @@ class sDSR(nn.Module):
         x_s, aux = out_dec
         m_out = self._anomaly_detection(x_g, x_s.detach())
 
-        # GT mask for focal loss: per-level resize then blend with use_both/use_lo (original DSR)
+        # GT mask for focal loss: per-level resize then blend with use_both/use_lo
         M_top = F.interpolate(M.float(), size=q_top.shape[-2:], mode="nearest")
         M_bot = F.interpolate(M.float(), size=q_bot.shape[-2:], mode="nearest")
         M_top_for_loss = F.interpolate(M_top, size=x.shape[-2:], mode="nearest")

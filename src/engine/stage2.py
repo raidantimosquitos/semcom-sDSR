@@ -3,6 +3,10 @@ Stage 2 trainer: sDSR anomaly detection.
 
 Model interface: forward_train(x, M_gt) -> dict with m_out, x_s, M, x
 Requires pre-trained encoder (vq_vae) loaded from Stage 1.
+
+Reconstruction and subspace restriction losses are computed on the full batch
+(all samples: normal and synthetically anomalous) so that at inference the
+object decoder and subspace behave correctly for both normal and anomalous inputs.
 """
 
 from __future__ import annotations
@@ -97,6 +101,12 @@ class Stage2Trainer(BaseTrainer):
         return self.lr_min + cosine * (self.lr - self.lr_min)
 
     def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
+        """
+        One training step. Reconstruction and subspace losses are computed on the
+        full batch (all samples: normal and synthetically anomalous) so that the
+        object decoder and subspace restriction module learn identity-like behavior
+        on normal codes and correction on anomalous codes.
+        """
         x = batch["image"].to(self.device, non_blocking=True)
         M_gt = batch["anomaly_mask"].to(self.device, non_blocking=True)
 
@@ -111,20 +121,35 @@ class Stage2Trainer(BaseTrainer):
             m_out = out["m_out"]
             x_s = out["x_s"]
             M = out["M"]
-            has_anom = (M_gt.sum(dim=(1, 2, 3)) > 0)
-            if has_anom.any():
-                loss_recon = F.mse_loss(out["x"][has_anom], out["x_s"][has_anom])
-            else:
-                loss_recon = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+
+            # Reconstruction: L2(x, x_s) on full batch (normal + anomalous).
+            # For normal samples: object decoder learns x_s ≈ x. For anomalous:
+            # decoder learns to reconstruct original normal x from corrected codes.
+            loss_recon = F.mse_loss(out["x"], x_s)
             loss_focal = self.focal_loss(m_out, M)
 
             total_loss = (
                 self.lambda_recon * loss_recon
                 + self.lambda_focal * loss_focal
             )
-            if self.lambda_sub != 0 and "recon_feat_bot" in out and "recon_feat_top" in out and "q_bot" in out and "q_top" in out and has_anom.any():
-                loss_sub_bot = F.mse_loss(out["recon_feat_bot"][has_anom], out["q_bot"].detach()[has_anom])
-                loss_sub_top = F.mse_loss(out["recon_feat_top"][has_anom], out["q_top"].detach()[has_anom])
+
+            # Subspace restriction: L2(recon_feat, q) on full batch (normal + anomalous).
+            # For normal samples: subspace learns identity. For anomalous: learns to
+            # map modified codes back to clean q. Requires model to return aux from
+            # object decoder when subspace is enabled.
+            has_subspace_aux = (
+                "recon_feat_bot" in out
+                and "recon_feat_top" in out
+                and "q_bot" in out
+                and "q_top" in out
+            )
+            if self.lambda_sub != 0 and has_subspace_aux:
+                loss_sub_bot = F.mse_loss(
+                    out["recon_feat_bot"], out["q_bot"].detach()
+                )
+                loss_sub_top = F.mse_loss(
+                    out["recon_feat_top"], out["q_top"].detach()
+                )
                 loss_sub = 0.5 * loss_sub_bot + 0.5 * loss_sub_top
                 total_loss = total_loss + self.lambda_sub * loss_sub
                 sub_value = loss_sub.item()
