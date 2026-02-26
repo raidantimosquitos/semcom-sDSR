@@ -144,7 +144,7 @@ def run_stage2(args: argparse.Namespace) -> None:
 
     # Load VQ-VAE from Stage 1
     vq_vae = build_vq_vae(n_mels, T)
-    ckpt = torch.load(args.stage1_ckpt, map_location="cpu")
+    ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
     vq_vae.load_state_dict(ckpt["model_state_dict"])
 
     model = build_s_dsr(vq_vae, n_mels, T)

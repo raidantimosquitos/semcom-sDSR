@@ -70,7 +70,7 @@ class FeatureDecoder(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.db2 = nn.Sequential(
-            nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
+            nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
@@ -84,7 +84,7 @@ class FeatureDecoder(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.db3 = nn.Sequential(
-            nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
+            nn.Conv2d(base_width * 2, base_width, kernel_size=3, padding=1),
             norm(base_width),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
@@ -100,9 +100,9 @@ class FeatureDecoder(nn.Module):
         b3: torch.Tensor,
     ) -> torch.Tensor:
         up2 = self.up2(b3)
-        db2 = self.db2(up2)
-        up3 = self.up3(db2)
-        db3 = self.db3(up3)
+        db2 = self.db2(torch.cat([up2, b2], dim=1))  # skip from b2
+        up3 = self.up3(db2)  # skip from b2
+        db3 = self.db3(torch.cat([up3, b1], dim=1))  # skip from b1
         return self.fin_out(db3)
 
 
@@ -138,7 +138,7 @@ class SubspaceRestrictionModule(nn.Module):
         self._unet = SubspaceRestrictionNetwork(
             in_channels=embedding_size,
             out_channels=embedding_size,
-            base_width=embedding_size,
+            base_width=embedding_size // 2,  # half the width to reduce parameters
         )
 
     def forward(
