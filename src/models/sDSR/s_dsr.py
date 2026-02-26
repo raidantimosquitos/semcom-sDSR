@@ -215,7 +215,7 @@ class sDSR(nn.Module):
             return_aux=True,
         )
         x_s, aux = out_dec
-        m_out = self._anomaly_detection(x_g, x_s)
+        m_out = self._anomaly_detection(x_g, x_s.detach())
 
         # GT mask for focal loss: per-level resize then blend with use_both/use_lo (original DSR)
         M_top = F.interpolate(M.float(), size=q_top.shape[-2:], mode="nearest")

@@ -111,16 +111,20 @@ class Stage2Trainer(BaseTrainer):
             m_out = out["m_out"]
             x_s = out["x_s"]
             M = out["M"]
-            loss_recon = F.mse_loss(out["x"], x_s)
+            has_anom = (M_gt.sum(dim=(1, 2, 3)) > 0)
+            if has_anom.any():
+                loss_recon = F.mse_loss(out["x"][has_anom], out["x_s"][has_anom])
+            else:
+                loss_recon = torch.tensor(0.0, device=x.device, dtype=x.dtype)
             loss_focal = self.focal_loss(m_out, M)
 
             total_loss = (
                 self.lambda_recon * loss_recon
                 + self.lambda_focal * loss_focal
             )
-            if self.lambda_sub != 0 and "recon_feat_bot" in out and "recon_feat_top" in out and "q_bot" in out and "q_top" in out:
-                loss_sub_bot = F.mse_loss(out["recon_feat_bot"], out["q_bot"].detach())
-                loss_sub_top = F.mse_loss(out["recon_feat_top"], out["q_top"].detach())
+            if self.lambda_sub != 0 and "recon_feat_bot" in out and "recon_feat_top" in out and "q_bot" in out and "q_top" in out and has_anom.any():
+                loss_sub_bot = F.mse_loss(out["recon_feat_bot"][has_anom], out["q_bot"].detach()[has_anom])
+                loss_sub_top = F.mse_loss(out["recon_feat_top"][has_anom], out["q_top"].detach()[has_anom])
                 loss_sub = 0.5 * loss_sub_bot + 0.5 * loss_sub_top
                 total_loss = total_loss + self.lambda_sub * loss_sub
                 sub_value = loss_sub.item()
