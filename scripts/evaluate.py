@@ -99,6 +99,8 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
     )
     model = build_s_dsr(n_mels, T, vq_vae)
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=True)
+    print(ckpt.keys())
+    exit()
     model.load_state_dict(ckpt["model_state_dict"])
 
     evaluator = AnomalyEvaluator(
