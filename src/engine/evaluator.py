@@ -97,7 +97,6 @@ class AnomalyEvaluator:
                     scores_by_id[mid].append((sc_mean[i].item(), sc_max[i].item(), sc_p95[i].item(), label))
 
         result: dict[str, Any] = {self.machine_type: {}}
-        all_mean, all_max, all_p95, all_labels = [], [], [], []
 
         for mid in sorted(scores_by_id.keys()):
             pairs = scores_by_id[mid]
@@ -105,10 +104,6 @@ class AnomalyEvaluator:
             y_mean = [p[0] for p in pairs]
             y_max = [p[1] for p in pairs]
             y_p95 = [p[2] for p in pairs]
-            all_mean.extend(y_mean)
-            all_max.extend(y_max)
-            all_p95.extend(y_p95)
-            all_labels.extend(y_true)
 
             auc_mean = roc_auc_score(y_true, y_mean) if roc_auc_score else float("nan")
             pauc_mean = _partial_auc(y_true, y_mean, self.pauc_max_fpr)
@@ -126,23 +121,16 @@ class AnomalyEvaluator:
                 "pauc_p95": pauc_p95,
             }
 
-        if all_mean and all_labels:
-            avg_auc = roc_auc_score(all_labels, all_mean) if roc_auc_score else float("nan")
-            avg_pauc = _partial_auc(all_labels, all_mean, self.pauc_max_fpr)
-            avg_auc_max = roc_auc_score(all_labels, all_max) if roc_auc_score else float("nan")
-            avg_pauc_max = _partial_auc(all_labels, all_max, self.pauc_max_fpr)
-            avg_auc_p95 = roc_auc_score(all_labels, all_p95) if roc_auc_score else float("nan")
-            avg_pauc_p95 = _partial_auc(all_labels, all_p95, self.pauc_max_fpr)
-        else:
-            avg_auc = avg_pauc = avg_auc_max = avg_pauc_max = avg_auc_p95 = avg_pauc_p95 = float("nan")
-
+        # Average over machine IDs (paper: "average metrics over all machine IDs for a specific machine type")
+        ids = list(result[self.machine_type].keys())
+        n = len(ids)
         result[self.machine_type]["average"] = {
-            "auc": avg_auc,
-            "pauc": avg_pauc,
-            "auc_max": avg_auc_max,
-            "pauc_max": avg_pauc_max,
-            "auc_p95": avg_auc_p95,
-            "pauc_p95": avg_pauc_p95,
+            "auc": sum(result[self.machine_type][mid]["auc"] for mid in ids) / n if n else float("nan"),
+            "pauc": sum(result[self.machine_type][mid]["pauc"] for mid in ids) / n if n else float("nan"),
+            "auc_max": sum(result[self.machine_type][mid]["auc_max"] for mid in ids) / n if n else float("nan"),
+            "pauc_max": sum(result[self.machine_type][mid]["pauc_max"] for mid in ids) / n if n else float("nan"),
+            "auc_p95": sum(result[self.machine_type][mid]["auc_p95"] for mid in ids) / n if n else float("nan"),
+            "pauc_p95": sum(result[self.machine_type][mid]["pauc_p95"] for mid in ids) / n if n else float("nan"),
         }
 
         return result
