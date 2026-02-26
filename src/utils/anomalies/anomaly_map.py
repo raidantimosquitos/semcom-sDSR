@@ -101,7 +101,7 @@ class AudioSpecificStrategy:
         min_band_fraction: float = 0.1,
         max_band_fraction: float = 0.5,
         min_segments: int = 1,
-        max_segments: int = 5,
+        max_segments: int = 10,
     ) -> None:
         """
         Args:
@@ -202,7 +202,7 @@ class AnomalyMapGenerator:
         if self.strategy_name == "audio_specific":
             assert self.audio_specific is not None
             return self.audio_specific(1, device)
-        if random.random() < 0.5:
+        if random.random() < 0.3:
             assert self.perlin is not None
             return self.perlin(1, device)
         assert self.audio_specific is not None
@@ -236,7 +236,7 @@ class AnomalyMapGenerator:
             if self.strategy_name == "audio_specific":
                 assert self.audio_specific is not None
                 return self.audio_specific(batch_size, device)
-            if random.random() < 0.5:
+            if random.random() < 0.3:
                 assert self.perlin is not None
                 return self.perlin(batch_size, device)
             assert self.audio_specific is not None
