@@ -21,12 +21,12 @@ except ImportError:
     roc_auc_score = None
 
 
-def _partial_auc(y_true: list[float], y_score: list[float], max_fpr: float) -> float:
+def _partial_auc(y_true: list[float] | list[int], y_score: list[float], max_fpr: float) -> float:
     """Partial AUC with max_fpr (default 0.1). Uses sklearn if available."""
     if roc_auc_score is None:
         return float("nan")
     try:
-        return roc_auc_score(y_true, y_score, max_fpr=max_fpr)
+        return float(roc_auc_score(y_true, y_score, max_fpr=max_fpr))
     except ValueError:
         return float("nan")
 

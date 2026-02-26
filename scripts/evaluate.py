@@ -110,14 +110,8 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
     # Full sDSR: Stage 1 modules (frozen in training) + Stage 2 modules
     model = build_s_dsr(n_mels, T, vq_vae)
 
-    # Stage 2: load only Object Specific Decoder and Anomaly Detector
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
-    stage2_sd = stage2["model_state_dict"]
-    stage2_keys = (
-        {k for k in stage2_sd if k.startswith("_object_decoder.")}
-        | {k for k in stage2_sd if k.startswith("_anomaly_detection.")}
-    )
-    model.load_state_dict({k: stage2_sd[k] for k in stage2_keys}, strict=False)
+    model.load_state_dict(stage2["model_state_dict"])
 
     evaluator = AnomalyEvaluator(
         model=model,
