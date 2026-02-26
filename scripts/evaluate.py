@@ -92,7 +92,7 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         num_hiddens=128,
         num_residual_layers=2,
         num_residual_hiddens=64,
-        num_embeddings=(4096, 4096),
+        num_embeddings=(1024, 4096),
         embedding_dim=128,
         commitment_cost=0.25,
         decay=0.99,
