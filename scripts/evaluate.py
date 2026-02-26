@@ -2,8 +2,13 @@
 """
 Evaluate sDSR on DCASE2020 Task 2 test set.
 
+Uses the two-stage scheme: Stage 1 provides the Discrete Encoder, codebook (VQ1/VQ2),
+and General Object Decoder; Stage 2 provides the Object Specific Decoder and
+Anomaly Detector.
+
 Usage:
-  python scripts/evaluate.py --ckpt checkpoints/stage2/fan/stage2_fan_final.pt \\
+  python scripts/evaluate.py --stage1_ckpt checkpoints/stage1/fan/best.pt \\
+    --stage2_ckpt checkpoints/stage2/fan/stage2_fan_final.pt \\
     --data_path /path/to/dcase --machine_type fan [--output results_fan.csv]
 """
 
@@ -24,11 +29,12 @@ from src.models.sDSR.s_dsr import sDSR, sDSRConfig
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--ckpt", type=str, required=True, help="Stage 2 (sDSR) checkpoint path")
+    p.add_argument("--stage1_ckpt", type=str, required=True, help="Stage 1 checkpoint (encoder, codebook, general decoder)")
+    p.add_argument("--stage2_ckpt", type=str, required=True, help="Stage 2 checkpoint (object-specific decoder, anomaly detector)")
     p.add_argument("--data_path", type=str, required=True, help="Path to DCASE root")
     p.add_argument("--machine_type", type=str, default="fan")
-    p.add_argument("--output", type=str, default=None, help="CSV output path (default: <ckpt_parent>/results/results.csv)")
-    p.add_argument("--plot", type=str, default=None, help="Path to save comparison plot (default: <ckpt_parent>/results/comparison.png)")
+    p.add_argument("--output", type=str, default=None, help="CSV output path (default: <stage2_ckpt_parent>/results/results.csv)")
+    p.add_argument("--plot", type=str, default=None, help="Path to save comparison plot (default: <stage2_ckpt_parent>/results/comparison.png)")
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--batch_size", type=int, default=32)
@@ -48,8 +54,8 @@ def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer) -> sDSR:
 def main() -> None:
     args = parse_args()
 
-    # Results directory: same parent as checkpoint (e.g. checkpoints/stage2/fan/results/)
-    results_dir = Path(args.ckpt).resolve().parent / "results"
+    # Results directory: same parent as stage2 checkpoint (e.g. checkpoints/stage2/fan/results/)
+    results_dir = Path(args.stage2_ckpt).resolve().parent / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
     if args.output is None:
         args.output = str(results_dir / "results.csv")
@@ -88,6 +94,7 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         target_T=train_ds.target_T,
     )
 
+    # Stage 1: encoder, codebook (VQ1/VQ2), and General Object Decoder
     vq_vae = VQ_VAE_2Layer(
         num_hiddens=128,
         num_residual_layers=2,
@@ -97,11 +104,20 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         commitment_cost=0.25,
         decay=0.99,
     )
+    stage1 = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    vq_vae.load_state_dict(stage1["model_state_dict"])
+
+    # Full sDSR: Stage 1 modules (frozen in training) + Stage 2 modules
     model = build_s_dsr(n_mels, T, vq_vae)
-    ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=True)
-    print(ckpt)
-    exit()
-    model.load_state_dict(ckpt["model_state_dict"])
+
+    # Stage 2: load only Object Specific Decoder and Anomaly Detector
+    stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
+    stage2_sd = stage2["model_state_dict"]
+    stage2_keys = (
+        {k for k in stage2_sd if k.startswith("_object_decoder.")}
+        | {k for k in stage2_sd if k.startswith("_anomaly_detection.")}
+    )
+    model.load_state_dict({k: stage2_sd[k] for k in stage2_keys}, strict=False)
 
     evaluator = AnomalyEvaluator(
         model=model,
