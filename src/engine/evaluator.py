@@ -63,16 +63,14 @@ class AnomalyEvaluator:
         Aggregate M_out to per-clip anomaly scores with three methods.
         Returns (scores_mean, scores_max, scores_p95), each (B,).
         """
-        # m_out: (B, 2, H, W), channel 1 = anomaly
-        logits_anomaly = m_out[:, 1]  # (B, H, W)
-        B = logits_anomaly.shape[0]
-        flat = logits_anomaly.view(B, -1)
-        smoothed = F.avg_pool2d(flat, kernel_size=21, stride=1, padding=10)
-        scores_mean = smoothed.mean(dim=1).cpu()
-        scores_max = smoothed.max(dim=1).values.cpu()
-        # 95th percentile per sample
-        p95 = torch.quantile(smoothed.float(), 0.95, dim=1).cpu()
-        return scores_mean, scores_max, p95
+        logits = m_out[:, 1].unsqueeze(1)  # (B, 1, H, W) — add channel dim
+        smoothed = F.avg_pool2d(logits, kernel_size=21, stride=1, padding=10)
+        # smoothed: (B, 1, H, W)
+        flat = smoothed.view(m_out.shape[0], -1)  # (B, H*W)
+        sc_mean = flat.mean(dim=1)
+        sc_max  = flat.max(dim=1).values
+        sc_p95  = flat.kthvalue(max(1, int(0.95 * flat.shape[1])), dim=1).values
+        return sc_mean.cpu(), sc_max.cpu(), sc_p95.cpu()
 
     def evaluate(self) -> dict[str, Any]:
         """

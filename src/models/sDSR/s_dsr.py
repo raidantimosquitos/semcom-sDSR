@@ -222,6 +222,9 @@ class sDSR(nn.Module):
         M_bot = F.interpolate(M.float(), size=q_bot.shape[-2:], mode="nearest")
         M_top_for_loss = F.interpolate(M_top, size=x.shape[-2:], mode="nearest")
         M_bot_for_loss = F.interpolate(M_bot, size=x.shape[-2:], mode="nearest")
+
+        # Union of top and bottom anomaly maps
+        # M_union = torch.clamp(M_top + M_bot, 0, 1)
         M_for_loss = (
             use_both * M_top_for_loss
             + (1 - use_both) * (use_lo * M_top_for_loss + (1 - use_lo) * M_bot_for_loss)
