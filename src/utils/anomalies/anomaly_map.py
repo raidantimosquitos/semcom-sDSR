@@ -98,10 +98,12 @@ class AudioSpecificStrategy:
         q_shape: tuple[int, int],
         n_mels: int,
         T: int,
-        min_band_fraction: float = 0.05,
-        max_band_fraction: float = 0.15,
-        min_segments: int = 10,
-        max_segments: int = 160,
+        min_band_fraction: float = 0.01,
+        max_band_fraction: float = 0.1,
+        min_segments: int = 1,
+        max_segments: int = 10,
+        min_seg_len: int = 5,
+        max_seg_len: int = 60,
     ) -> None:
         """
         Args:
@@ -119,6 +121,8 @@ class AudioSpecificStrategy:
         self.max_band_fraction = max_band_fraction
         self.min_segments = min_segments
         self.max_segments = max_segments
+        self.min_seg_len = min_seg_len
+        self.max_seg_len = max_seg_len
 
     def __call__(
         self,
@@ -141,11 +145,12 @@ class AudioSpecificStrategy:
             band_width = max(1, band_width)
             f_low = random.randint(0, self.n_mels - band_width)
             f_high = min(f_low + band_width, self.n_mels)
-            n_seg = random.randint(self.min_segments, self.max_segments)
+            n_seg = random.randint(self.min_segments, self.max_segments + 1)
             for _ in range(n_seg):
                 seg_len = random.randint(
-                    1, max(1, self.T // 4)
+                    self.min_seg_len, min(self.max_seg_len + 1, self.T)
                 )
+                seg_len = max(1, seg_len)
                 t_start = random.randint(0, max(0, self.T - seg_len))
                 t_end = min(t_start + seg_len, self.T)
                 M[f_low:f_high, t_start:t_end] = 1.0
