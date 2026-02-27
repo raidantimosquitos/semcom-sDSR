@@ -34,7 +34,7 @@ class sDSRConfig:
     anomaly_sampling: Literal["distant", "uniform"] = "distant"
     anomaly_strength_min: float = 0.2
     anomaly_strength_max: float = 1.0
-    use_subspace_restriction: bool = True
+    use_subspace_restriction: bool = False
 
 
 class sDSR(nn.Module):

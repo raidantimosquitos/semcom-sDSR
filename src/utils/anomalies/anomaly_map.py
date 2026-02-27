@@ -207,7 +207,7 @@ class AnomalyMapGenerator:
         if self.strategy_name == "audio_specific":
             assert self.audio_specific is not None
             return self.audio_specific(1, device)
-        if random.random() < 0.3:
+        if random.random() < 0.5:
             assert self.perlin is not None
             return self.perlin(1, device)
         assert self.audio_specific is not None
@@ -241,7 +241,7 @@ class AnomalyMapGenerator:
             if self.strategy_name == "audio_specific":
                 assert self.audio_specific is not None
                 return self.audio_specific(batch_size, device)
-            if random.random() < 0.3:
+            if random.random() < 0.5:
                 assert self.perlin is not None
                 return self.perlin(batch_size, device)
             assert self.audio_specific is not None
