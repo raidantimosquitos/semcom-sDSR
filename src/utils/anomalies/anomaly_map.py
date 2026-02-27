@@ -100,8 +100,8 @@ class AudioSpecificStrategy:
         T: int,
         min_band_fraction: float = 0.1,
         max_band_fraction: float = 0.5,
-        min_segments: int = 1,
-        max_segments: int = 10,
+        min_segments: int = 10,
+        max_segments: int = 160,
     ) -> None:
         """
         Args:
