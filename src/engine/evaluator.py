@@ -64,7 +64,7 @@ class AnomalyEvaluator:
         Returns (scores_mean, scores_max, scores_p95), each (B,).
         """
         logits = m_out[:, 1].unsqueeze(1)  # (B, 1, H, W) — add channel dim
-        smoothed = F.avg_pool2d(logits, kernel_size=7, stride=1, padding=10)
+        smoothed = F.avg_pool2d(logits, kernel_size=7, stride=1, padding=3)
         # smoothed: (B, 1, H, W)
         flat = smoothed.view(m_out.shape[0], -1)  # (B, H*W)
         sc_mean = flat.mean(dim=1)
