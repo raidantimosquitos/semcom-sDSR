@@ -13,7 +13,6 @@ from typing import Any
 
 import torch
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
 
 try:
     from sklearn.metrics import roc_auc_score
@@ -62,11 +61,10 @@ class AnomalyEvaluator:
         """
         Aggregate M_out to per-clip anomaly scores with three methods.
         Returns (scores_mean, scores_max, scores_p95), each (B,).
+        Computed directly from the output mask (no smoothing).
         """
-        logits = m_out[:, 1].unsqueeze(1)  # (B, 1, H, W) — add channel dim
-        smoothed = F.avg_pool2d(logits, kernel_size=7, stride=1, padding=3)
-        # smoothed: (B, 1, H, W)
-        flat = smoothed.view(m_out.shape[0], -1)  # (B, H*W)
+        logits = m_out[:, 1]  # (B, H, W) — anomaly channel
+        flat = logits.view(m_out.shape[0], -1)  # (B, H*W)
         sc_mean = flat.mean(dim=1)
         sc_max  = flat.max(dim=1).values
         sc_p95  = flat.kthvalue(max(1, int(0.95 * flat.shape[1])), dim=1).values
