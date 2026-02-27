@@ -98,8 +98,8 @@ class AudioSpecificStrategy:
         q_shape: tuple[int, int],
         n_mels: int,
         T: int,
-        min_band_fraction: float = 0.1,
-        max_band_fraction: float = 0.5,
+        min_band_fraction: float = 0.05,
+        max_band_fraction: float = 0.15,
         min_segments: int = 10,
         max_segments: int = 160,
     ) -> None:
