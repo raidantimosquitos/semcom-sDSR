@@ -157,7 +157,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
         root_path = Path(root)
         all_spectrograms: list[torch.Tensor] = []
         all_machine_id_strs: list[str] = []
-        min_T = 0
+        min_T: int | None = None
 
         for mt in sorted(machine_types):
             audio_dir = root_path / mt / "train"
@@ -168,6 +168,9 @@ class DCASE2020Task2LogMelDataset(Dataset):
             all_spectrograms.append(data_mt)
             all_machine_id_strs.extend(machine_id_strs)
 
+        # Multi-class: truncate to smallest length across types (aligned to 16)
+        if min_T is None:
+            raise ValueError("No spectrograms loaded from any machine type")
         target_T = max(16, (min_T // 16) * 16)
         self.target_T = target_T
         truncated = [data_mt[..., :target_T] for data_mt in all_spectrograms]
