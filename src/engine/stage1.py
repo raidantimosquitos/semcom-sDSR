@@ -129,7 +129,7 @@ class Stage1Trainer(BaseTrainer):
             f"[{self.global_step:>6d}] "
             f"loss={avg['total']:.4f}  recon={avg['recon']:.4f}  "
             f"loss_b={avg['loss_b']:.4f}  loss_t={avg['loss_t']:.4f}  "
-            f"perp_b={avg['perplexity_b']:.2f} perp_t={avg['perplexity_t']:.2f}"
+            f"perp_b={avg['perplexity_b']:.2f}  perp_t={avg['perplexity_t']:.2f}  "
             f"lr={avg['lr']:.2e} ({its_sec:.1f} it/s)"
         )
 

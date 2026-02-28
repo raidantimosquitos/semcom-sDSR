@@ -2,6 +2,7 @@ import random
 import re
 import math
 from pathlib import Path
+from socket import TCP_SYNCNT
 from typing import Literal
 
 import torch
@@ -156,26 +157,31 @@ class DCASE2020Task2LogMelDataset(Dataset):
         root_path = Path(root)
         all_spectrograms: list[torch.Tensor] = []
         all_machine_id_strs: list[str] = []
-        max_T = 0
+        list_T = []
 
         for mt in sorted(machine_types):
             audio_dir = root_path / mt / "train"
             spectrograms, machine_id_strs = self._load_mel_for_dir(audio_dir, sample_rate)
             data_mt = torch.stack(spectrograms)
-            max_T = max(max_T, data_mt.shape[-1])
+            # Pad spectrogram from the end to the next multiple of 16
+            t_len = data_mt.shape[-1]
+            target_T = math.ceil(t_len / 16) * 16
+            if t_len < target_T:
+                data_mt = F.pad(data_mt, (0, target_T - t_len))
+            list_T.append(target_T)
             all_spectrograms.append(data_mt)
             all_machine_id_strs.extend(machine_id_strs)
 
-        # Multi-class: pad all types to the same length (max across types, rounded up to multiple of 16)
-        target_T = math.ceil(max_T / 16) * 16
+        # Multi-class: pad all types to the same length (min across all machine types)
+        target_T = min(list_T)
         self.target_T = target_T
-        padded = []
+        truncated = []
         for data_mt in all_spectrograms:
-            t_len = data_mt.shape[-1]
-            if t_len < target_T:
-                data_mt = F.pad(data_mt, (0, target_T - t_len))
-            padded.append(data_mt)
-        self.data = torch.cat(padded, dim=0)
+            if data_mt.shape[-1] > target_T:
+                truncated.append(data_mt[..., :target_T])
+            else:
+                truncated.append(data_mt)
+        self.data = torch.cat(truncated, dim=0)
         self._machine_id_strs = all_machine_id_strs
         self.machine_ids = sorted(set(self._machine_id_strs))
 
@@ -381,24 +387,25 @@ def make_dataloader(dataset: DCASE2020Task2LogMelDataset | DCASE2020Task2TestDat
     )
 
 if __name__ == "__main__":
-    MACHINE_TYPES = ["fan", "pump", "slider", "valve", "ToyCar", "ToyConveyor"]
+    MACHINE_TYPES = ["ToyCar", "ToyConveyor"]
     # MACHINE_TYPES = ["fan"]
 
-    for machine_type in MACHINE_TYPES:
-        dataset = DCASE2020Task2LogMelDataset(
-            root       = "/mnt/ssd/LaCie/dcase2020-task2-dev-dataset",
-            machine_type = machine_type,
-            normalize = True,
-        )
-        loader = make_dataloader(dataset, batch_size=256)
+    dataset = DCASE2020Task2LogMelDataset(
+        root          = "/mnt/ssd/LaCie/dcase2020-task2-dev-dataset",
+        machine_types = MACHINE_TYPES,
+        normalize     = True,
+    )
+    loader = make_dataloader(dataset, batch_size=128)
 
-        # Sanity check
-        specs, labels, machine_ids = next(iter(loader))
-        print(f"Batch shape : {tuple(specs.shape)}")   # (256, 1, n_mels, T)
-        print(f"Label shape : {tuple(labels.shape)}")
-        print(f"Machine IDs (batch): {machine_ids[:3]}...")
-        print(f"Value range : [{specs.min():.2f}, {specs.max():.2f}]")
+    # Sanity check
+    specs, labels, machine_ids = next(iter(loader))
+    print(f"Batch shape : {tuple(specs.shape)}")   # (256, 1, n_mels, T)
+    print(f"Label shape : {tuple(labels.shape)}")
+    print(f"Machine IDs (batch): {machine_ids[:3]}...")
+    print(f"Value range : [{specs.min():.2f}, {specs.max():.2f}]")
         
+
+    for machine_type in MACHINE_TYPES:
 
         test_dataset = DCASE2020Task2TestDataset(
             root          = "/mnt/ssd/LaCie/dcase2020-task2-dev-dataset",
