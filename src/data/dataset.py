@@ -20,8 +20,10 @@ class DCASE2020Task2LogMelDataset(Dataset):
     All training samples are normal (no anomalies), so label is always 0.
 
     Normalization (mean, std) and target_T: for a single machine_type they are computed on that type;
-    for multiple machine_types, normalization is applied per machine_type (each type's own mean/std),
-    then data are concatenated. .mean and .std are set to the first type's for API compatibility.
+    for multiple machine_types, global per-mel normalization is used: mean/std are computed over all
+    types' data combined (one value per mel bin), then applied to the concatenated data. For multiple
+    types, all spectrograms are truncated to the minimum length across types (aligned to 16 frames);
+    for a single type, T is padded to a multiple of 16.
 
     __getitem__ returns (spectrogram, label, machine_id) with label 0 = normal.
 
@@ -155,49 +157,35 @@ class DCASE2020Task2LogMelDataset(Dataset):
         root_path = Path(root)
         all_spectrograms: list[torch.Tensor] = []
         all_machine_id_strs: list[str] = []
-        max_T = 0
-        first_mean = first_std = None
+        min_T = 0
 
         for mt in sorted(machine_types):
             audio_dir = root_path / mt / "train"
             spectrograms, machine_id_strs = self._load_mel_for_dir(audio_dir, sample_rate)
             data_mt = torch.stack(spectrograms)
             t_len = data_mt.shape[-1]
-            max_T = max(max_T, t_len)
-
-            if normalize:
-                mean_mt = data_mt.mean(dim=(0, 2, 3), keepdim=True)
-                std_mt = data_mt.std(dim=(0, 2, 3), keepdim=True)
-                data_mt = (data_mt - mean_mt) / (std_mt + 1e-8)
-                if first_mean is None:
-                    first_mean, first_std = mean_mt, std_mt
-            else:
-                shape = (1, 1, data_mt.shape[2], 1)
-                mean_mt = torch.zeros(shape, dtype=data_mt.dtype, device=data_mt.device)
-                std_mt = torch.ones(shape, dtype=data_mt.dtype, device=data_mt.device)
-                if first_mean is None:
-                    first_mean, first_std = mean_mt, std_mt
-
+            min_T = t_len if min_T is None else min(min_T, t_len)
             all_spectrograms.append(data_mt)
             all_machine_id_strs.extend(machine_id_strs)
 
-        target_T = math.ceil(max_T / 16) * 16
+        target_T = max(16, (min_T // 16) * 16)
         self.target_T = target_T
-        padded = []
-        for data_mt in all_spectrograms:
-            if data_mt.shape[-1] != target_T:
-                pad = target_T - data_mt.shape[-1]
-                data_mt = F.pad(data_mt, (0, pad))
-            padded.append(data_mt)
-        self.data = torch.cat(padded, dim=0)
+        truncated = [data_mt[..., :target_T] for data_mt in all_spectrograms]
+        self.data = torch.cat(truncated, dim=0)
         self._machine_id_strs = all_machine_id_strs
         self.machine_ids = sorted(set(self._machine_id_strs))
 
-        self.mean = first_mean if first_mean is not None else torch.zeros(1, 1, self.data.shape[2], 1, dtype=self.data.dtype, device=self.data.device)
-        self.std = first_std if first_std is not None else torch.ones(1, 1, self.data.shape[2], 1, dtype=self.data.dtype, device=self.data.device)
+        if normalize:
+            self.mean = self.data.mean(dim=(0, 2, 3), keepdim=True)
+            self.std = self.data.std(dim=(0, 2, 3), keepdim=True)
+            self.data = (self.data - self.mean) / (self.std + 1e-8)
+        else:
+            shape = (1, 1, self.data.shape[2], 1)
+            self.mean = torch.zeros(shape, dtype=self.data.dtype, device=self.data.device)
+            self.std = torch.ones(shape, dtype=self.data.dtype, device=self.data.device)
 
         print(
-            f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (per-type norm), "
+            f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (global per-mel norm), "
             f"shape {tuple(self.data.shape)} | IDs: {self.machine_ids} | "
             f"{self.data.nbytes / 1e9:.2f} GB in RAM"
         )
