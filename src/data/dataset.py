@@ -21,9 +21,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
 
     Normalization (mean, std) and target_T: for a single machine_type they are computed on that type;
     for multiple machine_types, global per-mel normalization is used: mean/std are computed over all
-    types' data combined (one value per mel bin), then applied to the concatenated data. For multiple
-    types, all spectrograms are truncated to the minimum length across types (aligned to 16 frames);
-    for a single type, T is padded to a multiple of 16.
+    types' data combined (one value per mel bin), then applied to the concatenated data.     For multiple types, each type is padded to the maximum length across types (rounded up to a
+    multiple of 16); for a single type, T is padded to a multiple of 16.
 
     __getitem__ returns (spectrogram, label, machine_id) with label 0 = normal.
 
@@ -157,24 +156,26 @@ class DCASE2020Task2LogMelDataset(Dataset):
         root_path = Path(root)
         all_spectrograms: list[torch.Tensor] = []
         all_machine_id_strs: list[str] = []
-        min_T: int | None = None
+        max_T = 0
 
         for mt in sorted(machine_types):
             audio_dir = root_path / mt / "train"
             spectrograms, machine_id_strs = self._load_mel_for_dir(audio_dir, sample_rate)
             data_mt = torch.stack(spectrograms)
-            t_len = data_mt.shape[-1]
-            min_T = t_len if min_T is None else min(min_T, t_len)
+            max_T = max(max_T, data_mt.shape[-1])
             all_spectrograms.append(data_mt)
             all_machine_id_strs.extend(machine_id_strs)
 
-        # Multi-class: truncate to smallest length across types (aligned to 16)
-        if min_T is None:
-            raise ValueError("No spectrograms loaded from any machine type")
-        target_T = max(16, (min_T // 16) * 16)
+        # Multi-class: pad all types to the same length (max across types, rounded up to multiple of 16)
+        target_T = math.ceil(max_T / 16) * 16
         self.target_T = target_T
-        truncated = [data_mt[..., :target_T] for data_mt in all_spectrograms]
-        self.data = torch.cat(truncated, dim=0)
+        padded = []
+        for data_mt in all_spectrograms:
+            t_len = data_mt.shape[-1]
+            if t_len < target_T:
+                data_mt = F.pad(data_mt, (0, target_T - t_len))
+            padded.append(data_mt)
+        self.data = torch.cat(padded, dim=0)
         self._machine_id_strs = all_machine_id_strs
         self.machine_ids = sorted(set(self._machine_id_strs))
 
@@ -188,7 +189,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
             self.std = torch.ones(shape, dtype=self.data.dtype, device=self.data.device)
 
         print(
-            f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (global per-mel norm), "
+            f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (global per-mel norm, T→{target_T}), "
             f"shape {tuple(self.data.shape)} | IDs: {self.machine_ids} | "
             f"{self.data.nbytes / 1e9:.2f} GB in RAM"
         )
