@@ -134,6 +134,35 @@ class sDSR(nn.Module):
             return m_out, x_g, x_s
         return m_out
 
+    def forward_from_quantized(
+        self,
+        q_bot: torch.Tensor,
+        q_top: torch.Tensor,
+        return_intermediates: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Decoder-only path: run general decoder, object-specific decoder, and anomaly
+        detection from quantized features (e.g. after receiving indices over the channel).
+
+        Args:
+            q_bot: (B, emb_dim, H_bot, W_bot)
+            q_top: (B, emb_dim, H_top, W_top)
+            return_intermediates: if True, return (M_out, X_G, X_S)
+
+        Returns:
+            M_out: (B, 2, n_mels, T) segmentation logits
+        """
+        x_g = self._vq_vae.decode_general(q_bot, q_top)
+        x_s = self._object_decoder(
+            q_top, q_bot,
+            self._vq_vae._vq_top, self._vq_vae._vq_bot,
+            return_aux=False,
+        )
+        m_out = self._anomaly_detection(x_g, x_s.detach())
+        if return_intermediates:
+            return m_out, x_g, x_s
+        return m_out
+
     def forward_train(
         self,
         x: torch.Tensor,

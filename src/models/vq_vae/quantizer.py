@@ -113,3 +113,27 @@ class VectorQuantizerEMA(nn.Module):
             perplexity,
             encodings,
         )
+
+    def get_indices(self, inputs: torch.Tensor) -> torch.Tensor:
+        """
+        Return codebook indices for the given inputs (no EMA update, no loss).
+        Used for transmitter bitstream encoding.
+
+        Args:
+            inputs: (B, C, H, W) in embedding space (e.g. after pre_vq_conv).
+
+        Returns:
+            indices: (N,) long tensor, N = B*H*W. Caller may reshape to (B, H, W).
+        """
+        with autocast(device_type=inputs.device.type, enabled=False):
+            inputs = inputs.float()
+            inputs = inputs.permute(0, 2, 3, 1).contiguous()
+            flat_input = inputs.view(-1, self._embedding_dim)
+            emb = self._embedding.weight.float()
+            distances = (
+                flat_input.pow(2).sum(dim=1, keepdim=True)
+                + emb.pow(2).sum(dim=1)
+                - 2 * flat_input @ emb.t()
+            )
+            encoding_indices = distances.argmin(dim=1)
+        return encoding_indices

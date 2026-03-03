@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 import torch
+from torch.utils.data import DataLoader
 
 from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestDataset
 from src.engine.evaluator import AnomalyEvaluator
@@ -38,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--batch_size", type=int, default=32)
+    p.add_argument("--no_score_norm", action="store_true", help="Disable machine-ID conditioned anomaly score normalization")
     return p.parse_args()
 
 
@@ -49,6 +51,57 @@ def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer) -> sDSR:
         T=T,
     )
     return sDSR(vq_vae, cfg)
+
+
+def _compute_train_score_stats(
+    model: torch.nn.Module,
+    train_ds: DCASE2020Task2LogMelDataset,
+    device: torch.device,
+    batch_size: int,
+) -> tuple[dict[str, tuple[float, float]], tuple[float, float]]:
+    """
+    Run model on all train samples, collect anomaly score (mean) per sample with machine_id.
+    Return per-machine_id (mean, std) and global (mean, std) fallback.
+    """
+    from collections import defaultdict
+
+    model.eval()
+    loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    # (score_mean, machine_id) per sample
+    by_id: dict[str, list[float]] = defaultdict(list)
+    all_scores: list[float] = []
+
+    with torch.no_grad():
+        for batch in loader:
+            x, _labels, machine_ids = batch
+            x = x.to(device)
+            m_out = model(x)
+            logits = m_out[:, 1]
+            flat = logits.view(m_out.shape[0], -1)
+            sc_mean = flat.mean(dim=1).cpu()
+            for i in range(x.shape[0]):
+                mid = machine_ids[i] if isinstance(machine_ids[i], str) else str(machine_ids[i])
+                s = sc_mean[i].item()
+                by_id[mid].append(s)
+                all_scores.append(s)
+
+    train_score_stats: dict[str, tuple[float, float]] = {}
+    for mid, scores in by_id.items():
+        arr = scores
+        mean_val = sum(arr) / len(arr)
+        var = sum((x - mean_val) ** 2 for x in arr) / len(arr) if len(arr) > 1 else 0.0
+        std_val = var ** 0.5
+        train_score_stats[mid] = (mean_val, std_val)
+
+    if all_scores:
+        global_mean = sum(all_scores) / len(all_scores)
+        global_var = sum((x - global_mean) ** 2 for x in all_scores) / len(all_scores)
+        global_std = global_var ** 0.5
+        fallback = (global_mean, global_std)
+    else:
+        fallback = (0.0, 1.0)
+
+    return train_score_stats, fallback
 
 
 def main() -> None:
@@ -113,12 +166,25 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     model.load_state_dict(stage2["model_state_dict"])
 
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+
+    train_score_stats: dict[str, tuple[float, float]] | None = None
+    train_score_stats_fallback: tuple[float, float] | None = None
+    if not args.no_score_norm:
+        train_score_stats, train_score_stats_fallback = _compute_train_score_stats(
+            model, train_ds, device, args.batch_size
+        )
+        tee("Calibrated per-machine_id anomaly score stats (mean score normalization enabled).")
+
     evaluator = AnomalyEvaluator(
         model=model,
         test_dataset=test_ds,
         device=args.device,
         pauc_max_fpr=args.pauc_max_fpr,
         batch_size=args.batch_size,
+        train_score_stats=train_score_stats,
+        train_score_stats_fallback=train_score_stats_fallback,
     )
     results = evaluator.evaluate()
 
@@ -126,38 +192,18 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         tee(f"\n{mt}:")
         for k, v in ids.items():
             if isinstance(v, dict):
-                tee(
-                    f"  {k}: mean AUC={v['auc']:.4f} pAUC={v['pauc']:.4f}  "
-                    f"max AUC={v['auc_max']:.4f} pAUC={v['pauc_max']:.4f}  "
-                    f"p95 AUC={v['auc_p95']:.4f} pAUC={v['pauc_p95']:.4f}"
-                )
+                tee(f"  {k}: AUC={v['auc']:.4f} pAUC={v['pauc']:.4f}")
 
     if args.output:
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow([
-                "machine_type", "machine_id",
-                "AUC_mean", "pAUC_mean", "AUC_max", "pAUC_max", "AUC_p95", "pAUC_p95",
-            ])
+            w.writerow(["machine_type", "machine_id", "AUC", "pAUC"])
             for mt, ids in results.items():
                 for k, v in ids.items():
-                    if isinstance(v, dict) and k != "average":
-                        w.writerow([
-                            mt, k,
-                            f"{v['auc']:.4f}", f"{v['pauc']:.4f}",
-                            f"{v['auc_max']:.4f}", f"{v['pauc_max']:.4f}",
-                            f"{v['auc_p95']:.4f}", f"{v['pauc_p95']:.4f}",
-                        ])
-                if "average" in ids:
-                    v = ids["average"]
-                    w.writerow([
-                        mt, "average",
-                        f"{v['auc']:.4f}", f"{v['pauc']:.4f}",
-                        f"{v['auc_max']:.4f}", f"{v['pauc_max']:.4f}",
-                        f"{v['auc_p95']:.4f}", f"{v['pauc_p95']:.4f}",
-                    ])
+                    if isinstance(v, dict):
+                        w.writerow([mt, k, f"{v['auc']:.4f}", f"{v['pauc']:.4f}"])
         tee(f"\nResults saved to {out_path}")
 
     if args.plot and results:
@@ -167,7 +213,7 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
 def _plot_comparison(
     results: dict, save_path: Path, log: Callable[[str], None] | None = None
 ) -> None:
-    """Bar chart comparing AUC and pAUC for mean, max, and p95 aggregation methods."""
+    """Bar chart for AUC and pAUC (mean anomaly score)."""
     if log is None:
         log = print
     try:
@@ -177,36 +223,19 @@ def _plot_comparison(
         log("Skipping plot: matplotlib required (pip install matplotlib)")
         return
 
-    # Use average metrics over the single machine_type
     for mt, ids in results.items():
         if "average" not in ids:
             continue
         v = ids["average"]
-        methods = ["mean", "max", "p95"]
-        aucs = [v["auc"], v["auc_max"], v["auc_p95"]]
-        paucs = [v["pauc"], v["pauc_max"], v["pauc_p95"]]
-
-        x = np.arange(len(methods))
-        width = 0.35
-
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-        ax_auc, ax_pauc = axes[0], axes[1]  # type: ignore[index]
-
-        ax_auc.bar(x - width / 2, aucs, width, label="AUC")
-        ax_auc.set_ylabel("AUC")
-        ax_auc.set_title("AUC by score aggregation")
-        ax_auc.set_xticks(x)
-        ax_auc.set_xticklabels(methods)
-        ax_auc.legend()
-
-        ax_pauc.bar(x - width / 2, paucs, width, label="pAUC", color="C1")
-        ax_pauc.set_ylabel("pAUC")
-        ax_pauc.set_title("pAUC by score aggregation")
-        ax_pauc.set_xticks(x)
-        ax_pauc.set_xticklabels(methods)
-        ax_pauc.legend()
-
-        fig.suptitle(f"Anomaly detection: {mt} (average)")
+        fig, ax = plt.subplots(figsize=(5, 4))
+        x = np.arange(2)
+        vals = [v["auc"], v["pauc"]]
+        labels = ["AUC", "pAUC"]
+        ax.bar(x, vals, color=["C0", "C1"])
+        ax.set_ylabel("Score")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.set_title(f"Anomaly detection: {mt} (average)")
         plt.tight_layout()
         save_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=150)

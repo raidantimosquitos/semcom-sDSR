@@ -1,0 +1,17 @@
+name: sDSR
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pytorch
+  - torchaudio
+  - numpy
+  - scipy
+  - scikit-learn
+  - pip
+  - matplotlib
+  - jupyter
+  - notebook

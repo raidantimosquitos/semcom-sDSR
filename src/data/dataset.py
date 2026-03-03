@@ -2,7 +2,6 @@ import random
 import re
 import math
 from pathlib import Path
-from socket import TCP_SYNCNT
 from typing import Literal
 
 import torch
@@ -22,10 +21,14 @@ class DCASE2020Task2LogMelDataset(Dataset):
 
     Normalization (mean, std) and target_T: for a single machine_type they are computed on that type;
     for multiple machine_types, global per-mel normalization is used: mean/std are computed over all
-    types' data combined (one value per mel bin), then applied to the concatenated data.     For multiple types, each type is padded to the maximum length across types (rounded up to a
-    multiple of 16); for a single type, T is padded to a multiple of 16.
+    types' data combined (one value per mel bin), then applied to the concatenated data.     For multiple types: (1) each type is truncated to the minimum T across types; (2) per-mel mean/std
+    are computed over the concatenated data and data are normalized; (3) result is padded to the next
+    multiple of 16. For a single type, T is padded to a multiple of 16.
 
     __getitem__ returns (spectrogram, label, machine_id) with label 0 = normal.
+
+    Stage1 training uses this dataset with machine_types (all types) as the general dataset.
+    Stage2 uses a machine-type-specific dataset that includes anomalies (see AudDSRAnomTrainDataset).
 
     Expected layout: root/{machine_type}/train/
         normal_id_01_00000000.wav, normal_id_02_00000000.wav, ...
@@ -117,12 +120,16 @@ class DCASE2020Task2LogMelDataset(Dataset):
             self.mean = torch.zeros(shape, dtype=self.data.dtype, device=self.data.device)
             self.std  = torch.ones(shape, dtype=self.data.dtype, device=self.data.device)
 
-        target_T = math.ceil(self.data.shape[-1] / 16) * 16
+        # 
+        target_T = min(320, math.ceil(self.data.shape[-1] / 16) * 16)
         self.target_T = target_T
-        if self.data.shape[-1] != target_T:
+        if self.data.shape[-1] < target_T:
             pad = target_T - self.data.shape[-1]
             self.data = F.pad(self.data, (0, pad))
             print(f"Padded T: {self.data.shape[-1] - pad} → {self.data.shape[-1]} (target: {target_T})")
+        elif self.data.shape[-1] > target_T:
+            self.data = self.data[..., :target_T]
+            print(f"Truncated T: {self.data.shape[-1]} → {target_T} (target: {target_T})")
 
         print(
             f"DCASE2020Task2LogMelDataset: {machine_type} | {len(self.data)} spectrograms, "
@@ -157,42 +164,39 @@ class DCASE2020Task2LogMelDataset(Dataset):
         root_path = Path(root)
         all_spectrograms: list[torch.Tensor] = []
         all_machine_id_strs: list[str] = []
-        list_T = []
+        orig_lengths: list[int] = []
 
+        # 1. Load each type at native length; record original T per machine type
         for mt in sorted(machine_types):
             audio_dir = root_path / mt / "train"
             spectrograms, machine_id_strs = self._load_mel_for_dir(audio_dir, sample_rate)
             data_mt = torch.stack(spectrograms)
-            # Pad spectrogram from the end to the next multiple of 16
-            t_len = data_mt.shape[-1]
-            target_T = math.ceil(t_len / 16) * 16
-            if t_len < target_T:
-                data_mt = F.pad(data_mt, (0, target_T - t_len))
-            list_T.append(target_T)
+            orig_lengths.append(data_mt.shape[-1])
             all_spectrograms.append(data_mt)
             all_machine_id_strs.extend(machine_id_strs)
 
-        # Multi-class: pad all types to the same length (min across all machine types)
-        target_T = min(list_T)
-        self.target_T = target_T
-        truncated = []
-        for data_mt in all_spectrograms:
-            if data_mt.shape[-1] > target_T:
-                truncated.append(data_mt[..., :target_T])
-            else:
-                truncated.append(data_mt)
+        # 2. Truncate to minimum T across all machine types; concatenate
+        min_T = min(orig_lengths)
+        truncated = [data_mt[..., :min_T].contiguous() for data_mt in all_spectrograms]
         self.data = torch.cat(truncated, dim=0)
-        self._machine_id_strs = all_machine_id_strs
-        self.machine_ids = sorted(set(self._machine_id_strs))
+        n_mels = self.data.shape[2]
 
+        # 3. Compute normalization stats and normalize (no padding yet)
         if normalize:
             self.mean = self.data.mean(dim=(0, 2, 3), keepdim=True)
             self.std = self.data.std(dim=(0, 2, 3), keepdim=True)
-            self.data = (self.data - self.mean) / (self.std + 1e-8)
+            self.data = self._normalize(self.data)
         else:
-            shape = (1, 1, self.data.shape[2], 1)
-            self.mean = torch.zeros(shape, dtype=self.data.dtype, device=self.data.device)
-            self.std = torch.ones(shape, dtype=self.data.dtype, device=self.data.device)
+            self.mean = torch.zeros(1, 1, n_mels, 1, dtype=self.data.dtype, device=self.data.device)
+            self.std = torch.ones(1, 1, n_mels, 1, dtype=self.data.dtype, device=self.data.device)
+
+        # 4. Pad to the next multiple of 16
+        target_T = math.ceil(min_T / 16) * 16
+        if self.data.shape[-1] < target_T:
+            self.data = F.pad(self.data, (0, target_T - self.data.shape[-1]))
+        self.target_T = target_T
+        self._machine_id_strs = all_machine_id_strs
+        self.machine_ids = sorted(set(self._machine_id_strs))
 
         print(
             f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (global per-mel norm, T→{target_T}), "

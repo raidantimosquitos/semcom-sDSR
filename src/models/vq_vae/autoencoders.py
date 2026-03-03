@@ -175,6 +175,58 @@ class VQ_VAE_2Layer(nn.Module):
         _, quantized_bot, _, _ = self._vq_bot(z_bot)
         return quantized_bot, quantized_top, z_bot, z_top
 
+    def encode_to_indices(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encode spectrogram to codebook indices only (for transmitter bitstream).
+
+        Args:
+            x: (B, 1, n_mels, T) Mel spectrogram
+
+        Returns:
+            indices_top: (B, H_top, W_top) long
+            indices_bot: (B, H_bot, W_bot) long
+        """
+        enc_bot = self._encoder_bot(x)
+        enc_top = self._encoder_top(enc_bot)
+        z_top = self._pre_vq_conv_top(enc_top)
+        idx_top_flat = self._vq_top.get_indices(z_top)
+        _, quantized_top, _, _ = self._vq_top(z_top)
+        decoded_top = self._decoder_top(quantized_top)
+        feat_bot = torch.cat([enc_bot, decoded_top], dim=1)
+        z_bot = self._pre_vq_conv_bot(feat_bot)
+        idx_bot_flat = self._vq_bot.get_indices(z_bot)
+        B, _, H_top, W_top = z_top.shape
+        _, _, H_bot, W_bot = z_bot.shape
+        indices_top = idx_top_flat.view(B, H_top, W_top)
+        indices_bot = idx_bot_flat.view(B, H_bot, W_bot)
+        return indices_top, indices_bot
+
+    def indices_to_quantized(
+        self, indices_top: torch.Tensor, indices_bot: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Map codebook indices to quantized feature tensors (for receiver).
+
+        Args:
+            indices_top: (B, H_top, W_top) long
+            indices_bot: (B, H_bot, W_bot) long
+
+        Returns:
+            q_bot: (B, emb_dim, H_bot, W_bot)
+            q_top: (B, emb_dim, H_top, W_top)
+        """
+        # Embedding expects (N,) -> (N, emb_dim); we need (B, H, W) -> (B, emb_dim, H, W)
+        emb_dim = self._vq_top._embedding_dim
+        q_top = self._vq_top._embedding(indices_top.flatten())
+        q_top = q_top.view(
+            indices_top.shape[0], indices_top.shape[1], indices_top.shape[2], emb_dim
+        ).permute(0, 3, 1, 2)
+        q_bot = self._vq_bot._embedding(indices_bot.flatten())
+        q_bot = q_bot.view(
+            indices_bot.shape[0], indices_bot.shape[1], indices_bot.shape[2], emb_dim
+        ).permute(0, 3, 1, 2)
+        return q_bot, q_top
+
     def decode_general(
         self, q_bot: torch.Tensor, q_top: torch.Tensor
     ) -> torch.Tensor:
