@@ -12,7 +12,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT"
 
-DATA_PATH="${DATA_PATH:-./dataset}"
+DATA_PATH="${DATA_PATH:-./dataset/dcase2020_task2_dev_dataset}"
 CKPT_DIR="${CKPT_DIR:-./checkpoints}"
 GCS_CHECKPOINTS="gs://semcom-sdsr-training-data-1772509648/checkpoints"
 N_ITER=20000
