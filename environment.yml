@@ -15,3 +15,5 @@ dependencies:
   - matplotlib
   - jupyter
   - notebook
+  - pip:
+    - soundfile

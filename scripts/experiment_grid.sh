@@ -19,7 +19,7 @@ N_ITER=20000
 BATCH_SIZE=128
 
 # All 6 DCASE2020 Task 2 machine types for stage1
-MACHINE_TYPES="fan pump slider valve ToyCar ToyTrain"
+MACHINE_TYPES="fan pump slider valve ToyCar ToyConveyor"
 
 # 3 embedding dims
 EMBEDDING_DIMS=(64 128 256)
@@ -46,7 +46,7 @@ for emb in "${EMBEDDING_DIMS[@]}"; do
     top="${cfg%%:*}"
     bot="${cfg##*:}"
     stamp="emb${emb}_top${top}_bot${bot}_iter${N_ITER}_bs${BATCH_SIZE}"
-    run_name="ToyCar+ToyTrain+fan+pump+slider+valve"
+    run_name="ToyCar+ToyConveyor+fan+pump+slider+valve"
     stage1_dir="${CKPT_DIR}/stage1/${run_name}"
 
     echo "=============================================="
