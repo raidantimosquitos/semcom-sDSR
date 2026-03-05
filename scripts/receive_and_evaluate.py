@@ -16,7 +16,7 @@ import argparse
 import csv
 from collections import defaultdict
 from pathlib import Path
-
+import math
 import torch
 
 from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestDataset
@@ -33,10 +33,6 @@ try:
     from sklearn.metrics import roc_auc_score
 except ImportError:
     roc_auc_score = None
-
-BITS_TOP = 10
-BITS_BOT = 12
-
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Decode bitstream and evaluate AUC/pAUC per machine_id.")
@@ -70,31 +66,38 @@ def main() -> None:
         target_T=train_ds.target_T,
     )
 
+    # Load Stage 1 + Stage 2 (full sDSR)
+    ckpt1 = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    num_embeddings_top = ckpt1["num_embeddings_top"]
+    num_embeddings_bot = ckpt1["num_embeddings_bot"]
+    embedding_dim = ckpt1["embedding_dim"]
+    vq_vae = VQ_VAE_2Layer(
+        num_hiddens=128,
+        num_residual_layers=2,
+        num_residual_hiddens=64,
+        num_embeddings=(num_embeddings_top, num_embeddings_bot),
+        embedding_dim=embedding_dim,
+        commitment_cost=0.25,
+        decay=0.99,
+    )
+    
+    vq_vae.load_state_dict(ckpt1["model_state_dict"])
+
+    bits_top = int(math.log2(num_embeddings_top))
+    bits_bot = int(math.log2(num_embeddings_bot))
+
     H_bot = max(1, n_mels // 4)
     W_bot = max(1, T // 4)
     H_top = max(1, H_bot // 2)
     W_top = max(1, W_bot // 2)
-    frame_sz = frame_size_bytes(H_top, W_top, H_bot, W_bot, BITS_TOP, BITS_BOT)
+    frame_sz = frame_size_bytes(H_top, W_top, H_bot, W_bot, bits_top, bits_bot)
 
     num_clips, frames = read_bitstream_file(args.input_bitstream, frame_sz)
     if num_clips != len(test_ds):
         print(f"Warning: bitstream has {num_clips} clips, test set has {len(test_ds)}. Using min for alignment.")
     n_eval = min(num_clips, len(test_ds))
-
-    # Load Stage 1 + Stage 2 (full sDSR)
-    vq_vae = VQ_VAE_2Layer(
-        num_hiddens=128,
-        num_residual_layers=2,
-        num_residual_hiddens=64,
-        num_embeddings=(1024, 4096),
-        embedding_dim=128,
-        commitment_cost=0.25,
-        decay=0.99,
-    )
-    ckpt1 = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    vq_vae.load_state_dict(ckpt1["model_state_dict"])
-
-    cfg = sDSRConfig(embedding_dim=128, num_hiddens=128, n_mels=n_mels, T=T)
+    
+    cfg = sDSRConfig(embedding_dim=embedding_dim, num_hiddens=128, n_mels=n_mels, T=T)
     model = sDSR(vq_vae, cfg)
     ckpt2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     model.load_state_dict(ckpt2["model_state_dict"])
@@ -110,7 +113,7 @@ def main() -> None:
             frame = frames[i]
             indices_top, indices_bot = unpack_frame_to_indices(
                 frame, H_top, W_top, H_bot, W_bot,
-                bits_top=BITS_TOP, bits_bot=BITS_BOT, device=device,
+                bits_top=bits_top, bits_bot=bits_bot, device=device,
             )
             q_bot, q_top = vq_vae.indices_to_quantized(indices_top, indices_bot)
             m_out = model.forward_from_quantized(q_bot, q_top)

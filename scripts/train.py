@@ -42,6 +42,9 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--batch_size", type=int, default=128, help="Batch size (default: 128)")
     s1.add_argument("--n_iter", type=int, default=20000)
     s1.add_argument("--lr", type=float, default=1e-4)
+    s1.add_argument("--num_embeddings_top", type=int, default=1024)
+    s1.add_argument("--num_embeddings_bot", type=int, default=4096)
+    s1.add_argument("--embedding_dim", type=int, default=128)
     s1.add_argument("--lambda_recon", type=float, default=1.0)
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
@@ -69,21 +72,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_vq_vae(n_mels: int, T: int) -> VQ_VAE_2Layer:
+def build_vq_vae(n_mels: int, T: int, num_embeddings_top: int, num_embeddings_bot: int, embedding_dim: int) -> VQ_VAE_2Layer:
     return VQ_VAE_2Layer(
         num_hiddens=128,
         num_residual_layers=2,
         num_residual_hiddens=64,
-        num_embeddings=(1024, 4096),
-        embedding_dim=128,
+        num_embeddings=(num_embeddings_top, num_embeddings_bot),
+        embedding_dim=embedding_dim,
         commitment_cost=0.25,
         decay=0.99,
     )
 
 
-def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int) -> sDSR:
+def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int, embedding_dim: int) -> sDSR:
     cfg = sDSRConfig(
-        embedding_dim=128,
+        embedding_dim=embedding_dim,
         num_hiddens=128,
         num_residual_layers=2,
         num_residual_hiddens=64,
@@ -111,7 +114,7 @@ def run_stage1(args: argparse.Namespace) -> None:
         run_name = "+".join(sorted(machine_types))
     _, _, n_mels, T = dataset.data.shape
 
-    model = build_vq_vae(n_mels, T)
+    model = build_vq_vae(n_mels, T, args.num_embeddings_top, args.num_embeddings_bot, args.embedding_dim)
     trainer = Stage1Trainer(
         model=model,
         dataset=dataset,
@@ -129,11 +132,23 @@ def run_stage1(args: argparse.Namespace) -> None:
 
 
 def run_stage2(args: argparse.Namespace) -> None:
-    q_vae_dataset = DCASE2020Task2LogMelDataset(
-        root=args.data_path,
-        machine_type=args.machine_type,
-        normalize=True,
-    )
+    # Load Stage 1 checkpoint first so we can use its normalization stats for the dataset
+    ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    if "norm_mean" in ckpt and "norm_std" in ckpt and "target_T" in ckpt:
+        q_vae_dataset = DCASE2020Task2LogMelDataset(
+            root=args.data_path,
+            machine_type=args.machine_type,
+            normalize=True,
+            norm_mean=ckpt["norm_mean"],
+            norm_std=ckpt["norm_std"],
+            target_T_override=ckpt["target_T"],
+        )
+    else:
+        q_vae_dataset = DCASE2020Task2LogMelDataset(
+            root=args.data_path,
+            machine_type=args.machine_type,
+            normalize=True,
+        )
     _, _, n_mels, T = q_vae_dataset.data.shape
 
     train_dataset = AudDSRAnomTrainDataset(
@@ -143,11 +158,13 @@ def run_stage2(args: argparse.Namespace) -> None:
     )
 
     # Load VQ-VAE from Stage 1
-    vq_vae = build_vq_vae(n_mels, T)
-    ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    num_embeddings_top = ckpt["num_embeddings_top"]
+    num_embeddings_bot = ckpt["num_embeddings_bot"]
+    embedding_dim = ckpt["embedding_dim"]
+    vq_vae = build_vq_vae(n_mels, T, num_embeddings_top, num_embeddings_bot, embedding_dim)
     vq_vae.load_state_dict(ckpt["model_state_dict"])
 
-    model = build_s_dsr(vq_vae, n_mels, T)
+    model = build_s_dsr(vq_vae, n_mels, T, embedding_dim)
     trainer = Stage2Trainer(
         model=model,
         dataset=train_dataset,

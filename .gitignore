@@ -11,3 +11,5 @@ checkpoints/
 # Jupyter Notebook checkpoints
 notebooks/.ipynb_checkpoints/
 
+# Python environments
+.micromamba/

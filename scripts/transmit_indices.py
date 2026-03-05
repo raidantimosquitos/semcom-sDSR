@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
-
+import math
 import torch
 
 from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestDataset
@@ -24,10 +24,6 @@ from src.utils.bitstream import (
     pack_indices_to_frame,
     write_bitstream_file,
 )
-
-# Default codebook sizes (must match Stage 1 training)
-BITS_TOP = 10   # 1024 codebook
-BITS_BOT = 12   # 4096 codebook
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,26 +57,31 @@ def main() -> None:
     )
 
     # Stage 1: VQ-VAE only (encoder + codebooks)
+    ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    num_embeddings_top = ckpt["num_embeddings_top"]
+    num_embeddings_bot = ckpt["num_embeddings_bot"]
+    embedding_dim = ckpt["embedding_dim"]
     vq_vae = VQ_VAE_2Layer(
         num_hiddens=128,
         num_residual_layers=2,
         num_residual_hiddens=64,
-        num_embeddings=(1024, 4096),
-        embedding_dim=128,
+        num_embeddings=(num_embeddings_top, num_embeddings_bot),
+        embedding_dim=embedding_dim,
         commitment_cost=0.25,
         decay=0.99,
     )
-    ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
     vq_vae.load_state_dict(ckpt["model_state_dict"])
     vq_vae = vq_vae.to(device)
     vq_vae.eval()
 
     # Spatial shapes for one clip (n_mels, T) -> (H_top, W_top), (H_bot, W_bot)
+    bits_top = int(math.log2(num_embeddings_top))
+    bits_bot = int(math.log2(num_embeddings_bot))
     H_bot = max(1, n_mels // 4)
     W_bot = max(1, T // 4)
-    H_top = max(1, H_bot // 2)
-    W_top = max(1, W_bot // 2)
-    frame_sz = frame_size_bytes(H_top, W_top, H_bot, W_bot, BITS_TOP, BITS_BOT)
+    H_top = max(1, H_bot // bits_top)
+    W_top = max(1, W_bot // bits_top)
+    frame_sz = frame_size_bytes(H_top, W_top, H_bot, W_bot, bits_top, bits_bot)
 
     frames: list[bytes] = []
     meta_rows: list[tuple[int, int, str]] = []
@@ -92,7 +93,7 @@ def main() -> None:
             indices_top, indices_bot = vq_vae.encode_to_indices(x)
             frame = pack_indices_to_frame(
                 indices_top, indices_bot,
-                bits_top=BITS_TOP, bits_bot=BITS_BOT,
+                bits_top=bits_top, bits_bot=bits_bot,
             )
             frames.append(frame)
             meta_rows.append((idx, label, machine_id))

@@ -43,9 +43,9 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer) -> sDSR:
+def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer, embedding_dim: int) -> sDSR:
     cfg = sDSRConfig(
-        embedding_dim=128,
+        embedding_dim=embedding_dim,
         num_hiddens=128,
         n_mels=n_mels,
         T=T,
@@ -131,12 +131,23 @@ def main() -> None:
 
 def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     """Run evaluation; all user-facing output via tee (terminal + log file)."""
-    # Train dataset defines normalization (mean, std) and target_T; pass to test for consistency
-    train_ds = DCASE2020Task2LogMelDataset(
-        root=args.data_path,
-        machine_type=args.machine_type,
-        normalize=True,
-    )
+    # Load Stage 1 checkpoint once for norm stats and model weights
+    stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    if "norm_mean" in stage1_ckpt and "norm_std" in stage1_ckpt and "target_T" in stage1_ckpt:
+        train_ds = DCASE2020Task2LogMelDataset(
+            root=args.data_path,
+            machine_type=args.machine_type,
+            normalize=True,
+            norm_mean=stage1_ckpt["norm_mean"],
+            norm_std=stage1_ckpt["norm_std"],
+            target_T_override=stage1_ckpt["target_T"],
+        )
+    else:
+        train_ds = DCASE2020Task2LogMelDataset(
+            root=args.data_path,
+            machine_type=args.machine_type,
+            normalize=True,
+        )
     _, _, n_mels, T = train_ds.data.shape
 
     test_ds = DCASE2020Task2TestDataset(
@@ -147,21 +158,23 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         target_T=train_ds.target_T,
     )
 
+    num_embeddings_top = stage1_ckpt["num_embeddings_top"]
+    num_embeddings_bot = stage1_ckpt["num_embeddings_bot"]
+    embedding_dim = stage1_ckpt["embedding_dim"]
     # Stage 1: encoder, codebook (VQ1/VQ2), and General Object Decoder
     vq_vae = VQ_VAE_2Layer(
         num_hiddens=128,
         num_residual_layers=2,
         num_residual_hiddens=64,
-        num_embeddings=(1024, 4096),
-        embedding_dim=128,
+        num_embeddings=(num_embeddings_top, num_embeddings_bot),
+        embedding_dim=embedding_dim,
         commitment_cost=0.25,
         decay=0.99,
     )
-    stage1 = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    vq_vae.load_state_dict(stage1["model_state_dict"])
+    vq_vae.load_state_dict(stage1_ckpt["model_state_dict"])
 
     # Full sDSR: Stage 1 modules (frozen in training) + Stage 2 modules
-    model = build_s_dsr(n_mels, T, vq_vae)
+    model = build_s_dsr(n_mels, T, vq_vae, embedding_dim)
 
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     model.load_state_dict(stage2["model_state_dict"])

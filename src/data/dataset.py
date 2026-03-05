@@ -49,11 +49,14 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_max:         float = 8_000.0,
         top_db:        float = 80.0,
         normalize:     bool  = True,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
+        target_T_override: int | None = None,
     ):
         if machine_types is not None:
             self._init_multi(root, machine_types, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, normalize)
         elif machine_type is not None:
-            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, normalize)
+            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, normalize, norm_mean, norm_std, target_T_override)
         else:
             raise ValueError("Provide either machine_type or machine_types")
 
@@ -92,6 +95,9 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_max: float,
         top_db: float,
         normalize: bool,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
+        target_T_override: int | None = None,
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -111,7 +117,12 @@ class DCASE2020Task2LogMelDataset(Dataset):
         self.machine_ids = sorted(set(machine_id_strs))
         self._machine_id_strs = machine_id_strs
 
-        if normalize:
+        use_provided_norm = normalize and norm_mean is not None and norm_std is not None
+        if use_provided_norm:
+            self.mean = norm_mean.to(dtype=self.data.dtype, device=self.data.device)
+            self.std = norm_std.to(dtype=self.data.dtype, device=self.data.device)
+            self.data = (self.data - self.mean) / (self.std + 1e-8)
+        elif normalize:
             self.mean = self.data.mean(dim=(0, 2, 3), keepdim=True)
             self.std  = self.data.std(dim=(0, 2, 3),  keepdim=True)
             self.data = (self.data - self.mean) / (self.std + 1e-8)
@@ -120,8 +131,10 @@ class DCASE2020Task2LogMelDataset(Dataset):
             self.mean = torch.zeros(shape, dtype=self.data.dtype, device=self.data.device)
             self.std  = torch.ones(shape, dtype=self.data.dtype, device=self.data.device)
 
-        # 
-        target_T = min(320, math.ceil(self.data.shape[-1] / 16) * 16)
+        if target_T_override is not None:
+            target_T = target_T_override
+        else:
+            target_T = min(320, math.ceil(self.data.shape[-1] / 16) * 16)
         self.target_T = target_T
         if self.data.shape[-1] < target_T:
             pad = target_T - self.data.shape[-1]

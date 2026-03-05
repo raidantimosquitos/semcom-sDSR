@@ -51,6 +51,7 @@ class Stage1Trainer(BaseTrainer):
         self.lr = lr
         self.lr_warmup_iters = lr_warmup_iters
         self.lr_min = lr_min
+        self.dataset = dataset
 
         # Dataset is already for a single machine_type; no filtering needed
         if getattr(dataset, "machine_type", None) not in (None, machine_type):
@@ -142,6 +143,13 @@ class Stage1Trainer(BaseTrainer):
             "optim_state_dict": self.optimizer.state_dict(),
             "scaler_state_dict": self.scaler.state_dict(),
             "best_total_loss": self.best_total_loss,
+            "norm_mean": self.dataset.mean.cpu().clone(),
+            "norm_std": self.dataset.std.cpu().clone(),
+            "target_T": int(self.dataset.target_T),
+            "n_mels": int(self.dataset.data.shape[2]),
+            "num_embeddings_bot": int(self.model.num_embeddings_bottom),
+            "num_embeddings_top": int(self.model.num_embeddings_top),
+            "embedding_dim": int(self.model.embedding_dim),
         }
 
         # 1. Delete previous latest checkpoint before saving new one

@@ -61,12 +61,17 @@ class VQ_VAE_2Layer(nn.Module):
     ):
         super().__init__()
         self.test = test
+        self.embedding_dim = embedding_dim
 
         # Resolve codebook sizes: int -> (top, bot) same; tuple -> (top, bot) explicit
         if isinstance(num_embeddings, int):
             num_embeddings_top = num_embeddings_bot = num_embeddings
+            self.num_embeddings_bottom = num_embeddings_bot
+            self.num_embeddings_top = num_embeddings_top
         else:
             num_embeddings_top, num_embeddings_bot = num_embeddings
+            self.num_embeddings_bottom = num_embeddings_bot
+            self.num_embeddings_top = num_embeddings_top
 
         # Encoders
         self._encoder_bot = EncoderBot(
