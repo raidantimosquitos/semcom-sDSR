@@ -6,6 +6,12 @@
 
 set -euo pipefail
 
+# Run from repo root so "import src" works
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+export PYTHONPATH="$REPO_ROOT"
+
 DATA_PATH="${DATA_PATH:-./dataset}"
 CKPT_DIR="${CKPT_DIR:-./checkpoints}"
 GCS_CHECKPOINTS="gs://semcom-sdsr-training-data-1772509648/checkpoints"
