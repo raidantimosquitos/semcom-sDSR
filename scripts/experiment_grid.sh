@@ -10,7 +10,7 @@ DATA_PATH="${DATA_PATH:-./dataset}"
 CKPT_DIR="${CKPT_DIR:-./checkpoints}"
 GCS_CHECKPOINTS="gs://semcom-sdsr-training-data-1772509648/checkpoints"
 N_ITER=20000
-BATCH_SIZE=256
+BATCH_SIZE=128
 
 # All 6 DCASE2020 Task 2 machine types for stage1
 MACHINE_TYPES="fan pump slider valve ToyCar ToyTrain"
