@@ -2,7 +2,7 @@
 # Full stage1 grid: 3 embedding_dims × 7 codebook (top,bottom) configs, 20k iter, batch 256.
 # After each run, uploads checkpoints to GCS with a config stamp.
 # Prerequisite: sync dataset from GCS, e.g.:
-#   gsutil -m cp -r gs://semcom-sdsr-training-data-1772509648/dataset ./dataset
+#   gsutil -m cp -r gs://semcom-sdsr-training-data-1772509648/dcase2020_task2_dev_dataset ./dataset
 
 set -euo pipefail
 

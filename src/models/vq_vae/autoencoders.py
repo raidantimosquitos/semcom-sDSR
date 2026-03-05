@@ -88,7 +88,7 @@ class VQ_VAE_2Layer(nn.Module):
         # Projection to embedding space before VQ
         self._pre_vq_conv_top = nn.Conv2d(num_hiddens, embedding_dim, kernel_size=1, stride=1)
         self._pre_vq_conv_bot = nn.Conv2d(
-            num_hiddens + embedding_dim, embedding_dim, kernel_size=1, stride=1
+            num_hiddens * 2, embedding_dim, kernel_size=1, stride=1
         )
 
         # Vector quantizers (different codebook sizes allowed)
