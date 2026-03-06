@@ -23,16 +23,16 @@ class EncoderBot(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        num_hiddens: int,
+        hidden_channels: int,
         num_residual_layers: int,
         num_residual_hiddens: int,
     ) -> None:
         super().__init__()
-        self._conv1 = nn.Conv2d(in_channels, num_hiddens // 2, kernel_size=4, stride=2, padding=1)
-        self._conv2 = nn.Conv2d(num_hiddens // 2, num_hiddens, kernel_size=(3, 4), stride=(1, 2), padding=(1, 1))
-        self._conv3 = nn.Conv2d(num_hiddens, num_hiddens, kernel_size=3, stride=1, padding=1)
+        self._conv1 = nn.Conv2d(in_channels, hidden_channels // 2, kernel_size=4, stride=2, padding=1)
+        self._conv2 = nn.Conv2d(hidden_channels // 2, hidden_channels, kernel_size=(3, 4), stride=(1, 2), padding=(1, 1))
+        self._conv3 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
         self._residual = ResidualStack(
-            num_hiddens, num_hiddens,
+            hidden_channels, hidden_channels,
             num_residual_layers, num_residual_hiddens,
         )
 
@@ -52,15 +52,15 @@ class EncoderTop(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        num_hiddens: int,
+        hidden_channels: int,
         num_residual_layers: int,
         num_residual_hiddens: int,
     ) -> None:
         super().__init__()
-        self._conv1 = nn.Conv2d(in_channels, num_hiddens, kernel_size=4, stride=2, padding=1)
-        self._conv2 = nn.Conv2d(num_hiddens, num_hiddens, kernel_size=3, stride=1, padding=1)
+        self._conv1 = nn.Conv2d(in_channels, hidden_channels, kernel_size=4, stride=2, padding=1)
+        self._conv2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
         self._residual = ResidualStack(
-            num_hiddens, num_hiddens,
+            hidden_channels, hidden_channels,
             num_residual_layers, num_residual_hiddens,
         )
 

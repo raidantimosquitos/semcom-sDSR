@@ -50,7 +50,7 @@ class VQ_VAE_2Layer(nn.Module):
 
     def __init__(
         self,
-        num_hiddens: int,
+        hidden_channels: int,
         num_residual_layers: int,
         num_residual_hiddens: int,
         num_embeddings: Union[int, tuple[int, int]],
@@ -62,6 +62,7 @@ class VQ_VAE_2Layer(nn.Module):
         super().__init__()
         self.test = test
         self.embedding_dim = embedding_dim
+        self.hidden_channels = hidden_channels
 
         # Resolve codebook sizes: int -> (top, bot) same; tuple -> (top, bot) explicit
         if isinstance(num_embeddings, int):
@@ -75,20 +76,20 @@ class VQ_VAE_2Layer(nn.Module):
 
         # Encoders
         self._encoder_bot = EncoderBot(
-            1, num_hiddens,
+            1, hidden_channels,
             num_residual_layers,
             num_residual_hiddens,
         )
         self._encoder_top = EncoderTop(
-            num_hiddens, num_hiddens,
+            hidden_channels, hidden_channels,
             num_residual_layers,
             num_residual_hiddens,
         )
 
         # Projection to embedding space before VQ
-        self._pre_vq_conv_top = nn.Conv2d(num_hiddens, embedding_dim, kernel_size=1, stride=1)
+        self._pre_vq_conv_top = nn.Conv2d(hidden_channels, embedding_dim, kernel_size=1, stride=1)
         self._pre_vq_conv_bot = nn.Conv2d(
-            num_hiddens * 2, embedding_dim, kernel_size=1, stride=1
+            hidden_channels * 2, embedding_dim, kernel_size=1, stride=1
         )
 
         # Vector quantizers (different codebook sizes allowed)
@@ -101,12 +102,12 @@ class VQ_VAE_2Layer(nn.Module):
 
         # Decoders
         self._decoder_top = DecoderTop(
-            embedding_dim, num_hiddens,
+            embedding_dim, hidden_channels,
             num_residual_layers,
             num_residual_hiddens,
         )
         self._decoder_bot = DecoderBot(
-            embedding_dim * 2, num_hiddens,
+            embedding_dim * 2, hidden_channels,
             num_residual_layers,
             num_residual_hiddens,
         )
@@ -262,7 +263,7 @@ if __name__ == "__main__":
 
     # Same codebook size for both (backward compatible)
     model_same = VQ_VAE_2Layer(
-        num_hiddens=128,
+        hidden_channels=128,
         num_residual_layers=2,
         num_residual_hiddens=64,
         num_embeddings=4096,
@@ -273,7 +274,7 @@ if __name__ == "__main__":
 
     # Different codebook sizes: top (coarse) smaller, bottom (fine) larger
     model_diff = VQ_VAE_2Layer(
-        num_hiddens=128,
+        hidden_channels=128,
         num_residual_layers=2,
         num_residual_hiddens=64,
         num_embeddings=(1024, 4096),  # top=1024, bot=4096

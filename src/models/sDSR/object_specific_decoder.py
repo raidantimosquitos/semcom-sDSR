@@ -29,7 +29,7 @@ class ObjectSpecificDecoder(nn.Module):
     def __init__(
         self,
         embedding_dim: int,
-        num_hiddens: int,
+        hidden_channels: int,
         num_residual_layers: int,
         num_residual_hiddens: int,
         use_subspace_restriction: bool = True,
@@ -47,7 +47,7 @@ class ObjectSpecificDecoder(nn.Module):
 
         self.spectrogram_reconstruction_network = SpectrogramReconstructionNetwork(
             in_channels=2 * embedding_dim,
-            num_hiddens=num_hiddens,
+            hidden_channels=hidden_channels,
             num_residual_layers=num_residual_layers,
             num_residual_hiddens=num_residual_hiddens,
         )
@@ -115,7 +115,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        num_hiddens: int,
+        hidden_channels: int,
         num_residual_layers: int,
         num_residual_hiddens: int,
     ) -> None:
@@ -123,42 +123,42 @@ class SpectrogramReconstructionNetwork(nn.Module):
         norm_layer = nn.InstanceNorm2d
         # Encoder at feature resolution (no downsampling)
         self.block1 = nn.Sequential(
-            nn.Conv2d(in_channels, num_hiddens, kernel_size=3, padding=1),
-            norm_layer(num_hiddens),
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
+            norm_layer(hidden_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(num_hiddens, num_hiddens, kernel_size=3, padding=1),
-            norm_layer(num_hiddens),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            norm_layer(hidden_channels),
             nn.ReLU(inplace=True),
         )
         self.block2 = nn.Sequential(
-            nn.Conv2d(num_hiddens, num_hiddens, kernel_size=3, padding=1),
-            norm_layer(num_hiddens),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            norm_layer(hidden_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(num_hiddens, num_hiddens, kernel_size=3, padding=1),
-            norm_layer(num_hiddens),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
+            norm_layer(hidden_channels),
             nn.ReLU(inplace=True),
         )
         # Bottleneck at feature resolution (no 1024->64 squeeze; use num_hiddens)
         self._bottleneck = ResidualStack(
-            num_hiddens,
-            num_hiddens,
+            hidden_channels,
+            hidden_channels,
             num_residual_layers,
             num_residual_hiddens,
         )
         # Decoder: up 2x both + skip(b2), then 1x freq 2x time + skip(b1) (asymmetric: 2x freq, 4x time total)
         self._conv_trans1 = nn.ConvTranspose2d(
-            num_hiddens, num_hiddens, kernel_size=4, stride=2, padding=1
+            hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1
         )
         self._conv_after_skip2 = nn.Conv2d(
-            num_hiddens * 2, num_hiddens, kernel_size=3, stride=1, padding=1
+            hidden_channels * 2, hidden_channels, kernel_size=3, stride=1, padding=1
         )
         self._conv_trans2 = nn.ConvTranspose2d(
-            num_hiddens, num_hiddens // 2, kernel_size=(3, 4), stride=(1, 2), padding=(1, 1)
+            hidden_channels, hidden_channels // 2, kernel_size=(3, 4), stride=(1, 2), padding=(1, 1)
         )
         self._conv_after_skip1 = nn.Conv2d(
-            num_hiddens // 2 + num_hiddens, num_hiddens // 2, kernel_size=3, stride=1, padding=1
+            hidden_channels // 2 + hidden_channels, hidden_channels // 2, kernel_size=3, stride=1, padding=1
         )
-        self._conv_out = nn.Conv2d(num_hiddens // 2, 1, kernel_size=3, stride=1, padding=1)
+        self._conv_out = nn.Conv2d(hidden_channels // 2, 1, kernel_size=3, stride=1, padding=1)
 
     def forward(
         self,

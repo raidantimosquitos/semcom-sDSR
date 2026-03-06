@@ -23,17 +23,17 @@ class DecoderTop(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        num_hiddens: int,
+        hidden_channels: int,
         num_residual_layers: int,
         num_residual_hiddens: int,
     ) -> None:
         super().__init__()
-        self._conv = nn.Conv2d(in_channels, num_hiddens, kernel_size=3, stride=1, padding=1)
+        self._conv = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
         self._residual = ResidualStack(
-            num_hiddens, num_hiddens,
+            hidden_channels, hidden_channels,
             num_residual_layers, num_residual_hiddens,
         )
-        self._conv_trans = nn.ConvTranspose2d(num_hiddens, num_hiddens, kernel_size=4, stride=2, padding=1)
+        self._conv_trans = nn.ConvTranspose2d(hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._conv(x)
@@ -50,21 +50,21 @@ class DecoderBot(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        num_hiddens: int,
+        hidden_channels: int,
         num_residual_layers: int,
         num_residual_hiddens: int,
     ) -> None:
         super().__init__()
-        self._conv = nn.Conv2d(in_channels, num_hiddens, kernel_size=3, stride=1, padding=1)
+        self._conv = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
         self._residual = ResidualStack(
-            num_hiddens, num_hiddens,
+            hidden_channels, hidden_channels,
             num_residual_layers, num_residual_hiddens,
         )
         self._conv_trans1 = nn.ConvTranspose2d(
-            num_hiddens, num_hiddens // 2, kernel_size=4, stride=2, padding=1
+            hidden_channels, hidden_channels // 2, kernel_size=4, stride=2, padding=1
         )
         self._conv_trans2 = nn.ConvTranspose2d(
-            num_hiddens // 2, 1, kernel_size=(3, 4), stride=(1, 2), padding=(1, 1)
+            hidden_channels // 2, 1, kernel_size=(3, 4), stride=(1, 2), padding=(1, 1)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

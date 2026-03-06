@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--num_embeddings_top", type=int, default=2048)
     s1.add_argument("--num_embeddings_bot", type=int, default=8192)
     s1.add_argument("--embedding_dim", type=int, default=48)
+    s1.add_argument("--hidden_channels", type=int, default=64)
     s1.add_argument("--lambda_recon", type=float, default=1.0)
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
@@ -76,9 +77,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_vq_vae(n_mels: int, T: int, num_embeddings_top: int, num_embeddings_bot: int, embedding_dim: int) -> VQ_VAE_2Layer:
+def build_vq_vae(n_mels: int, T: int, hidden_channels: int, num_embeddings_top: int, num_embeddings_bot: int, embedding_dim: int) -> VQ_VAE_2Layer:
     return VQ_VAE_2Layer(
-        num_hiddens=64,
+        hidden_channels=hidden_channels,
         num_residual_layers=2,
         num_residual_hiddens=32,
         num_embeddings=(num_embeddings_top, num_embeddings_bot),
@@ -88,10 +89,10 @@ def build_vq_vae(n_mels: int, T: int, num_embeddings_top: int, num_embeddings_bo
     )
 
 
-def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int, embedding_dim: int) -> sDSR:
+def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int, hidden_channels: int, embedding_dim: int) -> sDSR:
     cfg = sDSRConfig(
         embedding_dim=embedding_dim,
-        num_hiddens=64,
+        hidden_channels=hidden_channels,
         num_residual_layers=2,
         num_residual_hiddens=32,
         ad_base_width=32,
@@ -119,7 +120,7 @@ def run_stage1(args: argparse.Namespace) -> None:
         run_name = "+".join(sorted(machine_types))
     _, _, n_mels, T = dataset.data.shape
 
-    model = build_vq_vae(n_mels, T, args.num_embeddings_top, args.num_embeddings_bot, args.embedding_dim)
+    model = build_vq_vae(n_mels, T, args.hidden_channels, args.num_embeddings_top, args.num_embeddings_bot, args.embedding_dim)
     trainer = Stage1Trainer(
         model=model,
         dataset=dataset,
@@ -167,10 +168,11 @@ def run_stage2(args: argparse.Namespace) -> None:
     num_embeddings_top = ckpt["num_embeddings_top"]
     num_embeddings_bot = ckpt["num_embeddings_bot"]
     embedding_dim = ckpt["embedding_dim"]
-    vq_vae = build_vq_vae(n_mels, T, num_embeddings_top, num_embeddings_bot, embedding_dim)
+    hidden_channels = ckpt["hidden_channels"]
+    vq_vae = build_vq_vae(n_mels, T, hidden_channels, num_embeddings_top, num_embeddings_bot, embedding_dim)
     vq_vae.load_state_dict(ckpt["model_state_dict"])
 
-    model = build_s_dsr(vq_vae, n_mels, T, embedding_dim)
+    model = build_s_dsr(vq_vae, n_mels, T, hidden_channels, embedding_dim)
     trainer = Stage2Trainer(
         model=model,
         dataset=train_dataset,

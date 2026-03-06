@@ -47,10 +47,10 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer, embedding_dim: int) -> sDSR:
+def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer, embedding_dim: int, hidden_channels: int) -> sDSR:
     cfg = sDSRConfig(
         embedding_dim=embedding_dim,
-        num_hiddens=128,
+        hidden_channels=hidden_channels,
         n_mels=n_mels,
         T=T,
     )
@@ -166,9 +166,10 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
     num_embeddings_top = stage1_ckpt["num_embeddings_top"]
     num_embeddings_bot = stage1_ckpt["num_embeddings_bot"]
     embedding_dim = stage1_ckpt["embedding_dim"]
+    hidden_channels = stage1_ckpt["hidden_channels"]
     # Stage 1: encoder, codebook (VQ1/VQ2), and General Object Decoder
     vq_vae = VQ_VAE_2Layer(
-        num_hiddens=128,
+        hidden_channels=hidden_channels,
         num_residual_layers=2,
         num_residual_hiddens=64,
         num_embeddings=(num_embeddings_top, num_embeddings_bot),
@@ -179,7 +180,7 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
     vq_vae.load_state_dict(stage1_ckpt["model_state_dict"])
 
     # Full sDSR: Stage 1 modules (frozen in training) + Stage 2 modules
-    model = build_s_dsr(n_mels, T, vq_vae, embedding_dim)
+    model = build_s_dsr(n_mels, T, vq_vae, embedding_dim, hidden_channels)
 
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     model.load_state_dict(stage2["model_state_dict"])

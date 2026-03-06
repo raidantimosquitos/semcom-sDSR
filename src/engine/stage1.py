@@ -148,6 +148,7 @@ class Stage1Trainer(BaseTrainer):
             "num_embeddings_bot": int(self.model.num_embeddings_bottom),
             "num_embeddings_top": int(self.model.num_embeddings_top),
             "embedding_dim": int(self.model.embedding_dim),
+            "hidden_channels": int(self.model.hidden_channels),
         }
         norm_stats = getattr(self.dataset, "norm_stats", None)
         if norm_stats:
