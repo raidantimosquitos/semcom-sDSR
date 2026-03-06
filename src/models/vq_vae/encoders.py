@@ -1,8 +1,8 @@
 """
 2-D CNN encoders for spectrogram input.
 
-- EncoderBot: first stage (input -> high-res latent), 4x spatial downsampling
-- EncoderTop: second stage (high-res -> low-res latent), 2x further downsampling
+- EncoderBot: first stage (input -> high-res latent), 2x freq + 4x time downsampling
+- EncoderTop: second stage (high-res -> low-res latent), 2x further in both dims
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from .res_blocks_2d import ResidualStack
 class EncoderBot(nn.Module):
     """
     Bottom encoder: input spectrogram -> high-resolution latent.
-    4x downsampling in spatial dims (2 strided convs).
+    2x down in frequency, 4x down in time (conv1 stride 2x2, conv2 stride 1x2).
     """
 
     def __init__(
@@ -29,7 +29,7 @@ class EncoderBot(nn.Module):
     ) -> None:
         super().__init__()
         self._conv1 = nn.Conv2d(in_channels, num_hiddens // 2, kernel_size=4, stride=2, padding=1)
-        self._conv2 = nn.Conv2d(num_hiddens // 2, num_hiddens, kernel_size=4, stride=2, padding=1)
+        self._conv2 = nn.Conv2d(num_hiddens // 2, num_hiddens, kernel_size=(3, 4), stride=(1, 2), padding=(1, 1))
         self._conv3 = nn.Conv2d(num_hiddens, num_hiddens, kernel_size=3, stride=1, padding=1)
         self._residual = ResidualStack(
             num_hiddens, num_hiddens,
@@ -46,7 +46,7 @@ class EncoderBot(nn.Module):
 class EncoderTop(nn.Module):
     """
     Top encoder: high-res latent -> low-res latent.
-    2x additional downsampling.
+    2x down in frequency, 2x down in time.
     """
 
     def __init__(

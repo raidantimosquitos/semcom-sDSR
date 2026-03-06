@@ -114,9 +114,9 @@ class SubspaceRestrictionNetwork(nn.Module):
 
     def __init__(
         self,
-        in_channels: int = 128,
-        out_channels: int = 128,
-        base_width: int = 128,
+        in_channels: int = 64,
+        out_channels: int = 64,
+        base_width: int = 32,
     ) -> None:
         super().__init__()
         self.encoder = FeatureEncoder(in_channels, base_width)
@@ -133,7 +133,7 @@ class SubspaceRestrictionModule(nn.Module):
     with the frozen VQ. Returns (F̃, quantized(F̃), vq_loss) for decoder and loss.
     """
 
-    def __init__(self, embedding_size: int = 128) -> None:
+    def __init__(self, embedding_size: int = 64) -> None:
         super().__init__()
         self._unet = SubspaceRestrictionNetwork(
             in_channels=embedding_size,

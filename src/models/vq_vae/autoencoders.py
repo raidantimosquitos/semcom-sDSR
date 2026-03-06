@@ -10,17 +10,17 @@ Input spectrograms are 2-D: (B, C, n_mels, T)
   T       – time frames (e.g. 256)
 
 Architecture (Figure 1 of the paper):
-  Encoder 1  : X → f1          (downsampled in both freq and time by s1)
-  Encoder 2  : f1 → f2         (further downsampled by s2)
-  VQ1        : f2 → Q1         (coarse codebook, top)
-  Decoder 1  : Q1 → fU         (upsample coarse back to f1 resolution)
-  Concatenate: [f1, fU] → VQ2 → Q2  (fine codebook, bottom)
-  Decoder 2  : [Q1_up, Q2] → X_out  (upsample to original resolution)
+  Encoder top  : X → f_top          (downsampled in both freq and time by s1)
+  Encoder bot  : f_bot → f_bot         (further downsampled by s2)
+  VQ top        : f_top → Q_top         (coarse codebook, top)
+  Decoder top  : Q_top → f_top_up         (upsample coarse back to f_top resolution)
+  Concatenate: [f_bot, f_top_up] → VQ_bot → Q_bot  (fine codebook, bottom)
+  Decoder bot  : [Q_top_up, Q_bot] → X_out  (upsample to original resolution)
 
 Loss (Equation 1):
   L_ae = lambda_x * MSE(X, X_out)
-       + lambda_K * MSE(f2, sg[Q1])   <- VQ1 (top)
-       + lambda_K * MSE(f1, sg[Q2])   <- VQ2 (bottom)
+       + lambda_K * MSE(f_top, sg[Q_top])   <- VQ_top (top)
+       + lambda_K * MSE(f_bot, sg[Q_bot])   <- VQ_bot (bottom)
   where sg[.] is stop-gradient (.detach()), lambda_K = 0.25.
 """
 
@@ -118,16 +118,16 @@ class VQ_VAE_2Layer(nn.Module):
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
     ]:
         # Encode: bottom (high-res) and top (low-res)
-        enc_bot = self._encoder_bot(x)
-        enc_top = self._encoder_top(enc_bot)
+        f_bot = self._encoder_bot(x)
+        f_top = self._encoder_top(f_bot)
 
         # Project and quantize top (coarse)
-        z_top = self._pre_vq_conv_top(enc_top)
+        z_top = self._pre_vq_conv_top(f_top)
         loss_top, quantized_top, perplexity_top, _ = self._vq_top(z_top)
 
         # Decode top and concatenate with enc_bot for bottom quantizer input
         decoded_top = self._decoder_top(quantized_top)
-        feat_bot = torch.cat([enc_bot, decoded_top], dim=1)
+        feat_bot = torch.cat([f_bot, decoded_top], dim=1)
 
         # Project and quantize bottom (fine)
         z_bot = self._pre_vq_conv_bot(feat_bot)
@@ -170,12 +170,12 @@ class VQ_VAE_2Layer(nn.Module):
         Returns:
             q_bot, q_top, z_bot, z_top (z_* are pre-quantize continuous features)
         """
-        enc_bot = self._encoder_bot(x)
-        enc_top = self._encoder_top(enc_bot)
-        z_top = self._pre_vq_conv_top(enc_top)
+        f_bot = self._encoder_bot(x)
+        f_top = self._encoder_top(f_bot)
+        z_top = self._pre_vq_conv_top(f_top)
         _, quantized_top, _, _ = self._vq_top(z_top)
         decoded_top = self._decoder_top(quantized_top)
-        feat_bot = torch.cat([enc_bot, decoded_top], dim=1)
+        feat_bot = torch.cat([f_bot, decoded_top], dim=1)
         z_bot = self._pre_vq_conv_bot(feat_bot)
         _, quantized_bot, _, _ = self._vq_bot(z_bot)
         return quantized_bot, quantized_top, z_bot, z_top
@@ -191,13 +191,13 @@ class VQ_VAE_2Layer(nn.Module):
             indices_top: (B, H_top, W_top) long
             indices_bot: (B, H_bot, W_bot) long
         """
-        enc_bot = self._encoder_bot(x)
-        enc_top = self._encoder_top(enc_bot)
-        z_top = self._pre_vq_conv_top(enc_top)
+        f_bot = self._encoder_bot(x)
+        f_top = self._encoder_top(f_bot)
+        z_top = self._pre_vq_conv_top(f_top)
         idx_top_flat = self._vq_top.get_indices(z_top)
         _, quantized_top, _, _ = self._vq_top(z_top)
         decoded_top = self._decoder_top(quantized_top)
-        feat_bot = torch.cat([enc_bot, decoded_top], dim=1)
+        feat_bot = torch.cat([f_bot, decoded_top], dim=1)
         z_bot = self._pre_vq_conv_bot(feat_bot)
         idx_bot_flat = self._vq_bot.get_indices(z_bot)
         B, _, H_top, W_top = z_top.shape

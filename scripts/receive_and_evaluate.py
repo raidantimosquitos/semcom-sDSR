@@ -86,7 +86,8 @@ def main() -> None:
     bits_top = int(math.log2(num_embeddings_top))
     bits_bot = int(math.log2(num_embeddings_bot))
 
-    H_bot = max(1, n_mels // 4)
+    # Match encoder: bot (n_mels/2, T/4), top (n_mels/4, T/8)
+    H_bot = max(1, n_mels // 2)
     W_bot = max(1, T // 4)
     H_top = max(1, H_bot // 2)
     W_top = max(1, W_bot // 2)

@@ -39,12 +39,12 @@ def parse_args() -> argparse.Namespace:
     # Stage 1: machine_type can be a list for multi-type training
     s1 = sub.choices["stage1"]
     s1.add_argument("--machine_type", type=str, nargs="+", default=["fan"], help="One or more machine types (e.g. fan pump slider)")
-    s1.add_argument("--batch_size", type=int, default=128, help="Batch size (default: 128)")
+    s1.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
     s1.add_argument("--n_iter", type=int, default=20000)
     s1.add_argument("--lr", type=float, default=1e-4)
-    s1.add_argument("--num_embeddings_top", type=int, default=1024)
-    s1.add_argument("--num_embeddings_bot", type=int, default=4096)
-    s1.add_argument("--embedding_dim", type=int, default=128)
+    s1.add_argument("--num_embeddings_top", type=int, default=128)
+    s1.add_argument("--num_embeddings_bot", type=int, default=512)
+    s1.add_argument("--embedding_dim", type=int, default=64)
     s1.add_argument("--lambda_recon", type=float, default=1.0)
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 

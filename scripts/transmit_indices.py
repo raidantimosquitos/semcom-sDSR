@@ -74,13 +74,13 @@ def main() -> None:
     vq_vae = vq_vae.to(device)
     vq_vae.eval()
 
-    # Spatial shapes for one clip (n_mels, T) -> (H_top, W_top), (H_bot, W_bot)
+    # Spatial shapes for one clip (n_mels, T): encoder bot 2x freq 4x time, encoder top +2x both
     bits_top = int(math.log2(num_embeddings_top))
     bits_bot = int(math.log2(num_embeddings_bot))
-    H_bot = max(1, n_mels // 4)
+    H_bot = max(1, n_mels // 2)
     W_bot = max(1, T // 4)
-    H_top = max(1, H_bot // bits_top)
-    W_top = max(1, W_bot // bits_top)
+    H_top = max(1, H_bot // 2)
+    W_top = max(1, W_bot // 2)
     frame_sz = frame_size_bytes(H_top, W_top, H_bot, W_bot, bits_top, bits_bot)
 
     frames: list[bytes] = []

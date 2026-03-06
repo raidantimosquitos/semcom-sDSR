@@ -25,12 +25,13 @@ from .anomaly_detection import AnomalyDetectionModule
 class sDSRConfig:
     """Configuration for sDSR model."""
 
-    embedding_dim: int = 128
-    num_hiddens: int = 128
+    embedding_dim: int = 64
+    num_hiddens: int = 64
     num_residual_layers: int = 2
-    num_residual_hiddens: int = 64
+    num_residual_hiddens: int = 32
     n_mels: int = 128
     T: int = 320
+    ad_base_width: int = 32
     anomaly_sampling: Literal["distant", "uniform"] = "distant"
     anomaly_strength_min: float = 0.2
     anomaly_strength_max: float = 1.0
@@ -77,7 +78,7 @@ class sDSR(nn.Module):
         self._anomaly_detection = AnomalyDetectionModule(
             in_channels=2,
             out_channels=2,
-            base_width=64,
+            base_width=cfg.ad_base_width,
         )
 
         # Anomaly generation (training only): codebook replacement using dataset-provided mask
@@ -86,8 +87,8 @@ class sDSR(nn.Module):
         self._freeze_stage1()
 
     def _get_q_shape(self, n_mels: int, T: int) -> tuple[int, int]:
-        """Infer q_bot spatial shape from spectrogram shape (VQ-VAE 4x + 2x downsampling)."""
-        H = n_mels // 4  # 2x then 2x
+        """Infer q_bot (fine) spatial shape from spectrogram shape (encoder bot: 2x freq, 4x time)."""
+        H = n_mels // 2
         W = T // 4
         return (max(1, H), max(1, W))
 

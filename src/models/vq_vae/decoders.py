@@ -1,8 +1,8 @@
 """
 2-D CNN decoders for spectrogram reconstruction.
 
-- DecoderTop: low-res quantized -> high-res (2x upsample)
-- DecoderBot: concatenated [Q_top, Q_bot] -> reconstructed spectrogram (4x upsample)
+- DecoderTop: low-res quantized -> high-res (2x upsample in both dims)
+- DecoderBot: concatenated [Q_top, Q_bot] -> reconstructed spectrogram (2x freq, 4x time upsample)
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from .res_blocks_2d import ResidualStack
 class DecoderTop(nn.Module):
     """
     Top decoder: low-res quantized latent -> high-res feature.
-    2x spatial upsample.
+    2x spatial upsample in both dims.
     """
 
     def __init__(
@@ -44,7 +44,7 @@ class DecoderTop(nn.Module):
 class DecoderBot(nn.Module):
     """
     Bottom decoder: concatenated [Q_top, Q_bot] -> reconstructed spectrogram.
-    4x spatial upsample to original resolution.
+    2x freq + 4x time upsample to original resolution (first 2x2, second 1x2).
     """
 
     def __init__(
@@ -64,7 +64,7 @@ class DecoderBot(nn.Module):
             num_hiddens, num_hiddens // 2, kernel_size=4, stride=2, padding=1
         )
         self._conv_trans2 = nn.ConvTranspose2d(
-            num_hiddens // 2, 1, kernel_size=4, stride=2, padding=1
+            num_hiddens // 2, 1, kernel_size=(3, 4), stride=(1, 2), padding=(1, 1)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

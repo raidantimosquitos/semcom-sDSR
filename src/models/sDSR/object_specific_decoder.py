@@ -104,11 +104,11 @@ class SpectrogramReconstructionNetwork(nn.Module):
     UNet-style decoder: [Q_top_upsampled, Q_bot] -> spectrogram (1 ch).
 
     No re-downsampling: two encoder blocks at feature resolution (H_bot, W_bot),
-    then bottleneck (ResidualStack), then two 2x upsample stages with skip
-    connections from b1 and b2. Mirrors DecoderBot pattern (conv + residual at
-    feature res, then direct upsample to full resolution).
+    then bottleneck (ResidualStack), then asymmetric upsample: first 2x both dims,
+    then 1x freq 2x time (total 2x freq, 4x time to full resolution), with skip
+    connections from b1 and b2.
 
-    Input: (B, 2 * embedding_dim, H_q, W_q) after concat
+    Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/2, T/4).
     Output: (B, 1, n_mels, T)
     """
 
@@ -145,7 +145,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             num_residual_layers,
             num_residual_hiddens,
         )
-        # Decoder: up 2x + skip(b2), then up 2x + skip(b1)
+        # Decoder: up 2x both + skip(b2), then 1x freq 2x time + skip(b1) (asymmetric: 2x freq, 4x time total)
         self._conv_trans1 = nn.ConvTranspose2d(
             num_hiddens, num_hiddens, kernel_size=4, stride=2, padding=1
         )
@@ -153,7 +153,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             num_hiddens * 2, num_hiddens, kernel_size=3, stride=1, padding=1
         )
         self._conv_trans2 = nn.ConvTranspose2d(
-            num_hiddens, num_hiddens // 2, kernel_size=4, stride=2, padding=1
+            num_hiddens, num_hiddens // 2, kernel_size=(3, 4), stride=(1, 2), padding=(1, 1)
         )
         self._conv_after_skip1 = nn.Conv2d(
             num_hiddens // 2 + num_hiddens, num_hiddens // 2, kernel_size=3, stride=1, padding=1
@@ -179,10 +179,10 @@ class SpectrogramReconstructionNetwork(nn.Module):
         x = torch.cat([x, b2_up], dim=1)
         x = self._conv_after_skip2(x)
         x = F.relu(x)
-        # Second up: 2x to full resolution, then concat skip from b1
+        # Second up: 1x freq, 2x time to full resolution, then concat skip from b1
         x = self._conv_trans2(x)
         x = F.relu(x)
-        b1_up = F.interpolate(b1, scale_factor=4, mode="bilinear", align_corners=False)
+        b1_up = F.interpolate(b1, scale_factor=(2, 4), mode="bilinear", align_corners=False)
         x = torch.cat([x, b1_up], dim=1)
         x = self._conv_after_skip1(x)
         x = F.relu(x)
