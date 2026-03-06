@@ -26,13 +26,13 @@ class sDSRConfig:
     """Configuration for sDSR model."""
 
     embedding_dim: int = 64
-    num_hiddens: int = 64
+    hidden_channels: int = 64
     num_residual_layers: int = 2
     num_residual_hiddens: int = 32
     n_mels: int = 128
     T: int = 320
     ad_base_width: int = 32
-    anomaly_sampling: Literal["distant", "uniform"] = "distant"
+    anomaly_sampling: Literal["distant", "uniform"] = "uniform"
     anomaly_strength_min: float = 0.2
     anomaly_strength_max: float = 1.0
     use_subspace_restriction: bool = False
@@ -70,7 +70,7 @@ class sDSR(nn.Module):
         self._vq_vae = vq_vae
         self._object_decoder = ObjectSpecificDecoder(
             embedding_dim=cfg.embedding_dim,
-            num_hiddens=cfg.num_hiddens,
+            hidden_channels=cfg.hidden_channels,
             num_residual_layers=cfg.num_residual_layers,
             num_residual_hiddens=cfg.num_residual_hiddens,
             use_subspace_restriction=cfg.use_subspace_restriction,
@@ -291,7 +291,7 @@ if __name__ == "__main__":
 
     device = "cuda" if _torch.cuda.is_available() else "cpu"
     vq = VQ_VAE_2Layer(
-        num_hiddens=128,
+        hidden_channels=128,
         num_residual_layers=2,
         num_residual_hiddens=64,
         num_embeddings=(4096, 4096),
@@ -299,7 +299,7 @@ if __name__ == "__main__":
         commitment_cost=0.25,
         decay=0.99,
     )
-    cfg = sDSRConfig(n_mels=128, T=320, embedding_dim=128, num_hiddens=128)
+    cfg = sDSRConfig(n_mels=128, T=320, embedding_dim=128, hidden_channels=128)
     model = sDSR(vq, cfg).to(device)
     x = _torch.randn(2, 1, 128, 320, device=device)
 
