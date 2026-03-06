@@ -98,6 +98,7 @@ def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int, hidden_channels: int
         ad_base_width=32,
         n_mels=n_mels,
         T=T,
+        anomaly_sampling="uniform",
     )
     return sDSR(vq_vae, cfg)
 
