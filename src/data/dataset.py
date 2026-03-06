@@ -2,7 +2,7 @@ import random
 import re
 import math
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
@@ -119,17 +119,17 @@ class DCASE2020Task2LogMelDataset(Dataset):
 
         use_provided_norm = normalize and norm_mean is not None and norm_std is not None
         if use_provided_norm:
-            self.mean = norm_mean.to(dtype=self.data.dtype, device=self.data.device)
-            self.std = norm_std.to(dtype=self.data.dtype, device=self.data.device)
-            self.data = (self.data - self.mean) / (self.std + 1e-8)
+            self.mean = norm_mean.to(dtype=self.data.dtype, device=self.data.device) if norm_mean is not None else None
+            self.std = norm_std.to(dtype=self.data.dtype, device=self.data.device) if norm_std is not None else None
+            self.data = (self.data - self.mean) / (self.std + 1e-8) if self.std is not None else self.data
         elif normalize:
             self.mean = self.data.mean(dim=(0, 2, 3), keepdim=True)
             self.std  = self.data.std(dim=(0, 2, 3),  keepdim=True)
-            self.data = (self.data - self.mean) / (self.std + 1e-8)
+            self.data = (self.data - self.mean) / (self.std + 1e-8) if self.std is not None else self.data
         else:
             shape = (1, 1, self.data.shape[2], 1)
-            self.mean = torch.zeros(shape, dtype=self.data.dtype, device=self.data.device)
-            self.std  = torch.ones(shape, dtype=self.data.dtype, device=self.data.device)
+            self.mean = torch.zeros(shape, dtype=self.data.dtype, device=self.data.device) if norm_mean is not None else None
+            self.std  = torch.ones(shape, dtype=self.data.dtype, device=self.data.device) if norm_std is not None else None
 
         if target_T_override is not None:
             target_T = target_T_override
@@ -188,20 +188,28 @@ class DCASE2020Task2LogMelDataset(Dataset):
             all_spectrograms.append(data_mt)
             all_machine_id_strs.extend(machine_id_strs)
 
-        # 2. Truncate to minimum T across all machine types; concatenate
+        # 2. Truncate to minimum T across all machine types
         min_T = min(orig_lengths)
         truncated = [data_mt[..., :min_T].contiguous() for data_mt in all_spectrograms]
-        self.data = torch.cat(truncated, dim=0)
-        n_mels = self.data.shape[2]
+        n_mels = truncated[0].shape[2]
 
-        # 3. Compute normalization stats and normalize (no padding yet)
-        if normalize:
-            self.mean = self.data.mean(dim=(0, 2, 3), keepdim=True)
-            self.std = self.data.std(dim=(0, 2, 3), keepdim=True)
-            self.data = self._normalize(self.data)
-        else:
-            self.mean = torch.zeros(1, 1, n_mels, 1, dtype=self.data.dtype, device=self.data.device)
-            self.std = torch.ones(1, 1, n_mels, 1, dtype=self.data.dtype, device=self.data.device)
+        # 3. Per-machine per-mel-bin normalization, then concatenate
+        self.norm_stats: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        normalized_chunks: list[torch.Tensor] = []
+        for mt, data_mt in zip(sorted(machine_types), truncated):
+            if normalize:
+                mean_mt = data_mt.mean(dim=(0, 2, 3), keepdim=True)
+                std_mt = data_mt.std(dim=(0, 2, 3), keepdim=True)
+                data_mt = (data_mt - mean_mt) / (std_mt + 1e-8)
+                self.norm_stats[mt] = (mean_mt, std_mt)
+            else:
+                mean_mt = torch.zeros(1, 1, n_mels, 1, dtype=data_mt.dtype, device=data_mt.device)
+                std_mt = torch.ones(1, 1, n_mels, 1, dtype=data_mt.dtype, device=data_mt.device)
+                self.norm_stats[mt] = (mean_mt, std_mt)
+            normalized_chunks.append(data_mt)
+        self.data = torch.cat(normalized_chunks, dim=0)
+        self.mean = None
+        self.std = None
 
         # 4. Pad to the next multiple of 16
         target_T = math.ceil(min_T / 16) * 16
@@ -212,7 +220,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
         self.machine_ids = sorted(set(self._machine_id_strs))
 
         print(
-            f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (global per-mel norm, T→{target_T}), "
+            f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (per-machine per-mel norm, T→{target_T}), "
             f"shape {tuple(self.data.shape)} | IDs: {self.machine_ids} | "
             f"{self.data.nbytes / 1e9:.2f} GB in RAM"
         )
@@ -225,10 +233,10 @@ class DCASE2020Task2LogMelDataset(Dataset):
         return self.data[idx], 0, self._machine_id_strs[idx]
 
     def _normalize(self, data: torch.Tensor) -> torch.Tensor:
-        return (data - self.mean) / (self.std + 1e-8)
+        return (data - self.mean) / (self.std + 1e-8) if self.std is not None else data
     
     def _denormalize(self, data: torch.Tensor) -> torch.Tensor:
-        return data * (self.std + 1e-8) + self.mean
+        return data * (self.std + 1e-8) + self.mean if self.std is not None else data
 
 
 class AudDSRAnomTrainDataset(Dataset):
@@ -394,6 +402,18 @@ class DCASE2020Task2TestDataset(Dataset):
         return log_mel, label, machine_id
 
 
+def get_norm_stats_from_stage1_ckpt(
+    ckpt: dict[str, Any], machine_type: str
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Get (norm_mean, norm_std) for the given machine_type from a stage1 checkpoint."""
+    if "norm_stats" in ckpt and machine_type in ckpt["norm_stats"]:
+        entry = ckpt["norm_stats"][machine_type]
+        return (entry["mean"], entry["std"])
+    if "norm_mean" in ckpt and "norm_std" in ckpt:
+        return (ckpt["norm_mean"], ckpt["norm_std"])
+    return (None, None)
+
+
 def make_dataloader(dataset: DCASE2020Task2LogMelDataset | DCASE2020Task2TestDataset, batch_size: int = 256) -> DataLoader:
     return DataLoader(
         dataset,
@@ -423,12 +443,12 @@ if __name__ == "__main__":
         
 
     for machine_type in MACHINE_TYPES:
-
+        mean, std = (dataset.norm_stats[machine_type] if getattr(dataset, "norm_stats", None) else (dataset.mean, dataset.std))
         test_dataset = DCASE2020Task2TestDataset(
             root          = "/mnt/ssd/LaCie/dcase2020-task2-dev-dataset",
             machine_type  = machine_type,
-            mean          = dataset.mean,
-            std           = dataset.std,
+            mean          = mean,
+            std           = std,
             target_T      = dataset.target_T,
         )
         test_loader = make_dataloader(test_dataset, batch_size=256)

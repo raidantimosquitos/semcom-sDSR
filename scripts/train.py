@@ -16,7 +16,11 @@ from pathlib import Path
 
 import torch
 
-from src.data.dataset import DCASE2020Task2LogMelDataset, AudDSRAnomTrainDataset
+from src.data.dataset import (
+    DCASE2020Task2LogMelDataset,
+    AudDSRAnomTrainDataset,
+    get_norm_stats_from_stage1_ckpt,
+)
 from src.engine.stage1 import Stage1Trainer
 from src.engine.stage2 import Stage2Trainer
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
@@ -134,13 +138,14 @@ def run_stage1(args: argparse.Namespace) -> None:
 def run_stage2(args: argparse.Namespace) -> None:
     # Load Stage 1 checkpoint first so we can use its normalization stats for the dataset
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    if "norm_mean" in ckpt and "norm_std" in ckpt and "target_T" in ckpt:
+    norm_mean, norm_std = get_norm_stats_from_stage1_ckpt(ckpt, args.machine_type)
+    if norm_mean is not None and norm_std is not None and "target_T" in ckpt:
         q_vae_dataset = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=args.machine_type,
             normalize=True,
-            norm_mean=ckpt["norm_mean"],
-            norm_std=ckpt["norm_std"],
+            norm_mean=norm_mean,
+            norm_std=norm_std,
             target_T_override=ckpt["target_T"],
         )
     else:

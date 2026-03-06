@@ -19,7 +19,11 @@ from pathlib import Path
 import math
 import torch
 
-from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestDataset
+from src.data.dataset import (
+    DCASE2020Task2LogMelDataset,
+    DCASE2020Task2TestDataset,
+    get_norm_stats_from_stage1_ckpt,
+)
 from src.engine.evaluator import _partial_auc
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
@@ -51,12 +55,24 @@ def main() -> None:
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    # Test dataset for labels and machine_ids in same order as transmitter
-    train_ds = DCASE2020Task2LogMelDataset(
-        root=args.data_path,
-        machine_type=args.machine_type,
-        normalize=True,
-    )
+    # Load Stage 1 checkpoint for norm stats and model weights
+    ckpt1 = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    norm_mean, norm_std = get_norm_stats_from_stage1_ckpt(ckpt1, args.machine_type)
+    if norm_mean is not None and norm_std is not None and "target_T" in ckpt1:
+        train_ds = DCASE2020Task2LogMelDataset(
+            root=args.data_path,
+            machine_type=args.machine_type,
+            normalize=True,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+            target_T_override=ckpt1["target_T"],
+        )
+    else:
+        train_ds = DCASE2020Task2LogMelDataset(
+            root=args.data_path,
+            machine_type=args.machine_type,
+            normalize=True,
+        )
     _, _, n_mels, T = train_ds.data.shape
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
@@ -67,7 +83,6 @@ def main() -> None:
     )
 
     # Load Stage 1 + Stage 2 (full sDSR)
-    ckpt1 = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
     num_embeddings_top = ckpt1["num_embeddings_top"]
     num_embeddings_bot = ckpt1["num_embeddings_bot"]
     embedding_dim = ckpt1["embedding_dim"]

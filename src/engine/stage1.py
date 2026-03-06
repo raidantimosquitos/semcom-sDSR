@@ -137,20 +137,28 @@ class Stage1Trainer(BaseTrainer):
     def _save_checkpoint(
         self, tag: str | None = None, avg: dict[str, float] | None = None
     ) -> None:
-        payload = {
+        payload: dict[str, Any] = {
             "global_step": self.global_step,
             "model_state_dict": self.model.state_dict(),
             "optim_state_dict": self.optimizer.state_dict(),
             "scaler_state_dict": self.scaler.state_dict(),
             "best_total_loss": self.best_total_loss,
-            "norm_mean": self.dataset.mean.cpu().clone(),
-            "norm_std": self.dataset.std.cpu().clone(),
             "target_T": int(self.dataset.target_T),
             "n_mels": int(self.dataset.data.shape[2]),
             "num_embeddings_bot": int(self.model.num_embeddings_bottom),
             "num_embeddings_top": int(self.model.num_embeddings_top),
             "embedding_dim": int(self.model.embedding_dim),
         }
+        norm_stats = getattr(self.dataset, "norm_stats", None)
+        if norm_stats:
+            payload["norm_stats"] = {
+                mt: {"mean": mean.cpu().clone(), "std": std.cpu().clone()}
+                for mt, (mean, std) in norm_stats.items()
+            }
+            payload["machine_types"] = list(norm_stats.keys())
+        else:
+            payload["norm_mean"] = self.dataset.mean.cpu().clone()
+            payload["norm_std"] = self.dataset.std.cpu().clone()
 
         # 1. Delete previous latest checkpoint before saving new one
         tag = tag or f"iter_{self.global_step:06d}"

@@ -22,7 +22,11 @@ from typing import Callable
 import torch
 from torch.utils.data import DataLoader
 
-from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestDataset
+from src.data.dataset import (
+    DCASE2020Task2LogMelDataset,
+    DCASE2020Task2TestDataset,
+    get_norm_stats_from_stage1_ckpt,
+)
 from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
@@ -133,13 +137,14 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
     """Run evaluation; all user-facing output via tee (terminal + log file)."""
     # Load Stage 1 checkpoint once for norm stats and model weights
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    if "norm_mean" in stage1_ckpt and "norm_std" in stage1_ckpt and "target_T" in stage1_ckpt:
+    norm_mean, norm_std = get_norm_stats_from_stage1_ckpt(stage1_ckpt, args.machine_type)
+    if norm_mean is not None and norm_std is not None and "target_T" in stage1_ckpt:
         train_ds = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=args.machine_type,
             normalize=True,
-            norm_mean=stage1_ckpt["norm_mean"],
-            norm_std=stage1_ckpt["norm_std"],
+            norm_mean=norm_mean,
+            norm_std=norm_std,
             target_T_override=stage1_ckpt["target_T"],
         )
     else:
