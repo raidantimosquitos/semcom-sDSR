@@ -46,9 +46,9 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
     s1.add_argument("--n_iter", type=int, default=20000)
     s1.add_argument("--lr", type=float, default=1e-4)
-    s1.add_argument("--num_embeddings_top", type=int, default=128)
-    s1.add_argument("--num_embeddings_bot", type=int, default=512)
-    s1.add_argument("--embedding_dim", type=int, default=64)
+    s1.add_argument("--num_embeddings_top", type=int, default=2048)
+    s1.add_argument("--num_embeddings_bot", type=int, default=8192)
+    s1.add_argument("--embedding_dim", type=int, default=48)
     s1.add_argument("--lambda_recon", type=float, default=1.0)
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
@@ -78,9 +78,9 @@ def parse_args() -> argparse.Namespace:
 
 def build_vq_vae(n_mels: int, T: int, num_embeddings_top: int, num_embeddings_bot: int, embedding_dim: int) -> VQ_VAE_2Layer:
     return VQ_VAE_2Layer(
-        num_hiddens=128,
+        num_hiddens=64,
         num_residual_layers=2,
-        num_residual_hiddens=64,
+        num_residual_hiddens=32,
         num_embeddings=(num_embeddings_top, num_embeddings_bot),
         embedding_dim=embedding_dim,
         commitment_cost=0.25,
@@ -91,9 +91,10 @@ def build_vq_vae(n_mels: int, T: int, num_embeddings_top: int, num_embeddings_bo
 def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int, embedding_dim: int) -> sDSR:
     cfg = sDSRConfig(
         embedding_dim=embedding_dim,
-        num_hiddens=128,
+        num_hiddens=64,
         num_residual_layers=2,
-        num_residual_hiddens=64,
+        num_residual_hiddens=32,
+        ad_base_width=32,
         n_mels=n_mels,
         T=T,
     )
