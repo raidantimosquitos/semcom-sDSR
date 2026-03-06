@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--plot", type=str, default=None, help="Path to save comparison plot (default: <stage2_ckpt_parent>/results/comparison.png)")
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
     p.add_argument("--device", type=str, default="cuda")
-    p.add_argument("--batch_size", type=int, default=32)
+    p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--no_score_norm", action="store_true", help="Disable machine-ID conditioned anomaly score normalization")
     return p.parse_args()
 
