@@ -42,14 +42,14 @@ def parse_args() -> argparse.Namespace:
 
     # Stage 1: machine_type can be a list for multi-type training
     s1 = sub.choices["stage1"]
-    s1.add_argument("--machine_type", type=str, nargs="+", default=["fan"], help="One or more machine types (e.g. fan pump slider)")
+    s1.add_argument("--machine_type", type=str, nargs="+", default=["fan", "pump", "slider", "valve", "ToyCar", "ToyConveyor"], help="One or more machine types (e.g. fan pump slider)")
     s1.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
     s1.add_argument("--n_iter", type=int, default=20000)
     s1.add_argument("--lr", type=float, default=1e-4)
-    s1.add_argument("--num_embeddings_top", type=int, default=2048)
-    s1.add_argument("--num_embeddings_bot", type=int, default=8192)
-    s1.add_argument("--embedding_dim", type=int, default=48)
-    s1.add_argument("--hidden_channels", type=int, default=64)
+    s1.add_argument("--num_embeddings_top", type=int, default=512)
+    s1.add_argument("--num_embeddings_bot", type=int, default=4096)
+    s1.add_argument("--embedding_dim", type=int, default=16)
+    s1.add_argument("--hidden_channels", type=int, default=128)
     s1.add_argument("--lambda_recon", type=float, default=1.0)
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
@@ -81,7 +81,7 @@ def build_vq_vae(n_mels: int, T: int, hidden_channels: int, num_embeddings_top: 
     return VQ_VAE_2Layer(
         hidden_channels=hidden_channels,
         num_residual_layers=2,
-        num_residual_hiddens=32,
+        num_residual_hiddens=64,
         num_embeddings=(num_embeddings_top, num_embeddings_bot),
         embedding_dim=embedding_dim,
         commitment_cost=0.25,
@@ -94,8 +94,8 @@ def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int, hidden_channels: int
         embedding_dim=embedding_dim,
         hidden_channels=hidden_channels,
         num_residual_layers=2,
-        num_residual_hiddens=32,
-        ad_base_width=32,
+        num_residual_hiddens=64,
+        ad_base_width=64,
         n_mels=n_mels,
         T=T,
         anomaly_sampling="uniform",

@@ -10,7 +10,7 @@ source ~/.bashrc
 
 ## Clone the repository and install the Python environment
 ```bash
-git clone https://github.com/raidantimosquitos/semcom-sDSR.git
+git clone
 cd semcom-sDSR
 conda env create --file environment.yml
 ```
