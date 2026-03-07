@@ -171,7 +171,7 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
     vq_vae = VQ_VAE_2Layer(
         hidden_channels=hidden_channels,
         num_residual_layers=2,
-        num_residual_hiddens=64,
+        num_residual_hiddens=32,
         num_embeddings=(num_embeddings_top, num_embeddings_bot),
         embedding_dim=embedding_dim,
         commitment_cost=0.25,
