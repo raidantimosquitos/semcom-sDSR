@@ -42,13 +42,11 @@ class Decoder(nn.Module):
             layers.append(
                 nn.Sequential(
                     nn.ConvTranspose2d(c_channel, n_channel, 4, stride=2, padding=1),
-                    nn.BatchNorm2d(n_channel),
                     nn.ReLU(inplace=True),
                 )
             )
             c_channel, n_channel = n_channel, out_channels
         layers.append(nn.Conv2d(c_channel, n_channel, 3, stride=1, padding=1))
-        layers.append(nn.BatchNorm2d(n_channel))
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -71,7 +69,6 @@ class Upscaler(nn.Module):
                 stage_layers.append(
                     nn.ConvTranspose2d(embed_dim, embed_dim, 4, stride=2, padding=1)
                 )
-                stage_layers.append(nn.BatchNorm2d(embed_dim))
                 stage_layers.append(nn.ReLU(inplace=True))
             self.stages.append(nn.Sequential(*stage_layers))
 

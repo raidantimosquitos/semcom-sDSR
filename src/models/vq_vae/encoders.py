@@ -38,13 +38,11 @@ class Encoder(nn.Module):
             layers.append(
                 nn.Sequential(
                     nn.Conv2d(c_channel, n_channel, 4, stride=2, padding=1),
-                    nn.BatchNorm2d(n_channel),
                     nn.ReLU(inplace=True),
                 )
             )
             c_channel, n_channel = n_channel, hidden_channels
         layers.append(nn.Conv2d(c_channel, n_channel, 3, stride=1, padding=1))
-        layers.append(nn.BatchNorm2d(n_channel))
         layers.append(ResidualStack(n_channel, res_channels, num_res_layers))
         self.layers = nn.Sequential(*layers)
 
