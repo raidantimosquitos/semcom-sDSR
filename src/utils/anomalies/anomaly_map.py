@@ -32,9 +32,9 @@ class PerlinNoiseStrategy:
         self,
         spectrogram_shape: tuple[int, int],
         threshold: float = 0.5,
-        perlin_scale_range: tuple[int, int] = (0, 6),
+        perlin_scale_range: tuple[int, int] = (1, 5),
         rotate: bool = True,
-        rotation_range: tuple[float, float] = (-90.0, 90.0),
+        rotation_range: tuple[float, float] = (-120.0, 120.0),
     ) -> None:
         """
         Args:
@@ -95,9 +95,9 @@ class AudioSpecificStrategy:
         n_mels: int,
         T: int,
         min_band_fraction: float = 0.03,
-        max_band_fraction: float = 0.2,
+        max_band_fraction: float = 0.25,
         min_segments: int = 3,
-        max_segments: int = 20,
+        max_segments: int = 25,
         min_seg_len: int = 5,
         max_seg_len: int = 80,
     ) -> None:
