@@ -59,7 +59,6 @@ class EncoderCoarse(nn.Module):
         x = F.relu(x)
 
         x = self._conv_2(x)
-        x = F.relu(x)
 
         x = self._residual_stack(x)
         return x
