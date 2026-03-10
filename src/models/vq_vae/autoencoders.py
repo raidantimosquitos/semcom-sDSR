@@ -52,7 +52,6 @@ class VQ_VAE_2Layer(nn.Module):
         self,
         hidden_channels: int,
         num_residual_layers: int,
-        num_residual_hiddens: int,
         num_embeddings: Union[int, tuple[int, int]],
         embedding_dim: int,
         commitment_cost: float,
@@ -64,7 +63,6 @@ class VQ_VAE_2Layer(nn.Module):
         self.embedding_dim = embedding_dim
         self.hidden_channels = hidden_channels
         self.num_residual_layers = num_residual_layers
-        self.num_residual_hiddens = num_residual_hiddens
 
         # Resolve codebook sizes: int -> (coarse, fine) same; tuple -> (coarse, fine) explicit
         if isinstance(num_embeddings, int):
@@ -77,16 +75,8 @@ class VQ_VAE_2Layer(nn.Module):
             self.num_embeddings_coarse = num_embeddings_coarse
 
         # Encoders
-        self._encoder_fine = EncoderFine(
-            1, hidden_channels,
-            num_residual_layers,
-            num_residual_hiddens,
-        )
-        self._encoder_coarse = EncoderCoarse(
-            hidden_channels, hidden_channels,
-            num_residual_layers,
-            num_residual_hiddens,
-        )
+        self._encoder_fine = EncoderFine(1, hidden_channels, num_residual_layers)
+        self._encoder_coarse = EncoderCoarse(hidden_channels, hidden_channels, num_residual_layers)
 
         # Projection to embedding space before VQ (f_coarse has 4*hidden, feat_fine = f_fine + decoded_coarse = 5*hidden)
         self._pre_vq_conv_coarse = nn.Conv2d(hidden_channels * 4, embedding_dim, kernel_size=1, stride=1)
@@ -103,16 +93,8 @@ class VQ_VAE_2Layer(nn.Module):
         )
 
         # Decoders
-        self._decoder_coarse = DecoderCoarse(
-            embedding_dim, hidden_channels,
-            num_residual_layers,
-            num_residual_hiddens,
-        )
-        self._decoder_fine = DecoderFine(
-            embedding_dim * 2, hidden_channels,
-            num_residual_layers,
-            num_residual_hiddens,
-        )
+        self._decoder_coarse = DecoderCoarse(embedding_dim, hidden_channels, num_residual_layers)
+        self._decoder_fine = DecoderFine(embedding_dim * 2, hidden_channels, num_residual_layers)
 
     def forward(
         self, x: torch.Tensor
@@ -266,19 +248,17 @@ if __name__ == "__main__":
     model_same = VQ_VAE_2Layer(
         hidden_channels=128,
         num_residual_layers=2,
-        num_residual_hiddens=64,
         num_embeddings=4096,
         embedding_dim=128,
         commitment_cost=0.25,
         decay=0.99,
     ).to(device)
 
-    # Different codebook sizes: top (coarse) smaller, bottom (fine) larger
+    # Different codebook sizes: coarse smaller, fine larger
     model_diff = VQ_VAE_2Layer(
         hidden_channels=128,
         num_residual_layers=2,
-        num_residual_hiddens=64,
-        num_embeddings=(1024, 4096),  # top=1024, bot=4096
+        num_embeddings=(1024, 4096),
         embedding_dim=128,
         commitment_cost=0.25,
         decay=0.99,

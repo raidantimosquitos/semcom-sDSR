@@ -31,7 +31,6 @@ class ObjectSpecificDecoder(nn.Module):
         embedding_dim: int,
         hidden_channels: int,
         num_residual_layers: int,
-        num_residual_hiddens: int,
         use_subspace_restriction: bool = True,
     ) -> None:
         super().__init__()
@@ -49,7 +48,6 @@ class ObjectSpecificDecoder(nn.Module):
             in_channels=2 * embedding_dim,
             hidden_channels=hidden_channels,
             num_residual_layers=num_residual_layers,
-            num_residual_hiddens=num_residual_hiddens,
         )
 
     def forward(
@@ -116,7 +114,6 @@ class SpectrogramReconstructionNetwork(nn.Module):
         in_channels: int,
         hidden_channels: int,
         num_residual_layers: int,
-        num_residual_hiddens: int,
     ) -> None:
         super().__init__()
         norm_layer = nn.InstanceNorm2d
@@ -137,13 +134,8 @@ class SpectrogramReconstructionNetwork(nn.Module):
             norm_layer(hidden_channels),
             nn.ReLU(inplace=True),
         )
-        # Bottleneck at feature resolution
-        self._bottleneck = ResidualStack(
-            hidden_channels,
-            hidden_channels,
-            num_residual_layers,
-            num_residual_hiddens,
-        )
+        # Bottleneck at feature resolution (middle channels = hidden_channels // 2)
+        self._bottleneck = ResidualStack(hidden_channels, hidden_channels, num_residual_layers)
         # Decoder: symmetric 4x upsample (2x then 2x), with skips from b2 and b1
         self._conv_trans1 = nn.ConvTranspose2d(
             hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1

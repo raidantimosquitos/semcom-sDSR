@@ -79,11 +79,9 @@ def main() -> None:
     embedding_dim = ckpt["embedding_dim"]
     hidden_channels = ckpt["hidden_channels"]
     num_residual_layers = ckpt.get("num_residual_layers", 2)
-    num_residual_hiddens = ckpt.get("num_residual_hiddens", 64)
     vq_vae = VQ_VAE_2Layer(
         hidden_channels=hidden_channels,
         num_residual_layers=num_residual_layers,
-        num_residual_hiddens=num_residual_hiddens,
         num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
         embedding_dim=embedding_dim,
         commitment_cost=0.25,

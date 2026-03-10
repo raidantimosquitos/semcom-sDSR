@@ -85,12 +85,10 @@ def build_vq_vae(
     num_embeddings_fine: int,
     embedding_dim: int,
     num_residual_layers: int = 2,
-    num_residual_hiddens: int = 64,
 ) -> VQ_VAE_2Layer:
     return VQ_VAE_2Layer(
         hidden_channels=hidden_channels,
         num_residual_layers=num_residual_layers,
-        num_residual_hiddens=num_residual_hiddens,
         num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
         embedding_dim=embedding_dim,
         commitment_cost=0.25,
@@ -103,8 +101,7 @@ def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int, hidden_channels: int
         embedding_dim=embedding_dim,
         hidden_channels=hidden_channels,
         num_residual_layers=2,
-        num_residual_hiddens=64,
-        ad_base_width=64,
+        ad_base_width=32,
         n_mels=n_mels,
         T=T,
         anomaly_sampling="uniform",
@@ -135,7 +132,6 @@ def run_stage1(args: argparse.Namespace) -> None:
         args.num_embeddings_top, args.num_embeddings_bot,
         args.embedding_dim,
         num_residual_layers=2,
-        num_residual_hiddens=64,
     )
     trainer = Stage1Trainer(
         model=model,
@@ -187,13 +183,11 @@ def run_stage2(args: argparse.Namespace) -> None:
     embedding_dim = ckpt["embedding_dim"]
     hidden_channels = ckpt["hidden_channels"]
     num_residual_layers = ckpt.get("num_residual_layers", 2)
-    num_residual_hiddens = ckpt.get("num_residual_hiddens", 64)
     vq_vae = build_vq_vae(
         n_mels, T, hidden_channels,
         num_embeddings_coarse, num_embeddings_fine,
         embedding_dim,
         num_residual_layers=num_residual_layers,
-        num_residual_hiddens=num_residual_hiddens,
     )
     state = dict(ckpt["model_state_dict"])
     migrate_vq_vae_state_dict(state)

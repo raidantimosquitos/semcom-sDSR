@@ -25,16 +25,12 @@ class EncoderFine(nn.Module):
         in_channels: int,
         hidden_channels: int,
         num_residual_layers: int,
-        num_residual_hiddens: int,
     ) -> None:
         super().__init__()
         self._conv1 = nn.Conv2d(in_channels, hidden_channels // 4, kernel_size=4, stride=2, padding=1)
         self._conv2 = nn.Conv2d(hidden_channels // 4, hidden_channels // 2, kernel_size=4, stride=2, padding=1)
         self._conv3 = nn.Conv2d(hidden_channels // 2, hidden_channels, kernel_size=3, stride=1, padding=1)
-        self._residual = ResidualStack(
-            hidden_channels, hidden_channels,
-            num_residual_layers, num_residual_hiddens,
-        )
+        self._residual = ResidualStack(hidden_channels, hidden_channels, num_residual_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self._conv1(x))
@@ -54,16 +50,11 @@ class EncoderCoarse(nn.Module):
         in_channels: int,
         hidden_channels: int,
         num_residual_layers: int,
-        num_residual_hiddens: int,
     ) -> None:
         super().__init__()
-        out_channels = hidden_channels * 4
-        self._conv1 = nn.Conv2d(in_channels, out_channels // 2, kernel_size=4, stride=2, padding=1)
-        self._conv2 = nn.Conv2d(out_channels // 2, out_channels, kernel_size=4, stride=2, padding=1)
-        self._residual = ResidualStack(
-            out_channels, out_channels,
-            num_residual_layers, num_residual_hiddens,
-        )
+        self._conv1 = nn.Conv2d(in_channels, hidden_channels, kernel_size=4, stride=2, padding=1)
+        self._conv2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1)
+        self._residual = ResidualStack(hidden_channels, hidden_channels, num_residual_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self._conv1(x))

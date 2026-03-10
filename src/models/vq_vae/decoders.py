@@ -25,15 +25,11 @@ class DecoderCoarse(nn.Module):
         in_channels: int,
         hidden_channels: int,
         num_residual_layers: int,
-        num_residual_hiddens: int,
     ) -> None:
         super().__init__()
         out_channels = hidden_channels * 4
         self._conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self._residual = ResidualStack(
-            out_channels, out_channels,
-            num_residual_layers, num_residual_hiddens,
-        )
+        self._residual = ResidualStack(out_channels, out_channels, num_residual_layers)
         self._conv_trans1 = nn.ConvTranspose2d(out_channels, out_channels, kernel_size=4, stride=2, padding=1)
         self._conv_trans2 = nn.ConvTranspose2d(out_channels, out_channels, kernel_size=4, stride=2, padding=1)
 
@@ -55,14 +51,10 @@ class DecoderFine(nn.Module):
         in_channels: int,
         hidden_channels: int,
         num_residual_layers: int,
-        num_residual_hiddens: int,
     ) -> None:
         super().__init__()
         self._conv = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
-        self._residual = ResidualStack(
-            hidden_channels, hidden_channels,
-            num_residual_layers, num_residual_hiddens,
-        )
+        self._residual = ResidualStack(hidden_channels, hidden_channels, num_residual_layers)
         self._conv_trans1 = nn.ConvTranspose2d(
             hidden_channels, hidden_channels // 2, kernel_size=4, stride=2, padding=1
         )

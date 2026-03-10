@@ -150,7 +150,6 @@ class Stage1Trainer(BaseTrainer):
             "embedding_dim": int(self.model.embedding_dim),
             "hidden_channels": int(self.model.hidden_channels),
             "num_residual_layers": int(self.model.num_residual_layers),
-            "num_residual_hiddens": int(self.model.num_residual_hiddens),
         }
         norm_stats = getattr(self.dataset, "norm_stats", None)
         if norm_stats:

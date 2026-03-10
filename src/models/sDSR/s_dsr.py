@@ -28,7 +28,6 @@ class sDSRConfig:
     embedding_dim: int = 64
     hidden_channels: int = 64
     num_residual_layers: int = 2
-    num_residual_hiddens: int = 32
     n_mels: int = 128
     T: int = 320
     ad_base_width: int = 32
@@ -72,7 +71,6 @@ class sDSR(nn.Module):
             embedding_dim=cfg.embedding_dim,
             hidden_channels=cfg.hidden_channels,
             num_residual_layers=cfg.num_residual_layers,
-            num_residual_hiddens=cfg.num_residual_hiddens,
             use_subspace_restriction=cfg.use_subspace_restriction,
         )
         self._anomaly_detection = AnomalyDetectionModule(
@@ -258,7 +256,6 @@ if __name__ == "__main__":
     vq = VQ_VAE_2Layer(
         hidden_channels=128,
         num_residual_layers=2,
-        num_residual_hiddens=64,
         num_embeddings=(4096, 4096),
         embedding_dim=128,
         commitment_cost=0.25,

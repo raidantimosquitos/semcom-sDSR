@@ -10,20 +10,20 @@ import torch.nn.functional as F
 
 
 class Residual(nn.Module):
-    """Single residual block: x + block(x)."""
+    """Single residual block: x + block(x). Middle channels = hidden_channels // 2."""
 
     def __init__(
         self,
         in_channels: int,
         hidden_channels: int,
-        num_residual_hiddens: int,
     ) -> None:
         super().__init__()
+        mid = hidden_channels // 2
         self._block = nn.Sequential(
             nn.ReLU(),
-            nn.Conv2d(in_channels, num_residual_hiddens, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(in_channels, mid, kernel_size=3, stride=1, padding=1, bias=False),
             nn.ReLU(),
-            nn.Conv2d(num_residual_hiddens, hidden_channels, kernel_size=1, stride=1, bias=False),
+            nn.Conv2d(mid, hidden_channels, kernel_size=1, stride=1, bias=False),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -31,18 +31,17 @@ class Residual(nn.Module):
 
 
 class ResidualStack(nn.Module):
-    """Stack of residual blocks with final ReLU."""
+    """Stack of residual blocks with final ReLU. Middle channels = hidden_channels // 2."""
 
     def __init__(
         self,
         in_channels: int,
         hidden_channels: int,
         num_residual_layers: int,
-        num_residual_hiddens: int,
     ) -> None:
         super().__init__()
         self._layers = nn.ModuleList([
-            Residual(in_channels, hidden_channels, num_residual_hiddens)
+            Residual(in_channels, hidden_channels)
             for _ in range(num_residual_layers)
         ])
 

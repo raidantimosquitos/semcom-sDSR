@@ -60,7 +60,7 @@ Vitjan uses:
 - **Conv1**: `in_channels → num_hiddens//2`, kernel **4**, stride **2**, padding **1**
 - **Conv2**: `num_hiddens//2 → num_hiddens`, kernel **4**, stride **2**, padding **1**
 - **Conv3**: `num_hiddens → num_hiddens`, kernel **3**, stride **1**, padding **1**
-- **ResidualStack**: `num_hiddens`, `num_residual_layers`, `num_residual_hiddens`
+- **ResidualStack**: `num_hiddens`, `num_residual_layers` (middle channels = num_hiddens // 2 by design)
 
 For 128×320 you need **4× down** in both dimensions (128→32, 320→80). So either:
 
@@ -71,7 +71,7 @@ Parameters to fix:
 
 - `num_hiddens` — e.g. **128** (Vitjan-style) or **64** (lighter). Your current `enc1_hidden` is this role.
 - `num_residual_layers` — Vitjan often uses **2** or **3**; your `num_res_blocks`.
-- `num_residual_hiddens` — middle channels in each residual block; e.g. **32**. Your current blocks use the same channel count; if you add Vitjan-style ResidualStack, set this.
+- Residual middle channels are **num_hiddens // 2** by design (no separate parameter).
 
 ### 2.3 EncoderTop (coarse encoder: enc_b → enc_t)
 
@@ -85,7 +85,7 @@ For 128×320, **2× down** from (32, 80) → (16, 40). So one stride-2 conv is e
 
 Parameters:
 
-- Same `num_hiddens`, `num_residual_layers`, `num_residual_hiddens` as EncoderBot (or a bit smaller if you want).
+- Same `num_hiddens`, `num_residual_layers` as EncoderBot (middle = num_hiddens // 2).
 
 ### 2.4 Pre-VQ convolutions
 
@@ -105,7 +105,7 @@ So:
 Vitjan uses:
 
 - **Conv1**: `embedding_dim*2 → num_hiddens`, kernel **3**, stride **1**, padding **1**
-- **ResidualStack**: same `num_hiddens`, `num_residual_layers`, `num_residual_hiddens`
+- **ResidualStack**: same `num_hiddens`, `num_residual_layers` (middle = num_hiddens // 2)
 - **ConvTranspose1**: `num_hiddens → num_hiddens//2`, kernel **4**, stride **2**, padding **1**
 - **ConvTranspose2**: `num_hiddens//2 → out_channels`, kernel **4**, stride **2**, padding **1**
 
@@ -115,7 +115,7 @@ Parameters:
 
 - `in_channels` for decoder = **embedding_dim * 2** (concat of upsampled top code and bottom code).
 - `out_channels` = **1** (not 3).
-- Same `num_hiddens`, `num_residual_layers`, `num_residual_hiddens` as encoders.
+- Same `num_hiddens`, `num_residual_layers` as encoders.
 
 ### 2.6 VQ and loss
 
@@ -140,8 +140,7 @@ in_channels = 1
 out_channels = 1
 num_hiddens = 128          # encoder/decoder hidden (Vitjan uses 128)
 embedding_dim = 64          # VQ latent dim
-num_residual_layers = 2     # or 3
-num_residual_hiddens = 32   # inside each residual block
+num_residual_layers = 2     # or 3; residual middle = num_hiddens // 2 by design
 
 # VQ
 num_embeddings = 512       # or 256
@@ -151,7 +150,7 @@ decay = 0.99
 
 Encoder/decoder layer checklist:
 
-- **EncoderBot:** two convs 4×4 stride 2 pad 1 (→ 32×80), then 3×3 stride 1, then ResidualStack(num_hiddens, num_residual_layers, num_residual_hiddens).
+- **EncoderBot:** two convs 4×4 stride 2 pad 1 (→ 32×80), then 3×3 stride 1, then ResidualStack(num_hiddens, num_residual_layers).
 - **EncoderTop:** one conv 4×4 stride 2 pad 1 (→ 16×40), then 3×3 stride 1, then ResidualStack.
 - **Pre-VQ top:** 1×1 conv num_hiddens → embedding_dim.
 - **Pre-VQ bottom:** 1×1 conv (num_hiddens + embedding_dim) → embedding_dim.
@@ -172,7 +171,7 @@ Your `AudDSR` already implements the same two-level idea with `Encoder2d`, two V
 - **num_res_blocks** = `num_residual_layers` (e.g. 2 or 3).
 - **lambda_k** = `commitment_cost` (0.25).
 
-Your residual blocks use GroupNorm + dilated convs; Vitjan uses ReLU-first, no dilation, and `num_residual_hiddens`. If you want to match Vitjan’s residual design exactly, use the `Residual` and `ResidualStack` in `dsr_vitjan_style.py` (see below) and set `num_residual_hiddens` (e.g. 32) there.
+Your residual blocks use GroupNorm + dilated convs; Vitjan uses ReLU-first, no dilation, and middle = num_hiddens // 2. If you want to match Vitjan’s residual design exactly, use the `Residual` and `ResidualStack` in the codebase (middle = hidden_channels // 2 by design).
 
 ---
 
@@ -185,7 +184,7 @@ Your residual blocks use GroupNorm + dilated convs; Vitjan uses ReLU-first, no d
 | **num_hiddens** | Encoder/decoder hidden width | 128 |
 | **embedding_dim** | VQ latent dim (and codebook dim) | 64 |
 | **num_residual_layers** | Depth of residual stack | 2 or 3 |
-| **num_residual_hiddens** | Mid channels in residual block | 32 |
+| (residual mid) | hidden_channels // 2 by design | — |
 | **num_embeddings** | Codebook size | 512 or 256 |
 | **commitment_cost / lambda_k** | Commitment loss weight | 0.25 |
 | **decay** | EMA decay for VQ | 0.99 |

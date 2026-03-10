@@ -89,11 +89,9 @@ def main() -> None:
     embedding_dim = ckpt1["embedding_dim"]
     hidden_channels = ckpt1["hidden_channels"]
     num_residual_layers = ckpt1.get("num_residual_layers", 2)
-    num_residual_hiddens = ckpt1.get("num_residual_hiddens", 64)
     vq_vae = VQ_VAE_2Layer(
         hidden_channels=hidden_channels,
         num_residual_layers=num_residual_layers,
-        num_residual_hiddens=num_residual_hiddens,
         num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
         embedding_dim=embedding_dim,
         commitment_cost=0.25,
@@ -119,7 +117,6 @@ def main() -> None:
     cfg = sDSRConfig(
         embedding_dim=embedding_dim,
         hidden_channels=hidden_channels,
-        num_residual_hiddens=num_residual_hiddens,
         n_mels=n_mels,
         T=T,
     )
