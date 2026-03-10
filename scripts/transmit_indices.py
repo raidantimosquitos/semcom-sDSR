@@ -72,31 +72,37 @@ def main() -> None:
         target_T=train_ds.target_T,
     )
 
-    # Stage 1: VQ-VAE only (encoder + codebooks)
-    num_embeddings_top = ckpt["num_embeddings_top"]
-    num_embeddings_bot = ckpt["num_embeddings_bot"]
+    # Stage 1: VQ-VAE only (encoder + codebooks); load arch from checkpoint
+    from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
+    num_embeddings_coarse = ckpt.get("num_embeddings_coarse", ckpt.get("num_embeddings_top"))
+    num_embeddings_fine = ckpt.get("num_embeddings_fine", ckpt.get("num_embeddings_bot"))
     embedding_dim = ckpt["embedding_dim"]
+    hidden_channels = ckpt["hidden_channels"]
+    num_residual_layers = ckpt.get("num_residual_layers", 2)
+    num_residual_hiddens = ckpt.get("num_residual_hiddens", 64)
     vq_vae = VQ_VAE_2Layer(
-        num_hiddens=128,
-        num_residual_layers=2,
-        num_residual_hiddens=64,
-        num_embeddings=(num_embeddings_top, num_embeddings_bot),
+        hidden_channels=hidden_channels,
+        num_residual_layers=num_residual_layers,
+        num_residual_hiddens=num_residual_hiddens,
+        num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
         embedding_dim=embedding_dim,
         commitment_cost=0.25,
         decay=0.99,
     )
-    vq_vae.load_state_dict(ckpt["model_state_dict"])
+    state = dict(ckpt["model_state_dict"])
+    migrate_vq_vae_state_dict(state)
+    vq_vae.load_state_dict(state)
     vq_vae = vq_vae.to(device)
     vq_vae.eval()
 
-    # Spatial shapes for one clip (n_mels, T): encoder bot 2x freq 4x time, encoder top +2x both
-    bits_top = int(math.log2(num_embeddings_top))
-    bits_bot = int(math.log2(num_embeddings_bot))
-    H_bot = max(1, n_mels // 2)
-    W_bot = max(1, T // 4)
-    H_top = max(1, H_bot // 2)
-    W_top = max(1, W_bot // 2)
-    frame_sz = frame_size_bytes(H_top, W_top, H_bot, W_bot, bits_top, bits_bot)
+    # Spatial shapes: encoder fine 4x4 (n_mels/4, T/4), encoder coarse 4x4 from f_fine (n_mels/16, T/16)
+    bits_coarse = int(math.log2(num_embeddings_coarse))
+    bits_fine = int(math.log2(num_embeddings_fine))
+    H_fine = max(1, n_mels // 4)
+    W_fine = max(1, T // 4)
+    H_coarse = max(1, H_fine // 4)
+    W_coarse = max(1, W_fine // 4)
+    frame_sz = frame_size_bytes(H_coarse, W_coarse, H_fine, W_fine, bits_coarse, bits_fine)
 
     frames: list[bytes] = []
     meta_rows: list[tuple[int, int, str]] = []
@@ -105,10 +111,10 @@ def main() -> None:
         for idx in range(len(test_ds)):
             spec, label, machine_id = test_ds[idx]
             x = spec.unsqueeze(0).to(device)  # (1, 1, n_mels, T)
-            indices_top, indices_bot = vq_vae.encode_to_indices(x)
+            indices_coarse, indices_fine = vq_vae.encode_to_indices(x)
             frame = pack_indices_to_frame(
-                indices_top, indices_bot,
-                bits_top=bits_top, bits_bot=bits_bot,
+                indices_coarse, indices_fine,
+                bits_coarse=bits_coarse, bits_fine=bits_fine,
             )
             frames.append(frame)
             meta_rows.append((idx, label, machine_id))

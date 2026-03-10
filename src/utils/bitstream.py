@@ -2,7 +2,7 @@
 Pack/unpack VQ codebook indices to/from a binary bitstream for GNURadio.
 
 Format: 4-byte num_clips (little-endian), then num_clips frames.
-Each frame: top indices (10 bits each, row-major), then bottom indices (12 bits each, row-major).
+Each frame: coarse indices (row-major), then fine indices (row-major).
 Bits packed LSB-first within each index, then byte-packed (first byte = bits 0-7 of stream).
 """
 
@@ -14,45 +14,45 @@ from typing import Tuple
 import torch
 
 
-def frame_size_bytes(H_top: int, W_top: int, H_bot: int, W_bot: int, bits_top: int = 10, bits_bot: int = 12) -> int:
+def frame_size_bytes(H_coarse: int, W_coarse: int, H_fine: int, W_fine: int, bits_coarse: int = 10, bits_fine: int = 12) -> int:
     """Number of bytes per clip frame."""
-    n_top = H_top * W_top
-    n_bot = H_bot * W_bot
-    total_bits = n_top * bits_top + n_bot * bits_bot
+    n_coarse = H_coarse * W_coarse
+    n_fine = H_fine * W_fine
+    total_bits = n_coarse * bits_coarse + n_fine * bits_fine
     return (total_bits + 7) // 8
 
 
 def pack_indices_to_frame(
-    indices_top: torch.Tensor,
-    indices_bot: torch.Tensor,
-    bits_top: int = 10,
-    bits_bot: int = 12,
+    indices_coarse: torch.Tensor,
+    indices_fine: torch.Tensor,
+    bits_coarse: int = 10,
+    bits_fine: int = 12,
 ) -> bytes:
     """
     Pack one clip's indices into a byte string (one frame).
 
     Args:
-        indices_top: (H_top, W_top) or (1, H_top, W_top) long, values in [0, 2^bits_top)
-        indices_bot: (H_bot, W_bot) or (1, H_bot, W_bot) long, values in [0, 2^bits_bot)
-        bits_top: bits per top index (e.g. 10 for 1024 codebook)
-        bits_bot: bits per bottom index (e.g. 12 for 4096 codebook)
+        indices_coarse: (H_coarse, W_coarse) or (1, H_coarse, W_coarse) long
+        indices_fine: (H_fine, W_fine) or (1, H_fine, W_fine) long
+        bits_coarse: bits per coarse index (e.g. 10 for 1024 codebook)
+        bits_fine: bits per fine index (e.g. 12 for 4096 codebook)
 
     Returns:
         bytes: packed frame (length = frame_size_bytes(...))
     """
-    if indices_top.dim() == 3:
-        indices_top = indices_top.squeeze(0)
-    if indices_bot.dim() == 3:
-        indices_bot = indices_bot.squeeze(0)
-    top_flat = indices_top.flatten().cpu().numpy()
-    bot_flat = indices_bot.flatten().cpu().numpy()
+    if indices_coarse.dim() == 3:
+        indices_coarse = indices_coarse.squeeze(0)
+    if indices_fine.dim() == 3:
+        indices_fine = indices_fine.squeeze(0)
+    coarse_flat = indices_coarse.flatten().cpu().numpy()
+    fine_flat = indices_fine.flatten().cpu().numpy()
 
     bits: list[int] = []
-    for idx in top_flat:
-        for b in range(bits_top):
+    for idx in coarse_flat:
+        for b in range(bits_coarse):
             bits.append((int(idx) >> b) & 1)
-    for idx in bot_flat:
-        for b in range(bits_bot):
+    for idx in fine_flat:
+        for b in range(bits_fine):
             bits.append((int(idx) >> b) & 1)
 
     n_bytes = (len(bits) + 7) // 8
@@ -65,12 +65,12 @@ def pack_indices_to_frame(
 
 def unpack_frame_to_indices(
     frame: bytes,
-    H_top: int,
-    W_top: int,
-    H_bot: int,
-    W_bot: int,
-    bits_top: int = 10,
-    bits_bot: int = 12,
+    H_coarse: int,
+    W_coarse: int,
+    H_fine: int,
+    W_fine: int,
+    bits_coarse: int = 10,
+    bits_fine: int = 12,
     device: torch.device | str = "cpu",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -78,15 +78,15 @@ def unpack_frame_to_indices(
 
     Args:
         frame: packed bytes (length must equal frame_size_bytes(...))
-        H_top, W_top, H_bot, W_bot: spatial dimensions
-        bits_top, bits_bot: bits per index
+        H_coarse, W_coarse, H_fine, W_fine: spatial dimensions
+        bits_coarse, bits_fine: bits per index
         device: torch device for output tensors
 
     Returns:
-        indices_top: (1, H_top, W_top) long
-        indices_bot: (1, H_bot, W_bot) long
+        indices_coarse: (1, H_coarse, W_coarse) long
+        indices_fine: (1, H_fine, W_fine) long
     """
-    expected = frame_size_bytes(H_top, W_top, H_bot, W_bot, bits_top, bits_bot)
+    expected = frame_size_bytes(H_coarse, W_coarse, H_fine, W_fine, bits_coarse, bits_fine)
     if len(frame) < expected:
         raise ValueError(f"Frame has {len(frame)} bytes, expected {expected}")
 
@@ -95,31 +95,31 @@ def unpack_frame_to_indices(
         for b in range(8):
             bits.append((byte >> b) & 1)
 
-    n_top = H_top * W_top
-    n_bot = H_bot * W_bot
+    n_coarse = H_coarse * W_coarse
+    n_fine = H_fine * W_fine
     pos = 0
 
-    top_list: list[int] = []
-    for _ in range(n_top):
+    coarse_list: list[int] = []
+    for _ in range(n_coarse):
         v = 0
-        for b in range(bits_top):
+        for b in range(bits_coarse):
             if pos < len(bits):
                 v |= bits[pos] << b
             pos += 1
-        top_list.append(v)
+        coarse_list.append(v)
 
-    bot_list: list[int] = []
-    for _ in range(n_bot):
+    fine_list: list[int] = []
+    for _ in range(n_fine):
         v = 0
-        for b in range(bits_bot):
+        for b in range(bits_fine):
             if pos < len(bits):
                 v |= bits[pos] << b
             pos += 1
-        bot_list.append(v)
+        fine_list.append(v)
 
-    indices_top = torch.tensor(top_list, dtype=torch.long, device=device).view(1, H_top, W_top)
-    indices_bot = torch.tensor(bot_list, dtype=torch.long, device=device).view(1, H_bot, W_bot)
-    return indices_top, indices_bot
+    indices_coarse = torch.tensor(coarse_list, dtype=torch.long, device=device).view(1, H_coarse, W_coarse)
+    indices_fine = torch.tensor(fine_list, dtype=torch.long, device=device).view(1, H_fine, W_fine)
+    return indices_coarse, indices_fine
 
 
 def write_bitstream_file(

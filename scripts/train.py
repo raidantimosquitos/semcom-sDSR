@@ -77,12 +77,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_vq_vae(n_mels: int, T: int, hidden_channels: int, num_embeddings_top: int, num_embeddings_bot: int, embedding_dim: int) -> VQ_VAE_2Layer:
+def build_vq_vae(
+    n_mels: int,
+    T: int,
+    hidden_channels: int,
+    num_embeddings_coarse: int,
+    num_embeddings_fine: int,
+    embedding_dim: int,
+    num_residual_layers: int = 2,
+    num_residual_hiddens: int = 64,
+) -> VQ_VAE_2Layer:
     return VQ_VAE_2Layer(
         hidden_channels=hidden_channels,
-        num_residual_layers=2,
-        num_residual_hiddens=64,
-        num_embeddings=(num_embeddings_top, num_embeddings_bot),
+        num_residual_layers=num_residual_layers,
+        num_residual_hiddens=num_residual_hiddens,
+        num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
         embedding_dim=embedding_dim,
         commitment_cost=0.25,
         decay=0.99,
@@ -121,7 +130,13 @@ def run_stage1(args: argparse.Namespace) -> None:
         run_name = "+".join(sorted(machine_types))
     _, _, n_mels, T = dataset.data.shape
 
-    model = build_vq_vae(n_mels, T, args.hidden_channels, args.num_embeddings_top, args.num_embeddings_bot, args.embedding_dim)
+    model = build_vq_vae(
+        n_mels, T, args.hidden_channels,
+        args.num_embeddings_top, args.num_embeddings_bot,
+        args.embedding_dim,
+        num_residual_layers=2,
+        num_residual_hiddens=64,
+    )
     trainer = Stage1Trainer(
         model=model,
         dataset=dataset,
@@ -165,13 +180,24 @@ def run_stage2(args: argparse.Namespace) -> None:
         zero_mask_prob=0.5,
     )
 
-    # Load VQ-VAE from Stage 1
-    num_embeddings_top = ckpt["num_embeddings_top"]
-    num_embeddings_bot = ckpt["num_embeddings_bot"]
+    # Load VQ-VAE from Stage 1 (same architecture as training; support old checkpoint keys)
+    from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
+    num_embeddings_coarse = ckpt.get("num_embeddings_coarse", ckpt.get("num_embeddings_top"))
+    num_embeddings_fine = ckpt.get("num_embeddings_fine", ckpt.get("num_embeddings_bot"))
     embedding_dim = ckpt["embedding_dim"]
     hidden_channels = ckpt["hidden_channels"]
-    vq_vae = build_vq_vae(n_mels, T, hidden_channels, num_embeddings_top, num_embeddings_bot, embedding_dim)
-    vq_vae.load_state_dict(ckpt["model_state_dict"])
+    num_residual_layers = ckpt.get("num_residual_layers", 2)
+    num_residual_hiddens = ckpt.get("num_residual_hiddens", 64)
+    vq_vae = build_vq_vae(
+        n_mels, T, hidden_channels,
+        num_embeddings_coarse, num_embeddings_fine,
+        embedding_dim,
+        num_residual_layers=num_residual_layers,
+        num_residual_hiddens=num_residual_hiddens,
+    )
+    state = dict(ckpt["model_state_dict"])
+    migrate_vq_vae_state_dict(state)
+    vq_vae.load_state_dict(state)
 
     model = build_s_dsr(vq_vae, n_mels, T, hidden_channels, embedding_dim)
     trainer = Stage2Trainer(

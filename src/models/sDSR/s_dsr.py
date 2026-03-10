@@ -43,14 +43,14 @@ class sDSR(nn.Module):
     sDSR: Spectrogram Dual Subspace Re-projection for anomaly detection.
 
     Inference path (no anomaly simulation):
-      X -> vq_vae.encode() -> q_bot, q_top
-      q_bot, q_top -> vq_vae.decode_general() -> X_G
-      q_bot, q_top -> ObjectSpecificDecoder -> X_S
+      X -> vq_vae.encode() -> q_fine, q_coarse
+      q_fine, q_coarse -> vq_vae.decode_general() -> X_G
+      q_fine, q_coarse -> ObjectSpecificDecoder -> X_S
       [X_G, X_S] -> AnomalyDetectionModule -> M_out
 
     Training path (stage 2): uses AnomalyMapGenerator and AnomalyGeneration
-    to augment q_bot, q_top -> q_bot_a, q_top_a, then X_S is reconstructed
-    from augmented features.
+    to augment q_fine, q_coarse -> q_fine_a, q_coarse_a (both levels always);
+    then X_S is reconstructed from augmented features.
     """
 
     def __init__(
@@ -87,8 +87,8 @@ class sDSR(nn.Module):
         self._freeze_stage1()
 
     def _get_q_shape(self, n_mels: int, T: int) -> tuple[int, int]:
-        """Infer q_bot (fine) spatial shape from spectrogram shape (encoder bot: 2x freq, 4x time)."""
-        H = n_mels // 2
+        """Infer q_fine spatial shape from spectrogram shape (encoder fine: 4x4 symmetric down -> 32x80 for 128x320)."""
+        H = n_mels // 4
         W = T // 4
         return (max(1, H), max(1, W))
 
@@ -123,11 +123,11 @@ class sDSR(nn.Module):
             M_out: (B, 2, n_mels, T) segmentation logits
             If return_intermediates: (M_out, X_G, X_S, M_out) — M_out repeated for convenience
         """
-        q_bot, q_top = self._vq_vae.encode(x)
-        x_g = self._vq_vae.decode_general(q_bot, q_top)
+        q_fine, q_coarse = self._vq_vae.encode(x)
+        x_g = self._vq_vae.decode_general(q_fine, q_coarse)
         x_s = self._object_decoder(
-            q_top, q_bot,
-            self._vq_vae._vq_top, self._vq_vae._vq_bot,
+            q_coarse, q_fine,
+            self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
         m_out = self._anomaly_detection(x_g, x_s.detach())
@@ -137,8 +137,8 @@ class sDSR(nn.Module):
 
     def forward_from_quantized(
         self,
-        q_bot: torch.Tensor,
-        q_top: torch.Tensor,
+        q_fine: torch.Tensor,
+        q_coarse: torch.Tensor,
         return_intermediates: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -146,17 +146,17 @@ class sDSR(nn.Module):
         detection from quantized features (e.g. after receiving indices over the channel).
 
         Args:
-            q_bot: (B, emb_dim, H_bot, W_bot)
-            q_top: (B, emb_dim, H_top, W_top)
+            q_fine: (B, emb_dim, H_fine, W_fine)
+            q_coarse: (B, emb_dim, H_coarse, W_coarse)
             return_intermediates: if True, return (M_out, X_G, X_S)
 
         Returns:
             M_out: (B, 2, n_mels, T) segmentation logits
         """
-        x_g = self._vq_vae.decode_general(q_bot, q_top)
+        x_g = self._vq_vae.decode_general(q_fine, q_coarse)
         x_s = self._object_decoder(
-            q_top, q_bot,
-            self._vq_vae._vq_top, self._vq_vae._vq_bot,
+            q_coarse, q_fine,
+            self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
         m_out = self._anomaly_detection(x_g, x_s.detach())
@@ -187,94 +187,59 @@ class sDSR(nn.Module):
                 M: (B, 1, n_mels, T) anomaly map for focal loss target
                 x: input (for L2 reconstruction target)
                 When subspace restriction is enabled, also:
-                recon_feat_bot, recon_feat_top, q_bot, q_top — for full-batch
+                recon_feat_fine, recon_feat_coarse, q_fine, q_coarse — for full-batch
                 subspace loss (all samples: normal and anomalous).
         """
         batch_size = x.shape[0]
         device = x.device
-        q_shape = self._get_q_shape(
-            self.config.n_mels if x.shape[-2] == self.config.n_mels else x.shape[-2],
-            x.shape[-1],
-        )
-        M = F.interpolate(M_gt.float(), size=q_shape, mode="nearest")
 
-        q_bot, q_top, z_bot, z_top = self._vq_vae.encode_with_prequant(x)
-        vq_bot = self._vq_vae._vq_bot
-        vq_top = self._vq_vae._vq_top
+        q_fine, q_coarse, z_fine, z_coarse = self._vq_vae.encode_with_prequant(x)
+        vq_fine = self._vq_vae._vq_fine
+        vq_coarse = self._vq_vae._vq_coarse
 
-        strength_bot = (
+        strength_fine = (
             torch.rand(batch_size, device=device) * (self.config.anomaly_strength_max - self.config.anomaly_strength_min)
             + self.config.anomaly_strength_min
         )
-        strength_top = (
+        strength_coarse = (
             torch.rand(batch_size, device=device) * (self.config.anomaly_strength_max - self.config.anomaly_strength_min)
             + self.config.anomaly_strength_min
         )
-        q_bot_a, q_top_a = self._anomaly_generation(
-            q_bot, q_top, M, vq_bot, vq_top,
-            z_bot=z_bot, z_top=z_top,
-            strength_bot=strength_bot, strength_top=strength_top,
+        q_fine_a, q_coarse_a = self._anomaly_generation(
+            q_fine, q_coarse, M_gt, vq_fine, vq_coarse,
+            z_fine=z_fine, z_coarse=z_coarse,
+            strength_fine=strength_fine, strength_coarse=strength_coarse,
         )
 
-        # Per-sample randomization: anomaly on both levels, only top, or only bottom
-        use_both = torch.randint(
-            0, 2, (batch_size,), device=device
-        ).float().view(batch_size, 1, 1, 1)
-        use_lo = torch.randint(
-            0, 2, (batch_size,), device=device
-        ).float().view(batch_size, 1, 1, 1)
-        # use_both=1 -> both anomalous; use_both=0, use_lo=1 -> top only; use_both=0, use_lo=0 -> bottom only
-        q_bot_final = (
-            use_both * q_bot_a
-            + (1 - use_both) * (use_lo * q_bot + (1 - use_lo) * q_bot_a)
-        )
-        q_top_final = (
-            use_both * q_top_a
-            + (1 - use_both) * (use_lo * q_top_a + (1 - use_lo) * q_top)
-        )
-
-        has_anomaly = (M.sum(dim=(1, 2, 3)) > 0).view(batch_size, 1, 1, 1).float()
-        q_bot_used = has_anomaly * q_bot_final + (1 - has_anomaly) * q_bot
-        q_top_used = has_anomaly * q_top_final + (1 - has_anomaly) * q_top
+        # Always augment both levels when anomaly mask is non-zero (paper: both Q1 and Q2 replaced in mask regions)
+        has_anomaly = (M_gt.sum(dim=(1, 2, 3)) > 0).view(batch_size, 1, 1, 1).float()
+        q_fine_used = has_anomaly * q_fine_a + (1 - has_anomaly) * q_fine
+        q_coarse_used = has_anomaly * q_coarse_a + (1 - has_anomaly) * q_coarse
 
         with torch.no_grad():
-            x_g = self._vq_vae.decode_general(q_bot_used, q_top_used)
+            x_g = self._vq_vae.decode_general(q_fine_used, q_coarse_used)
 
-        q_top_batch = q_top_used
-        q_bot_batch = q_bot_used
         out_dec = self._object_decoder(
-            q_top_batch, q_bot_batch,
-            vq_top, vq_bot,
+            q_coarse_used, q_fine_used,
+            vq_coarse, vq_fine,
             return_aux=True,
         )
         x_s, aux = out_dec
         m_out = self._anomaly_detection(x_g, x_s.detach())
 
-        # GT mask for focal loss: per-level resize then blend with use_both/use_lo
-        M_top = F.interpolate(M.float(), size=q_top.shape[-2:], mode="nearest")
-        M_bot = F.interpolate(M.float(), size=q_bot.shape[-2:], mode="nearest")
-        M_top_for_loss = F.interpolate(M_top, size=x.shape[-2:], mode="nearest")
-        M_bot_for_loss = F.interpolate(M_bot, size=x.shape[-2:], mode="nearest")
-
-        # Union of top and bottom anomaly maps
-        # M_union = torch.clamp(M_top + M_bot, 0, 1)
-        M_for_loss = (
-            use_both * M_top_for_loss
-            + (1 - use_both) * (use_lo * M_top_for_loss + (1 - use_lo) * M_bot_for_loss)
-        )
-
+        # GT mask for focal loss: M_gt at spectrogram shape (same as m_out spatial dims)
         result = {
             "m_out": m_out,
             "x_g": x_g,
             "x_s": x_s,
-            "M": M_for_loss,
+            "M": M_gt.float(),
             "x": x,
         }
-        if "recon_feat_top" in aux and "recon_feat_bot" in aux:
-            result["recon_feat_top"] = aux["recon_feat_top"]
-            result["recon_feat_bot"] = aux["recon_feat_bot"]
-            result["q_top"] = q_top
-            result["q_bot"] = q_bot
+        if "recon_feat_coarse" in aux and "recon_feat_fine" in aux:
+            result["recon_feat_coarse"] = aux["recon_feat_coarse"]
+            result["recon_feat_fine"] = aux["recon_feat_fine"]
+            result["q_coarse"] = q_coarse
+            result["q_fine"] = q_fine
         return result
 
 
@@ -307,16 +272,16 @@ if __name__ == "__main__":
     print("-" * 50)
     _print_shape("input x (spectrogram)", x)
 
-    q_bot, q_top = model._vq_vae.encode(x)
-    _print_shape("q_bot (quantized bottom / fine)", q_bot)
-    _print_shape("q_top (quantized top / coarse)", q_top)
+    q_fine, q_coarse = model._vq_vae.encode(x)
+    _print_shape("q_fine (quantized fine)", q_fine)
+    _print_shape("q_coarse (quantized coarse)", q_coarse)
 
-    x_g = model._vq_vae.decode_general(q_bot, q_top)
+    x_g = model._vq_vae.decode_general(q_fine, q_coarse)
     _print_shape("x_g (general reconstruction)", x_g)
 
     x_s = model._object_decoder(
-        q_top, q_bot,
-        model._vq_vae._vq_top, model._vq_vae._vq_bot,
+        q_coarse, q_fine,
+        model._vq_vae._vq_coarse, model._vq_vae._vq_fine,
         return_aux=False,
     )
     _print_shape("x_s (object-specific reconstruction)", x_s)
@@ -346,4 +311,5 @@ if __name__ == "__main__":
 
     assert out["m_out"].shape == (2, 2, 128, 320)
     assert out["x_s"].shape == (2, 1, 128, 320)
+    assert out["M"].shape == (2, 1, 128, 320), "M (loss target) must be spectrogram shape"
     print("sDSR smoke test passed.")

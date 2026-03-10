@@ -163,27 +163,35 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         target_T=train_ds.target_T,
     )
 
-    num_embeddings_top = stage1_ckpt["num_embeddings_top"]
-    num_embeddings_bot = stage1_ckpt["num_embeddings_bot"]
+    # Architecture from checkpoint (same as training); fallback for old checkpoints
+    num_embeddings_coarse = stage1_ckpt.get("num_embeddings_coarse", stage1_ckpt.get("num_embeddings_top"))
+    num_embeddings_fine = stage1_ckpt.get("num_embeddings_fine", stage1_ckpt.get("num_embeddings_bot"))
     embedding_dim = stage1_ckpt["embedding_dim"]
     hidden_channels = stage1_ckpt["hidden_channels"]
-    # Stage 1: encoder, codebook (VQ1/VQ2), and General Object Decoder
+    num_residual_layers = stage1_ckpt.get("num_residual_layers", 2)
+    num_residual_hiddens = stage1_ckpt.get("num_residual_hiddens", 64)
+    # Stage 1: encoder, codebook (VQ coarse/fine), and General Object Decoder
     vq_vae = VQ_VAE_2Layer(
         hidden_channels=hidden_channels,
-        num_residual_layers=2,
-        num_residual_hiddens=32,
-        num_embeddings=(num_embeddings_top, num_embeddings_bot),
+        num_residual_layers=num_residual_layers,
+        num_residual_hiddens=num_residual_hiddens,
+        num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
         embedding_dim=embedding_dim,
         commitment_cost=0.25,
         decay=0.99,
     )
-    vq_vae.load_state_dict(stage1_ckpt["model_state_dict"])
+    from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
+    state = dict(stage1_ckpt["model_state_dict"])
+    migrate_vq_vae_state_dict(state)
+    vq_vae.load_state_dict(state)
 
     # Full sDSR: Stage 1 modules (frozen in training) + Stage 2 modules
     model = build_s_dsr(n_mels, T, vq_vae, embedding_dim, hidden_channels)
 
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
-    model.load_state_dict(stage2["model_state_dict"])
+    stage2_state = dict(stage2["model_state_dict"])
+    migrate_vq_vae_state_dict(stage2_state)
+    model.load_state_dict(stage2_state)
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     model = model.to(device)

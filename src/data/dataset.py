@@ -123,8 +123,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
             self.std = norm_std.to(dtype=self.data.dtype, device=self.data.device) if norm_std is not None else None
             self.data = (self.data - self.mean) / (self.std + 1e-8) if self.std is not None else self.data
         elif normalize:
-            self.mean = self.data.mean(dim=(0, 2, 3), keepdim=True)
-            self.std  = self.data.std(dim=(0, 2, 3),  keepdim=True)
+            self.mean = self.data.mean(dim=(0, 3), keepdim=True)
+            self.std  = self.data.std(dim=(0, 3),  keepdim=True)
             self.data = (self.data - self.mean) / (self.std + 1e-8) if self.std is not None else self.data
         else:
             shape = (1, 1, self.data.shape[2], 1)
@@ -198,8 +198,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
         normalized_chunks: list[torch.Tensor] = []
         for mt, data_mt in zip(sorted(machine_types), truncated):
             if normalize:
-                mean_mt = data_mt.mean(dim=(0, 2, 3), keepdim=True)
-                std_mt = data_mt.std(dim=(0, 2, 3), keepdim=True)
+                mean_mt = data_mt.mean(dim=(0, 3), keepdim=True)
+                std_mt = data_mt.std(dim=(0, 3), keepdim=True)
                 data_mt = (data_mt - mean_mt) / (std_mt + 1e-8)
                 self.norm_stats[mt] = (mean_mt, std_mt)
             else:
@@ -269,7 +269,6 @@ class AudDSRAnomTrainDataset(Dataset):
         self._mask_generator = AnomalyMapGenerator(
             strategy=strategy,
             spectrogram_shape=spectrogram_shape,
-            q_shape=spectrogram_shape,
             n_mels=n_mels,
             T=T,
             zero_mask_prob=0.0,

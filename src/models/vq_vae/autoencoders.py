@@ -9,13 +9,13 @@ Input spectrograms are 2-D: (B, C, n_mels, T)
   n_mels  – frequency bins (e.g. 128)
   T       – time frames (e.g. 256)
 
-Architecture (Figure 1 of the paper):
-  Encoder top  : X → f_top          (downsampled in both freq and time by s1)
-  Encoder bot  : f_bot → f_bot         (further downsampled by s2)
-  VQ top        : f_top → Q_top         (coarse codebook, top)
-  Decoder top  : Q_top → f_top_up         (upsample coarse back to f_top resolution)
-  Concatenate: [f_bot, f_top_up] → VQ_bot → Q_bot  (fine codebook, bottom)
-  Decoder bot  : [Q_top_up, Q_bot] → X_out  (upsample to original resolution)
+Architecture (Figure 1 of the paper), symmetric 4x4 down/up:
+  Encoder fine   : X -> f_fine        (4x4 down, 32x80 for 128x320, hidden_channels)
+  Encoder coarse : f_fine -> f_coarse (4x4 down, 8x20, 4*hidden_channels)
+  VQ coarse      : f_coarse -> Q_coarse (coarse codebook)
+  Decoder coarse : Q_coarse -> f_coarse_up (4x upsample to 32x80, 4*hidden_channels)
+  Concatenate    : [f_fine, f_coarse_up] -> VQ_fine -> Q_fine (fine codebook; 5*hidden_channels -> emb)
+  Decoder fine   : [Q_coarse_up, Q_fine] -> X_out (4x symmetric upsample to original resolution)
 
 Loss (Equation 1):
   L_ae = lambda_x * MSE(X, X_out)
@@ -32,8 +32,8 @@ import torch.nn.functional as F
 from typing import Union
 
 from .quantizer import VectorQuantizerEMA
-from .encoders import EncoderBot, EncoderTop
-from .decoders import DecoderBot, DecoderTop
+from .encoders import EncoderFine, EncoderCoarse
+from .decoders import DecoderFine, DecoderCoarse
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@ class VQ_VAE_2Layer(nn.Module):
     """
     Two-layer VQ-VAE for spectrograms.
 
-    The top (coarse) and bottom (fine) quantizers can have different codebook sizes,
+    The coarse and fine quantizers can have different codebook sizes,
     allowing finer control over representation capacity at each level.
     """
 
@@ -63,50 +63,52 @@ class VQ_VAE_2Layer(nn.Module):
         self.test = test
         self.embedding_dim = embedding_dim
         self.hidden_channels = hidden_channels
+        self.num_residual_layers = num_residual_layers
+        self.num_residual_hiddens = num_residual_hiddens
 
-        # Resolve codebook sizes: int -> (top, bot) same; tuple -> (top, bot) explicit
+        # Resolve codebook sizes: int -> (coarse, fine) same; tuple -> (coarse, fine) explicit
         if isinstance(num_embeddings, int):
-            num_embeddings_top = num_embeddings_bot = num_embeddings
-            self.num_embeddings_bottom = num_embeddings_bot
-            self.num_embeddings_top = num_embeddings_top
+            num_embeddings_coarse = num_embeddings_fine = num_embeddings
+            self.num_embeddings_fine = num_embeddings_fine
+            self.num_embeddings_coarse = num_embeddings_coarse
         else:
-            num_embeddings_top, num_embeddings_bot = num_embeddings
-            self.num_embeddings_bottom = num_embeddings_bot
-            self.num_embeddings_top = num_embeddings_top
+            num_embeddings_coarse, num_embeddings_fine = num_embeddings
+            self.num_embeddings_fine = num_embeddings_fine
+            self.num_embeddings_coarse = num_embeddings_coarse
 
         # Encoders
-        self._encoder_bot = EncoderBot(
+        self._encoder_fine = EncoderFine(
             1, hidden_channels,
             num_residual_layers,
             num_residual_hiddens,
         )
-        self._encoder_top = EncoderTop(
+        self._encoder_coarse = EncoderCoarse(
             hidden_channels, hidden_channels,
             num_residual_layers,
             num_residual_hiddens,
         )
 
-        # Projection to embedding space before VQ
-        self._pre_vq_conv_top = nn.Conv2d(hidden_channels, embedding_dim, kernel_size=1, stride=1)
-        self._pre_vq_conv_bot = nn.Conv2d(
-            hidden_channels * 2, embedding_dim, kernel_size=1, stride=1
+        # Projection to embedding space before VQ (f_coarse has 4*hidden, feat_fine = f_fine + decoded_coarse = 5*hidden)
+        self._pre_vq_conv_coarse = nn.Conv2d(hidden_channels * 4, embedding_dim, kernel_size=1, stride=1)
+        self._pre_vq_conv_fine = nn.Conv2d(
+            hidden_channels * 5, embedding_dim, kernel_size=1, stride=1
         )
 
         # Vector quantizers (different codebook sizes allowed)
-        self._vq_top = VectorQuantizerEMA(
-            num_embeddings_top, embedding_dim, commitment_cost, decay
+        self._vq_coarse = VectorQuantizerEMA(
+            num_embeddings_coarse, embedding_dim, commitment_cost, decay
         )
-        self._vq_bot = VectorQuantizerEMA(
-            num_embeddings_bot, embedding_dim, commitment_cost, decay
+        self._vq_fine = VectorQuantizerEMA(
+            num_embeddings_fine, embedding_dim, commitment_cost, decay
         )
 
         # Decoders
-        self._decoder_top = DecoderTop(
+        self._decoder_coarse = DecoderCoarse(
             embedding_dim, hidden_channels,
             num_residual_layers,
             num_residual_hiddens,
         )
-        self._decoder_bot = DecoderBot(
+        self._decoder_fine = DecoderFine(
             embedding_dim * 2, hidden_channels,
             num_residual_layers,
             num_residual_hiddens,
@@ -118,34 +120,34 @@ class VQ_VAE_2Layer(nn.Module):
         torch.Tensor, torch.Tensor, torch.Tensor,
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
     ]:
-        # Encode: bottom (high-res) and top (low-res)
-        f_bot = self._encoder_bot(x)
-        f_top = self._encoder_top(f_bot)
+        # Encode: fine (high-res) and coarse (low-res)
+        f_fine = self._encoder_fine(x)
+        f_coarse = self._encoder_coarse(f_fine)
 
-        # Project and quantize top (coarse)
-        z_top = self._pre_vq_conv_top(f_top)
-        loss_top, quantized_top, perplexity_top, _ = self._vq_top(z_top)
+        # Project and quantize coarse
+        z_coarse = self._pre_vq_conv_coarse(f_coarse)
+        loss_coarse, quantized_coarse, perplexity_coarse, _ = self._vq_coarse(z_coarse)
 
-        # Decode top and concatenate with enc_bot for bottom quantizer input
-        decoded_top = self._decoder_top(quantized_top)
-        feat_bot = torch.cat([f_bot, decoded_top], dim=1)
+        # Decode coarse and concatenate with enc_fine for fine quantizer input
+        decoded_coarse = self._decoder_coarse(quantized_coarse)
+        feat_fine = torch.cat([f_fine, decoded_coarse], dim=1)
 
-        # Project and quantize bottom (fine)
-        z_bot = self._pre_vq_conv_bot(feat_bot)
-        loss_bot, quantized_bot, perplexity_bot, _ = self._vq_bot(z_bot)
+        # Project and quantize fine
+        z_fine = self._pre_vq_conv_fine(feat_fine)
+        loss_fine, quantized_fine, perplexity_fine, _ = self._vq_fine(z_fine)
 
-        # Align top quantized to bottom spatial size and decode jointly
-        quantized_top_upsampled = F.interpolate(
-            quantized_top, size=quantized_bot.shape[-2:],
+        # Align coarse quantized to fine spatial size and decode jointly
+        quantized_coarse_upsampled = F.interpolate(
+            quantized_coarse, size=quantized_fine.shape[-2:],
             mode="bilinear", align_corners=False
         )
-        quant_joined = torch.cat([quantized_top_upsampled, quantized_bot], dim=1)
-        recon = self._decoder_bot(quant_joined)
+        quant_joined = torch.cat([quantized_coarse_upsampled, quantized_fine], dim=1)
+        recon = self._decoder_fine(quant_joined)
 
         return (
-            loss_bot, loss_top, recon,
-            quantized_top, quantized_bot,
-            perplexity_top, perplexity_bot,
+            loss_fine, loss_coarse, recon,
+            quantized_coarse, quantized_fine,
+            perplexity_coarse, perplexity_fine,
         )
 
     def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -156,11 +158,11 @@ class VQ_VAE_2Layer(nn.Module):
             x: (B, 1, n_mels, T) Mel spectrogram
 
         Returns:
-            q_bot: (B, emb_dim, H_q, W_q) bottom (fine) quantized features
-            q_top: (B, emb_dim, H_q_top, W_q_top) top (coarse) quantized features
+            q_fine: (B, emb_dim, H_q, W_q) fine quantized features
+            q_coarse: (B, emb_dim, H_q_coarse, W_q_coarse) coarse quantized features
         """
-        q_bot, q_top, _, _ = self.encode_with_prequant(x)
-        return q_bot, q_top
+        q_fine, q_coarse, _, _ = self.encode_with_prequant(x)
+        return q_fine, q_coarse
 
     def encode_with_prequant(
         self, x: torch.Tensor
@@ -169,17 +171,17 @@ class VQ_VAE_2Layer(nn.Module):
         Encode with pre-quantize features (for AudDSR anomaly generation).
 
         Returns:
-            q_bot, q_top, z_bot, z_top (z_* are pre-quantize continuous features)
+            q_fine, q_coarse, z_fine, z_coarse (z_* are pre-quantize continuous features)
         """
-        f_bot = self._encoder_bot(x)
-        f_top = self._encoder_top(f_bot)
-        z_top = self._pre_vq_conv_top(f_top)
-        _, quantized_top, _, _ = self._vq_top(z_top)
-        decoded_top = self._decoder_top(quantized_top)
-        feat_bot = torch.cat([f_bot, decoded_top], dim=1)
-        z_bot = self._pre_vq_conv_bot(feat_bot)
-        _, quantized_bot, _, _ = self._vq_bot(z_bot)
-        return quantized_bot, quantized_top, z_bot, z_top
+        f_fine = self._encoder_fine(x)
+        f_coarse = self._encoder_coarse(f_fine)
+        z_coarse = self._pre_vq_conv_coarse(f_coarse)
+        _, quantized_coarse, _, _ = self._vq_coarse(z_coarse)
+        decoded_coarse = self._decoder_coarse(quantized_coarse)
+        feat_fine = torch.cat([f_fine, decoded_coarse], dim=1)
+        z_fine = self._pre_vq_conv_fine(feat_fine)
+        _, quantized_fine, _, _ = self._vq_fine(z_fine)
+        return quantized_fine, quantized_coarse, z_fine, z_coarse
 
     def encode_to_indices(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -189,69 +191,68 @@ class VQ_VAE_2Layer(nn.Module):
             x: (B, 1, n_mels, T) Mel spectrogram
 
         Returns:
-            indices_top: (B, H_top, W_top) long
-            indices_bot: (B, H_bot, W_bot) long
+            indices_coarse: (B, H_coarse, W_coarse) long
+            indices_fine: (B, H_fine, W_fine) long
         """
-        f_bot = self._encoder_bot(x)
-        f_top = self._encoder_top(f_bot)
-        z_top = self._pre_vq_conv_top(f_top)
-        idx_top_flat = self._vq_top.get_indices(z_top)
-        _, quantized_top, _, _ = self._vq_top(z_top)
-        decoded_top = self._decoder_top(quantized_top)
-        feat_bot = torch.cat([f_bot, decoded_top], dim=1)
-        z_bot = self._pre_vq_conv_bot(feat_bot)
-        idx_bot_flat = self._vq_bot.get_indices(z_bot)
-        B, _, H_top, W_top = z_top.shape
-        _, _, H_bot, W_bot = z_bot.shape
-        indices_top = idx_top_flat.view(B, H_top, W_top)
-        indices_bot = idx_bot_flat.view(B, H_bot, W_bot)
-        return indices_top, indices_bot
+        f_fine = self._encoder_fine(x)
+        f_coarse = self._encoder_coarse(f_fine)
+        z_coarse = self._pre_vq_conv_coarse(f_coarse)
+        idx_coarse_flat = self._vq_coarse.get_indices(z_coarse)
+        _, quantized_coarse, _, _ = self._vq_coarse(z_coarse)
+        decoded_coarse = self._decoder_coarse(quantized_coarse)
+        feat_fine = torch.cat([f_fine, decoded_coarse], dim=1)
+        z_fine = self._pre_vq_conv_fine(feat_fine)
+        idx_fine_flat = self._vq_fine.get_indices(z_fine)
+        B, _, H_coarse, W_coarse = z_coarse.shape
+        _, _, H_fine, W_fine = z_fine.shape
+        indices_coarse = idx_coarse_flat.view(B, H_coarse, W_coarse)
+        indices_fine = idx_fine_flat.view(B, H_fine, W_fine)
+        return indices_coarse, indices_fine
 
     def indices_to_quantized(
-        self, indices_top: torch.Tensor, indices_bot: torch.Tensor
+        self, indices_coarse: torch.Tensor, indices_fine: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Map codebook indices to quantized feature tensors (for receiver).
 
         Args:
-            indices_top: (B, H_top, W_top) long
-            indices_bot: (B, H_bot, W_bot) long
+            indices_coarse: (B, H_coarse, W_coarse) long
+            indices_fine: (B, H_fine, W_fine) long
 
         Returns:
-            q_bot: (B, emb_dim, H_bot, W_bot)
-            q_top: (B, emb_dim, H_top, W_top)
+            q_fine: (B, emb_dim, H_fine, W_fine)
+            q_coarse: (B, emb_dim, H_coarse, W_coarse)
         """
-        # Embedding expects (N,) -> (N, emb_dim); we need (B, H, W) -> (B, emb_dim, H, W)
-        emb_dim = self._vq_top._embedding_dim
-        q_top = self._vq_top._embedding(indices_top.flatten())
-        q_top = q_top.view(
-            indices_top.shape[0], indices_top.shape[1], indices_top.shape[2], emb_dim
+        emb_dim = self._vq_coarse._embedding_dim
+        q_coarse = self._vq_coarse._embedding(indices_coarse.flatten())
+        q_coarse = q_coarse.view(
+            indices_coarse.shape[0], indices_coarse.shape[1], indices_coarse.shape[2], emb_dim
         ).permute(0, 3, 1, 2)
-        q_bot = self._vq_bot._embedding(indices_bot.flatten())
-        q_bot = q_bot.view(
-            indices_bot.shape[0], indices_bot.shape[1], indices_bot.shape[2], emb_dim
+        q_fine = self._vq_fine._embedding(indices_fine.flatten())
+        q_fine = q_fine.view(
+            indices_fine.shape[0], indices_fine.shape[1], indices_fine.shape[2], emb_dim
         ).permute(0, 3, 1, 2)
-        return q_bot, q_top
+        return q_fine, q_coarse
 
     def decode_general(
-        self, q_bot: torch.Tensor, q_top: torch.Tensor
+        self, q_fine: torch.Tensor, q_coarse: torch.Tensor
     ) -> torch.Tensor:
         """
         General object decoder: reconstruct spectrogram from quantized features.
         Preserves anomalies (for AudDSR X_G path). Frozen during stage 2.
 
         Args:
-            q_bot: (B, emb_dim, H_q, W_q)
-            q_top: (B, emb_dim, H_q_top, W_q_top)
+            q_fine: (B, emb_dim, H_q, W_q)
+            q_coarse: (B, emb_dim, H_q_coarse, W_q_coarse)
 
         Returns:
             X_G: (B, 1, n_mels, T) reconstructed spectrogram
         """
-        quantized_top_upsampled = F.interpolate(
-            q_top, size=q_bot.shape[-2:], mode="bilinear", align_corners=False
+        quantized_coarse_upsampled = F.interpolate(
+            q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False
         )
-        quant_joined = torch.cat([quantized_top_upsampled, q_bot], dim=1)
-        return self._decoder_bot(quant_joined)
+        quant_joined = torch.cat([quantized_coarse_upsampled, q_fine], dim=1)
+        return self._decoder_fine(quant_joined)
 
 # ---------------------------------------------------------------------------
 # Smoke test
@@ -286,8 +287,8 @@ if __name__ == "__main__":
     x = torch.randn(1, 1, 128, 320, device=device)
 
     for name, m in [("same", model_same), ("diff", model_diff)]:
-        loss_b, loss_t, recon, q_t, q_b, perp_t, perp_b = m(x)
+        loss_fine, loss_coarse, recon, q_coarse, q_fine, perp_coarse, perp_fine = m(x)
         n_params = sum(p.numel() for p in m.parameters() if p.requires_grad)
-        print(f"[{name}] params={n_params:,}  loss_b={loss_b.item():.4f}  loss_t={loss_t.item():.4f}  recon={recon.shape}")
-        print(f"Quantized top: {q_t.shape}")
-        print(f"Quantized bot: {q_b.shape}")
+        print(f"[{name}] params={n_params:,}  loss_fine={loss_fine.item():.4f}  loss_coarse={loss_coarse.item():.4f}  recon={recon.shape}")
+        print(f"Quantized coarse: {q_coarse.shape}")
+        print(f"Quantized fine: {q_fine.shape}")

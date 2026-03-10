@@ -1,8 +1,8 @@
 """
 2-D CNN encoders for spectrogram input.
 
-- EncoderBot: first stage (input -> high-res latent), 2x freq + 4x time downsampling
-- EncoderTop: second stage (high-res -> low-res latent), 2x further in both dims
+- EncoderFine: first stage (input -> high-res latent), 4x4 symmetric downsampling (32x80 for 128x320)
+- EncoderCoarse: second stage (high-res -> low-res latent), 4x4 symmetric from f_fine (8x20), out 4*hidden_channels
 """
 
 from __future__ import annotations
@@ -14,10 +14,10 @@ import torch.nn.functional as F
 from .res_blocks_2d import ResidualStack
 
 
-class EncoderBot(nn.Module):
+class EncoderFine(nn.Module):
     """
-    Bottom encoder: input spectrogram -> high-resolution latent.
-    2x down in frequency, 4x down in time (conv1 stride 2x2, conv2 stride 1x2).
+    Fine (high-res) encoder: input spectrogram -> high-resolution latent.
+    Symmetric 4x4 down (two 2x2 strides): 128x320 -> 32x80. Output hidden_channels.
     """
 
     def __init__(
@@ -28,9 +28,9 @@ class EncoderBot(nn.Module):
         num_residual_hiddens: int,
     ) -> None:
         super().__init__()
-        self._conv1 = nn.Conv2d(in_channels, hidden_channels // 2, kernel_size=4, stride=2, padding=1)
-        self._conv2 = nn.Conv2d(hidden_channels // 2, hidden_channels, kernel_size=(3, 4), stride=(1, 2), padding=(1, 1))
-        self._conv3 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
+        self._conv1 = nn.Conv2d(in_channels, hidden_channels // 4, kernel_size=4, stride=2, padding=1)
+        self._conv2 = nn.Conv2d(hidden_channels // 4, hidden_channels // 2, kernel_size=4, stride=2, padding=1)
+        self._conv3 = nn.Conv2d(hidden_channels // 2, hidden_channels, kernel_size=3, stride=1, padding=1)
         self._residual = ResidualStack(
             hidden_channels, hidden_channels,
             num_residual_layers, num_residual_hiddens,
@@ -43,10 +43,10 @@ class EncoderBot(nn.Module):
         return self._residual(x)
 
 
-class EncoderTop(nn.Module):
+class EncoderCoarse(nn.Module):
     """
-    Top encoder: high-res latent -> low-res latent.
-    2x down in frequency, 2x down in time.
+    Coarse (low-res) encoder: high-res latent -> low-res latent.
+    Symmetric 4x4 down from f_fine (32x80 -> 8x20). Output 4*hidden_channels.
     """
 
     def __init__(
@@ -57,10 +57,11 @@ class EncoderTop(nn.Module):
         num_residual_hiddens: int,
     ) -> None:
         super().__init__()
-        self._conv1 = nn.Conv2d(in_channels, hidden_channels, kernel_size=4, stride=2, padding=1)
-        self._conv2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
+        out_channels = hidden_channels * 4
+        self._conv1 = nn.Conv2d(in_channels, out_channels // 2, kernel_size=4, stride=2, padding=1)
+        self._conv2 = nn.Conv2d(out_channels // 2, out_channels, kernel_size=4, stride=2, padding=1)
         self._residual = ResidualStack(
-            hidden_channels, hidden_channels,
+            out_channels, out_channels,
             num_residual_layers, num_residual_hiddens,
         )
 

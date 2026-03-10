@@ -149,7 +149,7 @@ class SubspaceRestrictionModule(nn.Module):
         """
         Args:
             x: (B, emb_dim, H, W) anomaly-augmented quantized features.
-            quantization: Frozen VQ module (_vq_top or _vq_bot); callable as quantization(inputs).
+            quantization: Frozen VQ module (_vq_coarse or _vq_fine); callable as quantization(inputs).
 
         Returns:
             feat: F̃ (B, emb_dim, H, W) subspace-restricted continuous features.

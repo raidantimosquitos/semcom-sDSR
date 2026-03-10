@@ -138,19 +138,19 @@ class Stage2Trainer(BaseTrainer):
             # map modified codes back to clean q. Requires model to return aux from
             # object decoder when subspace is enabled.
             has_subspace_aux = (
-                "recon_feat_bot" in out
-                and "recon_feat_top" in out
-                and "q_bot" in out
-                and "q_top" in out
+                "recon_feat_fine" in out
+                and "recon_feat_coarse" in out
+                and "q_fine" in out
+                and "q_coarse" in out
             )
             if self.lambda_sub != 0 and has_subspace_aux:
-                loss_sub_bot = F.mse_loss(
-                    out["recon_feat_bot"], out["q_bot"].detach()
+                loss_sub_fine = F.mse_loss(
+                    out["recon_feat_fine"], out["q_fine"].detach()
                 )
-                loss_sub_top = F.mse_loss(
-                    out["recon_feat_top"], out["q_top"].detach()
+                loss_sub_coarse = F.mse_loss(
+                    out["recon_feat_coarse"], out["q_coarse"].detach()
                 )
-                loss_sub = 0.5 * loss_sub_bot + 0.5 * loss_sub_top
+                loss_sub = 0.5 * loss_sub_fine + 0.5 * loss_sub_coarse
                 total_loss = total_loss + self.lambda_sub * loss_sub
                 sub_value = loss_sub.item()
             else:

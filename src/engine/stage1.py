@@ -1,7 +1,7 @@
 """
 Stage 1 trainer: VQ-VAE-2 reconstruction.
 
-Model interface: forward(x) -> (loss_bot, loss_top, recon, q_top, q_bot, perplexity_top, perplexity_bot)
+Model interface: forward(x) -> (loss_fine, loss_coarse, recon, q_coarse, q_fine, perplexity_coarse, perplexity_fine)
 Any encoder that returns this tuple can be used.
 """
 
@@ -26,7 +26,7 @@ class Stage1Trainer(BaseTrainer):
     Trainer for Stage 1 (VQ-VAE-2 style reconstruction).
 
     Model must implement forward(x) returning:
-        (loss_bot, loss_top, recon, q_top, q_bot, perplexity_top, perplexity_bot)
+        (loss_fine, loss_coarse, recon, q_coarse, q_fine, perplexity_coarse, perplexity_fine)
     """
 
     def __init__(
@@ -102,9 +102,9 @@ class Stage1Trainer(BaseTrainer):
 
         with autocast(device_type=self.device.type, enabled=self.use_amp):
             out = self.model(x)
-            loss_b, loss_t, recon, q_t, q_b, perp_t, perp_b = out
+            loss_fine, loss_coarse, recon, _, _, perp_coarse, perp_fine = out
             recon_loss = F.mse_loss(recon, x)
-            total_loss = loss_b + loss_t + self.lambda_recon * recon_loss
+            total_loss = loss_fine + loss_coarse + self.lambda_recon * recon_loss
 
         self.scaler.scale(total_loss).backward()
 
@@ -118,10 +118,10 @@ class Stage1Trainer(BaseTrainer):
         return {
             "total": total_loss.item(),
             "recon": recon_loss.item(),
-            "loss_b": loss_b.item(),
-            "loss_t": loss_t.item(),            
-            "perplexity_b": perp_b.item(),
-            "perplexity_t": perp_t.item(),
+            "loss_fine": loss_fine.item(),
+            "loss_coarse": loss_coarse.item(),
+            "perplexity_fine": perp_fine.item(),
+            "perplexity_coarse": perp_coarse.item(),
             "lr": lr,
         }
 
@@ -129,8 +129,8 @@ class Stage1Trainer(BaseTrainer):
         self._tee(
             f"[{self.global_step:>6d}] "
             f"loss={avg['total']:.4f}  recon={avg['recon']:.4f}  "
-            f"loss_b={avg['loss_b']:.4f}  loss_t={avg['loss_t']:.4f}  "
-            f"perp_b={avg['perplexity_b']:.2f}  perp_t={avg['perplexity_t']:.2f}  "
+            f"loss_fine={avg['loss_fine']:.4f}  loss_coarse={avg['loss_coarse']:.4f}  "
+            f"perp_fine={avg['perplexity_fine']:.2f}  perp_coarse={avg['perplexity_coarse']:.2f}  "
             f"lr={avg['lr']:.2e} ({its_sec:.1f} it/s)"
         )
 
@@ -145,10 +145,12 @@ class Stage1Trainer(BaseTrainer):
             "best_total_loss": self.best_total_loss,
             "target_T": int(self.dataset.target_T),
             "n_mels": int(self.dataset.data.shape[2]),
-            "num_embeddings_bot": int(self.model.num_embeddings_bottom),
-            "num_embeddings_top": int(self.model.num_embeddings_top),
+            "num_embeddings_fine": int(self.model.num_embeddings_fine),
+            "num_embeddings_coarse": int(self.model.num_embeddings_coarse),
             "embedding_dim": int(self.model.embedding_dim),
             "hidden_channels": int(self.model.hidden_channels),
+            "num_residual_layers": int(self.model.num_residual_layers),
+            "num_residual_hiddens": int(self.model.num_residual_hiddens),
         }
         norm_stats = getattr(self.dataset, "norm_stats", None)
         if norm_stats:
@@ -182,8 +184,12 @@ class Stage1Trainer(BaseTrainer):
             self._tee(f"  New best model saved: {best_path} (loss={total_loss:.4f})")
 
     def _load_checkpoint(self, path: str) -> None:
+        from ..utils.checkpoint_compat import migrate_vq_vae_state_dict
+
         ckpt = torch.load(path, map_location=self.device, weights_only=True)
-        self.model.load_state_dict(ckpt["model_state_dict"])
+        state = ckpt["model_state_dict"]
+        migrate_vq_vae_state_dict(state)
+        self.model.load_state_dict(state)
         self.optimizer.load_state_dict(ckpt["optim_state_dict"])
         self.scaler.load_state_dict(ckpt["scaler_state_dict"])
         self.global_step = ckpt["global_step"]

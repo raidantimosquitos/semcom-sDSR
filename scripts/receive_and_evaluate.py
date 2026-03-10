@@ -82,41 +82,52 @@ def main() -> None:
         target_T=train_ds.target_T,
     )
 
-    # Load Stage 1 + Stage 2 (full sDSR)
-    num_embeddings_top = ckpt1["num_embeddings_top"]
-    num_embeddings_bot = ckpt1["num_embeddings_bot"]
+    # Load Stage 1 + Stage 2 (full sDSR); arch params from checkpoint
+    from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
+    num_embeddings_coarse = ckpt1.get("num_embeddings_coarse", ckpt1.get("num_embeddings_top"))
+    num_embeddings_fine = ckpt1.get("num_embeddings_fine", ckpt1.get("num_embeddings_bot"))
     embedding_dim = ckpt1["embedding_dim"]
+    hidden_channels = ckpt1["hidden_channels"]
+    num_residual_layers = ckpt1.get("num_residual_layers", 2)
+    num_residual_hiddens = ckpt1.get("num_residual_hiddens", 64)
     vq_vae = VQ_VAE_2Layer(
-        num_hiddens=128,
-        num_residual_layers=2,
-        num_residual_hiddens=64,
-        num_embeddings=(num_embeddings_top, num_embeddings_bot),
+        hidden_channels=hidden_channels,
+        num_residual_layers=num_residual_layers,
+        num_residual_hiddens=num_residual_hiddens,
+        num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
         embedding_dim=embedding_dim,
         commitment_cost=0.25,
         decay=0.99,
     )
-    
-    vq_vae.load_state_dict(ckpt1["model_state_dict"])
+    state1 = dict(ckpt1["model_state_dict"])
+    migrate_vq_vae_state_dict(state1)
+    vq_vae.load_state_dict(state1)
 
-    bits_top = int(math.log2(num_embeddings_top))
-    bits_bot = int(math.log2(num_embeddings_bot))
-
-    # Match encoder: bot (n_mels/2, T/4), top (n_mels/4, T/8)
-    H_bot = max(1, n_mels // 2)
-    W_bot = max(1, T // 4)
-    H_top = max(1, H_bot // 2)
-    W_top = max(1, W_bot // 2)
-    frame_sz = frame_size_bytes(H_top, W_top, H_bot, W_bot, bits_top, bits_bot)
+    bits_coarse = int(math.log2(num_embeddings_coarse))
+    bits_fine = int(math.log2(num_embeddings_fine))
+    H_fine = max(1, n_mels // 4)
+    W_fine = max(1, T // 4)
+    H_coarse = max(1, H_fine // 4)
+    W_coarse = max(1, W_fine // 4)
+    frame_sz = frame_size_bytes(H_coarse, W_coarse, H_fine, W_fine, bits_coarse, bits_fine)
 
     num_clips, frames = read_bitstream_file(args.input_bitstream, frame_sz)
     if num_clips != len(test_ds):
         print(f"Warning: bitstream has {num_clips} clips, test set has {len(test_ds)}. Using min for alignment.")
     n_eval = min(num_clips, len(test_ds))
     
-    cfg = sDSRConfig(embedding_dim=embedding_dim, num_hiddens=128, n_mels=n_mels, T=T)
+    cfg = sDSRConfig(
+        embedding_dim=embedding_dim,
+        hidden_channels=hidden_channels,
+        num_residual_hiddens=num_residual_hiddens,
+        n_mels=n_mels,
+        T=T,
+    )
     model = sDSR(vq_vae, cfg)
     ckpt2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
-    model.load_state_dict(ckpt2["model_state_dict"])
+    state2 = dict(ckpt2["model_state_dict"])
+    migrate_vq_vae_state_dict(state2)
+    model.load_state_dict(state2)
     model = model.to(device)
     model.eval()
 
@@ -127,12 +138,12 @@ def main() -> None:
         for i in range(n_eval):
             _, label, machine_id = test_ds[i]
             frame = frames[i]
-            indices_top, indices_bot = unpack_frame_to_indices(
-                frame, H_top, W_top, H_bot, W_bot,
-                bits_top=bits_top, bits_bot=bits_bot, device=device,
+            indices_coarse, indices_fine = unpack_frame_to_indices(
+                frame, H_coarse, W_coarse, H_fine, W_fine,
+                bits_coarse=bits_coarse, bits_fine=bits_fine, device=device,
             )
-            q_bot, q_top = vq_vae.indices_to_quantized(indices_top, indices_bot)
-            m_out = model.forward_from_quantized(q_bot, q_top)
+            q_fine, q_coarse = vq_vae.indices_to_quantized(indices_coarse, indices_fine)
+            m_out = model.forward_from_quantized(q_fine, q_coarse)
             # Anomaly score: mean over anomaly channel (same as AnomalyEvaluator)
             logits = m_out[:, 1]
             score = logits.view(-1).mean().item()
