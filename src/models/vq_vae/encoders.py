@@ -1,16 +1,7 @@
-"""
-2-D CNN encoders for spectrogram input.
-
-Generic Encoder (reference VQ-VAE-2 style): configurable downscale_factor,
-BatchNorm, ReLU, and ReZero ResidualStack. Used for both fine and coarse levels.
-"""
-
 from __future__ import annotations
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from math import log2
 
 from .res_blocks_2d import ResidualStack
 
@@ -72,4 +63,3 @@ class EncoderCoarse(nn.Module):
 
         x = self._residual_stack(x)
         return x
-    )
