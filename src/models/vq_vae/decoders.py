@@ -15,62 +15,69 @@ from math import log2
 from .res_blocks_2d import ResidualStack
 
 
-class Decoder(nn.Module):
+class DecoderFine(nn.Module):
+    def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
+        super(DecoderFine, self).__init__()
+
+        self._conv_1 = nn.Conv2d(in_channels=in_channels,
+                                 out_channels=num_hiddens,
+                                 kernel_size=3,
+                                 stride=1, padding=1)
+
+        self._residual_stack = ResidualStack(in_channels=num_hiddens,
+                                             num_hiddens=num_hiddens,
+                                             num_residual_layers=num_residual_layers,
+                                             num_residual_hiddens=num_residual_hiddens)
+
+        self._conv_trans_1 = nn.ConvTranspose2d(in_channels=num_hiddens,
+                                                out_channels=num_hiddens // 2,
+                                                kernel_size=4,
+                                                stride=2, padding=1)
+
+        self._conv_trans_2 = nn.ConvTranspose2d(in_channels=num_hiddens // 2,
+                                                out_channels=3,
+                                                kernel_size=4,
+                                                stride=2, padding=1)
+
+    def forward(self, inputs):
+        x = self._conv_1(inputs)
+
+        x = self._residual_stack(x)
+
+        x = self._conv_trans_1(x)
+        x = F.relu(x)
+
+        return self._conv_trans_2(x)
+
+class DecoderCoarse(nn.Module):
     """
-    Generic decoder: latent -> output with configurable upscale.
-    Upscale must be a power of 2. Uses conv, ResidualStack, then ConvTranspose2d steps.
+    Output should be fine latent space shape (num_hiddens, 32, 80)
+    Input should be coarse latent space shape (embedding_dim, 16, 40)
     """
+    def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
+        super(DecoderCoarse, self).__init__()
 
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        out_channels: int,
-        res_channels: int,
-        num_res_layers: int,
-        upscale_factor: int,
-    ) -> None:
-        super().__init__()
-        assert log2(upscale_factor) % 1 == 0, "Upscale must be a power of 2"
-        upscale_steps = int(log2(upscale_factor))
-        layers = [
-            nn.Conv2d(in_channels, hidden_channels, 3, stride=1, padding=1),
-            ResidualStack(hidden_channels, res_channels, num_res_layers),
-        ]
-        c_channel, n_channel = hidden_channels, hidden_channels // 2
-        for _ in range(upscale_steps):
-            layers.append(
-                nn.Sequential(
-                    nn.ConvTranspose2d(c_channel, n_channel, 4, stride=2, padding=1),
-                    nn.ReLU(inplace=True),
-                )
-            )
-            c_channel, n_channel = n_channel, out_channels
-        layers.append(nn.Conv2d(c_channel, n_channel, 3, stride=1, padding=1))
-        self.layers = nn.Sequential(*layers)
+        self._conv_1 = nn.Conv2d(in_channels=in_channels,
+                                 out_channels=num_hiddens,
+                                 kernel_size=3,
+                                 stride=1, padding=1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
+        self._residual_stack = ResidualStack(in_channels=num_hiddens,
+                                             num_hiddens=num_hiddens,
+                                             num_residual_layers=num_residual_layers,
+                                             num_residual_hiddens=num_residual_hiddens)
 
+        self._conv_trans_1 = nn.ConvTranspose2d(in_channels=num_hiddens,
+                                                out_channels=num_hiddens // 2,
+                                                kernel_size=4,
+                                                stride=2, padding=1)
+    
+    def forward(self, inputs):
+        x = self._conv_1(inputs)
 
-class Upscaler(nn.Module):
-    """
-    Upscale quantized codes by given scaling rates (each rate is a power of 2).
-    Uses ConvTranspose2d steps to match reference VQ-VAE-2.
-    """
+        x = self._residual_stack(x)
 
-    def __init__(self, embed_dim: int, scaling_rates: list[int]) -> None:
-        super().__init__()
-        self.stages = nn.ModuleList()
-        for sr in scaling_rates:
-            upscale_steps = int(log2(sr))
-            stage_layers = []
-            for _ in range(upscale_steps):
-                stage_layers.append(
-                    nn.ConvTranspose2d(embed_dim, embed_dim, 4, stride=2, padding=1)
-                )
-                stage_layers.append(nn.ReLU(inplace=True))
-            self.stages.append(nn.Sequential(*stage_layers))
+        x = self._conv_trans_1(x)
+        x = F.relu(x)
 
-    def forward(self, x: torch.Tensor, stage: int) -> torch.Tensor:
-        return self.stages[stage](x)
+        return x

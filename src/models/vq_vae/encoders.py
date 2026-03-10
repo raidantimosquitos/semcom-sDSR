@@ -14,64 +14,62 @@ from math import log2
 
 from .res_blocks_2d import ResidualStack
 
+class EncoderFine(nn.Module):
+    def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
+        super(EncoderFine, self).__init__()
 
-class Encoder(nn.Module):
-    """
-    Generic encoder: input -> latent with configurable downscale.
-    Downscale must be a power of 2. Uses BatchNorm + ReLU and ReZero residual stack.
-    """
+        self._conv_1 = nn.Conv2d(in_channels=in_channels,
+                                 out_channels=num_hiddens // 2,
+                                 kernel_size=4,
+                                 stride=2, padding=1)
+        self._conv_2 = nn.Conv2d(in_channels=num_hiddens // 2,
+                                 out_channels=num_hiddens,
+                                 kernel_size=4,
+                                 stride=2, padding=1)
+        self._conv_3 = nn.Conv2d(in_channels=num_hiddens,
+                                 out_channels=num_hiddens,
+                                 kernel_size=3,
+                                 stride=1, padding=1)
+        self._residual_stack = ResidualStack(in_channels=num_hiddens,
+                                             num_hiddens=num_hiddens,
+                                             num_residual_layers=num_residual_layers,
+                                             num_residual_hiddens=num_residual_hiddens)
 
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        res_channels: int,
-        num_res_layers: int,
-        downscale_factor: int,
-    ) -> None:
-        super().__init__()
-        assert log2(downscale_factor) % 1 == 0, "Downscale must be a power of 2"
-        downscale_steps = int(log2(downscale_factor))
-        layers = []
-        c_channel, n_channel = in_channels, hidden_channels // 2
-        for _ in range(downscale_steps):
-            layers.append(
-                nn.Sequential(
-                    nn.Conv2d(c_channel, n_channel, 4, stride=2, padding=1),
-                    nn.ReLU(inplace=True),
-                )
-            )
-            c_channel, n_channel = n_channel, hidden_channels
-        layers.append(nn.Conv2d(c_channel, n_channel, 3, stride=1, padding=1))
-        layers.append(ResidualStack(n_channel, res_channels, num_res_layers))
-        self.layers = nn.Sequential(*layers)
+    def forward(self, inputs):
+        x = self._conv_1(inputs)
+        x = F.relu(x)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
+        x = self._conv_2(x)
+        x = F.relu(x)
+
+        x = self._conv_3(x)
+        return self._residual_stack(x)
 
 
-# Backward-compatible aliases: build fine and coarse as Encoder with specific args
-def EncoderFine(
-    in_channels: int,
-    hidden_channels: int,
-    num_residual_layers: int,
-    res_channels: int = 32,
-    downscale_factor: int = 4,
-) -> Encoder:
-    """Fine (first-stage) encoder: input -> high-res latent (e.g. 4x down)."""
-    return Encoder(
-        in_channels, hidden_channels, res_channels, num_residual_layers, downscale_factor
-    )
+class EncoderCoarse(nn.Module):
+    def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
+        super(EncoderCoarse, self).__init__()
 
+        self._conv_1 = nn.Conv2d(in_channels=in_channels,
+                                 out_channels=num_hiddens,
+                                 kernel_size=4,
+                                 stride=2, padding=1)
+        self._conv_2 = nn.Conv2d(in_channels=num_hiddens,
+                                 out_channels=num_hiddens,
+                                 kernel_size=3,
+                                 stride=1, padding=1)
+        self._residual_stack = ResidualStack(in_channels=num_hiddens,
+                                             num_hiddens=num_hiddens,
+                                             num_residual_layers=num_residual_layers,
+                                             num_residual_hiddens=num_residual_hiddens)
 
-def EncoderCoarse(
-    in_channels: int,
-    hidden_channels: int,
-    num_residual_layers: int,
-    res_channels: int = 32,
-    downscale_factor: int = 2,
-) -> Encoder:
-    """Coarse (second-stage) encoder: high-res latent -> low-res latent (e.g. 2x down)."""
-    return Encoder(
-        in_channels, hidden_channels, res_channels, num_residual_layers, downscale_factor
+    def forward(self, inputs):
+        x = self._conv_1(inputs)
+        x = F.relu(x)
+
+        x = self._conv_2(x)
+        x = F.relu(x)
+
+        x = self._residual_stack(x)
+        return x
     )
