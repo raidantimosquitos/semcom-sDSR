@@ -92,7 +92,7 @@ class VQ_VAE_2Layer(nn.Module):
         # Codebook input channels: coarse = hidden_channels; fine = hidden_channels + embed_dim (conditioned on decoded coarse)
         self._pre_vq_conv_coarse = nn.Conv2d(hidden_channels, embedding_dim, kernel_size=1, stride=1)
         self._pre_vq_conv_fine = nn.Conv2d(
-            hidden_channels + embedding_dim, embedding_dim, kernel_size=1, stride=1
+            2*hidden_channels, embedding_dim, kernel_size=1, stride=1
         )
 
         # Vector quantizers
