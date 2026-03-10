@@ -57,7 +57,7 @@ class VQ_VAE_2Layer(nn.Module):
         commitment_cost: float,
         decay: float = 0.0,
         res_channels: int = 32,
-        scaling_rates: tuple[int, int] = (4, 4),
+        scaling_rates: tuple[int, int] = (4, 2),
         test: bool = False,
     ):
         super().__init__()
