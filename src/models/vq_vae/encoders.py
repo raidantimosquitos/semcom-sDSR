@@ -52,9 +52,10 @@ class EncoderCoarse(nn.Module):
         num_residual_layers: int,
     ) -> None:
         super().__init__()
+        out_channels = hidden_channels * 4
         self._conv1 = nn.Conv2d(in_channels, hidden_channels, kernel_size=4, stride=2, padding=1)
-        self._conv2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1)
-        self._residual = ResidualStack(hidden_channels, hidden_channels, num_residual_layers)
+        self._conv2 = nn.Conv2d(hidden_channels, out_channels, kernel_size=4, stride=2, padding=1)
+        self._residual = ResidualStack(out_channels, out_channels, num_residual_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self._conv1(x))

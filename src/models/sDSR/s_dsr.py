@@ -30,7 +30,6 @@ class sDSRConfig:
     num_residual_layers: int = 2
     n_mels: int = 128
     T: int = 320
-    ad_base_width: int = 32
     anomaly_sampling: Literal["distant", "uniform"] = "uniform"
     anomaly_strength_min: float = 0.2
     anomaly_strength_max: float = 1.0
@@ -76,7 +75,7 @@ class sDSR(nn.Module):
         self._anomaly_detection = AnomalyDetectionModule(
             in_channels=2,
             out_channels=2,
-            base_width=cfg.ad_base_width,
+            base_width=cfg.hidden_channels//2,
         )
 
         # Anomaly generation (training only): codebook replacement using dataset-provided mask

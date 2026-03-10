@@ -46,8 +46,8 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
     s1.add_argument("--n_iter", type=int, default=20000)
     s1.add_argument("--lr", type=float, default=1e-4)
-    s1.add_argument("--num_embeddings_top", type=int, default=512)
-    s1.add_argument("--num_embeddings_bot", type=int, default=4096)
+    s1.add_argument("--num_embeddings_coarse", type=int, default=512)
+    s1.add_argument("--num_embeddings_fine", type=int, default=4096)
     s1.add_argument("--embedding_dim", type=int, default=16)
     s1.add_argument("--hidden_channels", type=int, default=128)
     s1.add_argument("--lambda_recon", type=float, default=1.0)
@@ -101,7 +101,6 @@ def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int, hidden_channels: int
         embedding_dim=embedding_dim,
         hidden_channels=hidden_channels,
         num_residual_layers=2,
-        ad_base_width=32,
         n_mels=n_mels,
         T=T,
         anomaly_sampling="uniform",
@@ -129,7 +128,7 @@ def run_stage1(args: argparse.Namespace) -> None:
 
     model = build_vq_vae(
         n_mels, T, args.hidden_channels,
-        args.num_embeddings_top, args.num_embeddings_bot,
+        args.num_embeddings_coarse, args.num_embeddings_fine,
         args.embedding_dim,
         num_residual_layers=2,
     )
