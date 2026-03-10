@@ -15,8 +15,8 @@ class EncoderFine(nn.Module):
                                  stride=2, padding=1)
         self._conv_2 = nn.Conv2d(in_channels=num_hiddens//2,
                                  out_channels=num_hiddens,
-                                 kernel_size=3,
-                                 stride=1, padding=1)
+                                 kernel_size=4,
+                                 stride=2, padding=1)
         self._conv_3 = nn.Conv2d(in_channels=num_hiddens,
                                  out_channels=num_hiddens,
                                  kernel_size=3,
