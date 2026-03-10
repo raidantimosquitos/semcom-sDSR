@@ -1,5 +1,9 @@
 """
 2-D residual blocks for spectrogram encoders/decoders.
+
+- ReZero: residual block with learnable scale (reference VQ-VAE-2 style).
+- ResidualStack: stack of ReZero blocks.
+- Residual / ResidualStack (legacy): original residual blocks, kept for compatibility.
 """
 
 from __future__ import annotations
@@ -7,6 +11,54 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from math import log2
+
+
+class ReZero(nn.Module):
+    """
+    ReZero residual block: x + alpha * block(x).
+    Matches reference VQ-VAE-2 implementation.
+    """
+
+    def __init__(self, in_channels: int, res_channels: int) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv2d(in_channels, res_channels, 3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(res_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(res_channels, in_channels, 3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.alpha = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layers(x) * self.alpha + x
+
+
+class ResidualStack(nn.Module):
+    """
+    Stack of ReZero residual blocks (reference VQ-VAE-2 style).
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        res_channels: int,
+        num_layers: int,
+    ) -> None:
+        super().__init__()
+        self.stack = nn.Sequential(
+            *[ReZero(in_channels, res_channels) for _ in range(num_layers)]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.stack(x)
+
+
+# ---------------------------------------------------------------------------
+# Legacy residual blocks (kept for any external use)
+# ---------------------------------------------------------------------------
 
 
 class Residual(nn.Module):
@@ -30,8 +82,8 @@ class Residual(nn.Module):
         return x + self._block(x)
 
 
-class ResidualStack(nn.Module):
-    """Stack of residual blocks with final ReLU. Middle channels = hidden_channels // 2."""
+class ResidualStackLegacy(nn.Module):
+    """Stack of legacy residual blocks with final ReLU."""
 
     def __init__(
         self,

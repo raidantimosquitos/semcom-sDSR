@@ -2,6 +2,8 @@
 sDSR - Spectrogram Dual Subspace Reconstruction
 
 Discrete Autoencoder (VQ-VAE-2 style) for spectrogram anomaly detection.
+Architecture aligned with reference VQ-VAE-2: generic Encoder/Decoder with
+downscale/upscale factors, ReZero residuals, BatchNorm, and 2-level hierarchy.
 
 Input spectrograms are 2-D: (B, C, n_mels, T)
   B       – batch size
@@ -9,19 +11,14 @@ Input spectrograms are 2-D: (B, C, n_mels, T)
   n_mels  – frequency bins (e.g. 128)
   T       – time frames (e.g. 256)
 
-Architecture (Figure 1 of the paper), symmetric 4x4 down/up:
-  Encoder fine   : X -> f_fine        (4x4 down, 32x80 for 128x320, hidden_channels)
-  Encoder coarse : f_fine -> f_coarse (4x4 down, 8x20, 4*hidden_channels)
-  VQ coarse      : f_coarse -> Q_coarse (coarse codebook)
-  Decoder coarse : Q_coarse -> f_coarse_up (4x upsample to 32x80, 4*hidden_channels)
-  Concatenate    : [f_fine, f_coarse_up] -> VQ_fine -> Q_fine (fine codebook; 5*hidden_channels -> emb)
-  Decoder fine   : [Q_coarse_up, Q_fine] -> X_out (4x symmetric upsample to original resolution)
-
-Loss (Equation 1):
-  L_ae = lambda_x * MSE(X, X_out)
-       + lambda_K * MSE(f_top, sg[Q_top])   <- VQ_top (top)
-       + lambda_K * MSE(f_bot, sg[Q_bot])   <- VQ_bot (bottom)
-  where sg[.] is stop-gradient (.detach()), lambda_K = 0.25.
+2-level flow (reference style):
+  Encoder fine   : X -> f_fine        (4x down, 32x80 for 128x320, hidden_channels)
+  Encoder coarse : f_fine -> f_coarse (4x down, 8x20, hidden_channels)
+  VQ coarse      : f_coarse -> z_coarse (1x1 conv to embed_dim) -> Q_coarse
+  Decoder coarse : Q_coarse -> decoded_coarse (embed_dim at 32x80)
+  Fine input     : [f_fine, decoded_coarse] -> 1x1 conv -> z_fine -> Q_fine
+  Upscaler       : Q_coarse (8x20) -> (32x80) in embed space
+  Decoder fine   : [Q_coarse_up, Q_fine] -> X_out (4x up to 128x320)
 """
 
 from __future__ import annotations
@@ -32,8 +29,8 @@ import torch.nn.functional as F
 from typing import Union
 
 from .quantizer import VectorQuantizerEMA
-from .encoders import EncoderFine, EncoderCoarse
-from .decoders import DecoderFine, DecoderCoarse
+from .encoders import Encoder
+from .decoders import Decoder, Upscaler
 
 
 # ---------------------------------------------------------------------------
@@ -42,10 +39,13 @@ from .decoders import DecoderFine, DecoderCoarse
 
 class VQ_VAE_2Layer(nn.Module):
     """
-    Two-layer VQ-VAE for spectrograms.
+    Two-layer VQ-VAE for spectrograms (reference VQ-VAE-2 structure).
 
-    The coarse and fine quantizers can have different codebook sizes,
-    allowing finer control over representation capacity at each level.
+    - Encoders: generic Encoder with downscale_factor=4, BatchNorm, ReZero ResidualStack.
+    - Coarse codebook: encoder_coarse (hidden_channels) -> 1x1 conv -> embed_dim -> VQ.
+    - Coarse decoder: quantized_coarse -> Decoder -> embed_dim at fine spatial res (for conditioning).
+    - Fine codebook: concat(encoder_fine, decoded_coarse) -> 1x1 conv -> embed_dim -> VQ.
+    - Fine decoder: concat(upscaled_coarse, quantized_fine) -> Decoder -> image.
     """
 
     def __init__(
@@ -56,6 +56,8 @@ class VQ_VAE_2Layer(nn.Module):
         embedding_dim: int,
         commitment_cost: float,
         decay: float = 0.0,
+        res_channels: int = 32,
+        scaling_rates: tuple[int, int] = (4, 4),
         test: bool = False,
     ):
         super().__init__()
@@ -63,6 +65,8 @@ class VQ_VAE_2Layer(nn.Module):
         self.embedding_dim = embedding_dim
         self.hidden_channels = hidden_channels
         self.num_residual_layers = num_residual_layers
+        self.res_channels = res_channels
+        self.scaling_rates = scaling_rates
 
         # Resolve codebook sizes: int -> (coarse, fine) same; tuple -> (coarse, fine) explicit
         if isinstance(num_embeddings, int):
@@ -74,17 +78,21 @@ class VQ_VAE_2Layer(nn.Module):
             self.num_embeddings_fine = num_embeddings_fine
             self.num_embeddings_coarse = num_embeddings_coarse
 
-        # Encoders
-        self._encoder_fine = EncoderFine(1, hidden_channels, num_residual_layers)
-        self._encoder_coarse = EncoderCoarse(hidden_channels, hidden_channels, num_residual_layers)
-
-        # Projection to embedding space before VQ (f_coarse has 4*hidden, feat_fine = f_fine + decoded_coarse = 5*hidden)
-        self._pre_vq_conv_coarse = nn.Conv2d(hidden_channels * 4, embedding_dim, kernel_size=1, stride=1)
-        self._pre_vq_conv_fine = nn.Conv2d(
-            hidden_channels * 5, embedding_dim, kernel_size=1, stride=1
+        # Encoders (reference: first from image, rest from previous level output)
+        self._encoder_fine = Encoder(
+            1, hidden_channels, res_channels, num_residual_layers, scaling_rates[0]
+        )
+        self._encoder_coarse = Encoder(
+            hidden_channels, hidden_channels, res_channels, num_residual_layers, scaling_rates[1]
         )
 
-        # Vector quantizers (different codebook sizes allowed)
+        # Codebook input channels: coarse = hidden_channels; fine = hidden_channels + embed_dim (conditioned on decoded coarse)
+        self._pre_vq_conv_coarse = nn.Conv2d(hidden_channels, embedding_dim, kernel_size=1, stride=1)
+        self._pre_vq_conv_fine = nn.Conv2d(
+            hidden_channels + embedding_dim, embedding_dim, kernel_size=1, stride=1
+        )
+
+        # Vector quantizers
         self._vq_coarse = VectorQuantizerEMA(
             num_embeddings_coarse, embedding_dim, commitment_cost, decay
         )
@@ -92,9 +100,18 @@ class VQ_VAE_2Layer(nn.Module):
             num_embeddings_fine, embedding_dim, commitment_cost, decay
         )
 
-        # Decoders
-        self._decoder_coarse = DecoderCoarse(embedding_dim, hidden_channels, num_residual_layers)
-        self._decoder_fine = DecoderFine(embedding_dim * 2, hidden_channels, num_residual_layers)
+        # Coarse decoder: quantized (embed_dim) -> decoded at fine res (embed_dim), for conditioning fine codebook
+        self._decoder_coarse = Decoder(
+            embedding_dim, hidden_channels, embedding_dim,
+            res_channels, num_residual_layers, scaling_rates[0]
+        )
+        # Fine decoder: concat(upscaled_coarse, quantized_fine) -> image
+        self._decoder_fine = Decoder(
+            embedding_dim * 2, hidden_channels, 1,
+            res_channels, num_residual_layers, scaling_rates[0]
+        )
+        # Upscaler: coarse quantized (8x20) -> (32x80) to match fine grid
+        self._upscaler = Upscaler(embedding_dim, [scaling_rates[1]])
 
     def forward(
         self, x: torch.Tensor
@@ -110,7 +127,7 @@ class VQ_VAE_2Layer(nn.Module):
         z_coarse = self._pre_vq_conv_coarse(f_coarse)
         loss_coarse, quantized_coarse, perplexity_coarse, _ = self._vq_coarse(z_coarse)
 
-        # Decode coarse and concatenate with enc_fine for fine quantizer input
+        # Decode coarse to embed_dim at fine spatial res (for conditioning fine codebook)
         decoded_coarse = self._decoder_coarse(quantized_coarse)
         feat_fine = torch.cat([f_fine, decoded_coarse], dim=1)
 
@@ -118,12 +135,9 @@ class VQ_VAE_2Layer(nn.Module):
         z_fine = self._pre_vq_conv_fine(feat_fine)
         loss_fine, quantized_fine, perplexity_fine, _ = self._vq_fine(z_fine)
 
-        # Align coarse quantized to fine spatial size and decode jointly
-        quantized_coarse_upsampled = F.interpolate(
-            quantized_coarse, size=quantized_fine.shape[-2:],
-            mode="bilinear", align_corners=False
-        )
-        quant_joined = torch.cat([quantized_coarse_upsampled, quantized_fine], dim=1)
+        # Upscale coarse quantized to fine grid and decode jointly (reference: Upscaler then concat)
+        quantized_coarse_up = self._upscaler(quantized_coarse, 0)
+        quant_joined = torch.cat([quantized_coarse_up, quantized_fine], dim=1)
         recon = self._decoder_fine(quant_joined)
 
         return (
@@ -230,11 +244,10 @@ class VQ_VAE_2Layer(nn.Module):
         Returns:
             X_G: (B, 1, n_mels, T) reconstructed spectrogram
         """
-        quantized_coarse_upsampled = F.interpolate(
-            q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False
-        )
-        quant_joined = torch.cat([quantized_coarse_upsampled, q_fine], dim=1)
+        quantized_coarse_up = self._upscaler(q_coarse, 0)
+        quant_joined = torch.cat([quantized_coarse_up, q_fine], dim=1)
         return self._decoder_fine(quant_joined)
+
 
 # ---------------------------------------------------------------------------
 # Smoke test

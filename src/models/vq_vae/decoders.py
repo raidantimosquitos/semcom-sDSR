@@ -1,8 +1,8 @@
 """
 2-D CNN decoders for spectrogram reconstruction.
 
-- DecoderCoarse: low-res quantized (8x20) -> high-res (32x80), 4x symmetric upsample, out 4*hidden_channels
-- DecoderFine: concatenated [Q_coarse, Q_fine] (32x80) -> spectrogram (128x320), 4x symmetric upsample
+Generic Decoder and Upscaler (reference VQ-VAE-2 style): configurable upscale_factor,
+BatchNorm, ReLU, ReZero ResidualStack. Coarse decoder outputs embed_dim; fine decoder outputs image channels.
 """
 
 from __future__ import annotations
@@ -10,60 +10,70 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from math import log2
 
 from .res_blocks_2d import ResidualStack
 
 
-class DecoderCoarse(nn.Module):
+class Decoder(nn.Module):
     """
-    Coarse decoder: low-res quantized latent (8x20) -> high-res feature (32x80).
-    Two 2x symmetric upsamples. Output 4*hidden_channels (to concat with f_fine).
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        num_residual_layers: int,
-    ) -> None:
-        super().__init__()
-        out_channels = hidden_channels * 4
-        self._conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self._residual = ResidualStack(out_channels, out_channels, num_residual_layers)
-        self._conv_trans1 = nn.ConvTranspose2d(out_channels, out_channels, kernel_size=4, stride=2, padding=1)
-        self._conv_trans2 = nn.ConvTranspose2d(out_channels, out_channels, kernel_size=4, stride=2, padding=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self._conv(x)
-        x = self._residual(x)
-        x = F.relu(self._conv_trans1(x))
-        return self._conv_trans2(x)
-
-
-class DecoderFine(nn.Module):
-    """
-    Fine decoder: concatenated [Q_coarse, Q_fine] (32x80) -> reconstructed spectrogram (128x320).
-    Two symmetric 2x2 transposed convs: 32x80 -> 64x160 -> 128x320.
+    Generic decoder: latent -> output with configurable upscale.
+    Upscale must be a power of 2. Uses conv, ResidualStack, then ConvTranspose2d steps.
     """
 
     def __init__(
         self,
         in_channels: int,
         hidden_channels: int,
-        num_residual_layers: int,
+        out_channels: int,
+        res_channels: int,
+        num_res_layers: int,
+        upscale_factor: int,
     ) -> None:
         super().__init__()
-        self._conv = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
-        self._residual = ResidualStack(hidden_channels, hidden_channels, num_residual_layers)
-        self._conv_trans1 = nn.ConvTranspose2d(
-            hidden_channels, hidden_channels // 2, kernel_size=4, stride=2, padding=1
-        )
-        self._conv_trans2 = nn.ConvTranspose2d(
-            hidden_channels // 2, 1, kernel_size=4, stride=2, padding=1
-        )
+        assert log2(upscale_factor) % 1 == 0, "Upscale must be a power of 2"
+        upscale_steps = int(log2(upscale_factor))
+        layers = [
+            nn.Conv2d(in_channels, hidden_channels, 3, stride=1, padding=1),
+            ResidualStack(hidden_channels, res_channels, num_res_layers),
+        ]
+        c_channel, n_channel = hidden_channels, hidden_channels // 2
+        for _ in range(upscale_steps):
+            layers.append(
+                nn.Sequential(
+                    nn.ConvTranspose2d(c_channel, n_channel, 4, stride=2, padding=1),
+                    nn.BatchNorm2d(n_channel),
+                    nn.ReLU(inplace=True),
+                )
+            )
+            c_channel, n_channel = n_channel, out_channels
+        layers.append(nn.Conv2d(c_channel, n_channel, 3, stride=1, padding=1))
+        layers.append(nn.BatchNorm2d(n_channel))
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self._conv(x)
-        x = self._residual(x)
-        x = F.relu(self._conv_trans1(x))
-        return self._conv_trans2(x)
+        return self.layers(x)
+
+
+class Upscaler(nn.Module):
+    """
+    Upscale quantized codes by given scaling rates (each rate is a power of 2).
+    Uses ConvTranspose2d steps to match reference VQ-VAE-2.
+    """
+
+    def __init__(self, embed_dim: int, scaling_rates: list[int]) -> None:
+        super().__init__()
+        self.stages = nn.ModuleList()
+        for sr in scaling_rates:
+            upscale_steps = int(log2(sr))
+            stage_layers = []
+            for _ in range(upscale_steps):
+                stage_layers.append(
+                    nn.ConvTranspose2d(embed_dim, embed_dim, 4, stride=2, padding=1)
+                )
+                stage_layers.append(nn.BatchNorm2d(embed_dim))
+                stage_layers.append(nn.ReLU(inplace=True))
+            self.stages.append(nn.Sequential(*stage_layers))
+
+    def forward(self, x: torch.Tensor, stage: int) -> torch.Tensor:
+        return self.stages[stage](x)
