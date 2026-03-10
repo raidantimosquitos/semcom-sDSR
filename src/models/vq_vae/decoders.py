@@ -40,8 +40,16 @@ class DecoderFine(nn.Module):
         self._conv_trans_1 = nn.ConvTranspose2d(
             in_channels=num_hiddens,
             out_channels=1,
-            kernel_size=(4, 4),
-            stride=(2, 4),
+            kernel_size=3,
+            stride=2,
+            padding=1,
+        )
+
+        self._conv_trans_2 = nn.ConvTranspose2d(
+            in_channels=num_hiddens,
+            out_channels=1,
+            kernel_size=(3,4),
+            stride=(1, 2),
             padding=(1, 0),
         )
 
@@ -49,7 +57,9 @@ class DecoderFine(nn.Module):
         x = self._conv_1(inputs)
         x = self._residual_stack(x)
         x = self._conv_trans_1(x)
-        return F.relu(x)
+        x = F.relu(x)
+        x = self._conv_trans_2(x)
+        return x
 
 class DecoderCoarse(nn.Module):
     """
