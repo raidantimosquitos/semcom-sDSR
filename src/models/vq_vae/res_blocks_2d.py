@@ -24,10 +24,8 @@ class ReZero(nn.Module):
         super().__init__()
         self.layers = nn.Sequential(
             nn.Conv2d(in_channels, res_channels, 3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(res_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(res_channels, in_channels, 3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels),
             nn.ReLU(inplace=True),
         )
         self.alpha = nn.Parameter(torch.tensor(0.0))

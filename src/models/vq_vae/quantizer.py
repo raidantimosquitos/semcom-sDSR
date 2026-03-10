@@ -1,7 +1,7 @@
 """
 Vector quantizers for VQ-VAE.
 
-- VectorQuantizerEMA_v2: EMA with commitment loss, used by VQ_VAE_2Layer
+- VectorQuantizerEMA: EMA with commitment loss, used by VQ_VAE_2Layer
 """
 
 from __future__ import annotations
