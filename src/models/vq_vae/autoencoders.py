@@ -56,7 +56,6 @@ class VQ_VAE_2Layer(nn.Module):
         embedding_dim: int,
         commitment_cost: float,
         decay: float = 0.0,
-        res_channels: int = 32,
         test: bool = False,
     ):
         super().__init__()
@@ -64,7 +63,7 @@ class VQ_VAE_2Layer(nn.Module):
         self.embedding_dim = embedding_dim
         self.hidden_channels = hidden_channels
         self.num_residual_layers = num_residual_layers
-        self.res_channels = res_channels
+        self.res_channels = hidden_channels // 2
 
         # Resolve codebook sizes: int -> (coarse, fine) same; tuple -> (coarse, fine) explicit
         if isinstance(num_embeddings, int):
@@ -81,13 +80,13 @@ class VQ_VAE_2Layer(nn.Module):
             in_channels=1,
             num_hiddens=hidden_channels,
             num_residual_layers=num_residual_layers,
-            num_residual_hiddens=res_channels
+            num_residual_hiddens=hidden_channels // 2
         )
         self._encoder_coarse = EncoderCoarse(
             in_channels=hidden_channels,
             num_hiddens=hidden_channels,
             num_residual_layers=num_residual_layers,
-            num_residual_hiddens=res_channels
+            num_residual_hiddens=hidden_channels // 2
         )
 
         # Codebook input channels: coarse = hidden_channels; fine = hidden_channels + embed_dim (conditioned on decoded coarse)
@@ -109,14 +108,14 @@ class VQ_VAE_2Layer(nn.Module):
             in_channels=embedding_dim,
             num_hiddens=hidden_channels,
             num_residual_layers=num_residual_layers,
-            num_residual_hiddens=res_channels
+            num_residual_hiddens=hidden_channels // 2
         )
         # Fine decoder: concat(upscaled_coarse, quantized_fine) -> image
         self._decoder_fine = DecoderFine(
             in_channels=embedding_dim * 2,
             num_hiddens=hidden_channels,
             num_residual_layers=num_residual_layers,
-            num_residual_hiddens=res_channels
+            num_residual_hiddens=hidden_channels // 2
         )
 
     def forward(
@@ -250,7 +249,7 @@ class VQ_VAE_2Layer(nn.Module):
         Returns:
             X_G: (B, 1, n_mels, T) reconstructed spectrogram
         """
-        quantized_coarse_up = self._upscaler(q_coarse, 0)
+        quantized_coarse_up = F.interpolate(q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False)
         quant_joined = torch.cat([quantized_coarse_up, q_fine], dim=1)
         return self._decoder_fine(quant_joined)
 
