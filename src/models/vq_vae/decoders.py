@@ -50,7 +50,7 @@ class DecoderFine(nn.Module):
             out_channels=1,
             kernel_size=(3,4),
             stride=(1, 2),
-            padding=(1, 0),
+            padding=1,
         )
 
     def forward(self, inputs):
