@@ -135,7 +135,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             nn.ReLU(inplace=True),
         )
         # Bottleneck at feature resolution (middle channels = hidden_channels // 2)
-        self._bottleneck = ResidualStack(hidden_channels, hidden_channels, num_residual_layers)
+        self._bottleneck = ResidualStack(hidden_channels, hidden_channels, num_residual_layers, hidden_channels // 2)
         # Decoder: symmetric 4x upsample (2x then 2x), with skips from b2 and b1
         self._conv_trans1 = nn.ConvTranspose2d(
             hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1
