@@ -13,11 +13,11 @@ Input spectrograms are 2-D: (B, C, n_mels, T)
 
 2-level flow (reference style):
   Encoder fine   : X -> f_fine        (4x down, 32x80 for 128x320, hidden_channels)
-  Encoder coarse : f_fine -> f_coarse (4x down, 8x20, hidden_channels)
+  Encoder coarse : f_fine -> f_coarse (2x down, 16x40 for scaling_rates=(4,2), hidden_channels)
   VQ coarse      : f_coarse -> z_coarse (1x1 conv to embed_dim) -> Q_coarse
-  Decoder coarse : Q_coarse -> decoded_coarse (embed_dim at 32x80)
+  Decoder coarse : Q_coarse -> decoded_coarse (2x up to 32x80, embed_dim)
   Fine input     : [f_fine, decoded_coarse] -> 1x1 conv -> z_fine -> Q_fine
-  Upscaler       : Q_coarse (8x20) -> (32x80) in embed space
+  Upscaler       : Q_coarse (16x40) -> (32x80) in embed space when coarse downscale=2
   Decoder fine   : [Q_coarse_up, Q_fine] -> X_out (4x up to 128x320)
 """
 
@@ -100,17 +100,17 @@ class VQ_VAE_2Layer(nn.Module):
             num_embeddings_fine, embedding_dim, commitment_cost, decay
         )
 
-        # Coarse decoder: quantized (embed_dim) -> decoded at fine res (embed_dim), for conditioning fine codebook
+        # Coarse decoder: quantized (embed_dim) at coarse res -> decoded at fine res (embed_dim). Upscale must match coarse downscale (scaling_rates[1]) so output matches f_fine grid.
         self._decoder_coarse = Decoder(
             embedding_dim, hidden_channels, embedding_dim,
-            res_channels, num_residual_layers, scaling_rates[0]
+            res_channels, num_residual_layers, scaling_rates[1]
         )
         # Fine decoder: concat(upscaled_coarse, quantized_fine) -> image
         self._decoder_fine = Decoder(
             embedding_dim * 2, hidden_channels, 1,
             res_channels, num_residual_layers, scaling_rates[0]
         )
-        # Upscaler: coarse quantized (8x20) -> (32x80) to match fine grid
+        # Upscaler: coarse quantized (e.g. 16x40 when coarse down=2) -> (32x80) to match fine grid
         self._upscaler = Upscaler(embedding_dim, [scaling_rates[1]])
 
     def forward(

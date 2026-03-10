@@ -69,9 +69,9 @@ def EncoderCoarse(
     hidden_channels: int,
     num_residual_layers: int,
     res_channels: int = 32,
-    downscale_factor: int = 4,
+    downscale_factor: int = 2,
 ) -> Encoder:
-    """Coarse (second-stage) encoder: high-res latent -> low-res latent (e.g. 4x down)."""
+    """Coarse (second-stage) encoder: high-res latent -> low-res latent (e.g. 2x down)."""
     return Encoder(
         in_channels, hidden_channels, res_channels, num_residual_layers, downscale_factor
     )
