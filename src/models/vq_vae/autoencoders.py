@@ -142,7 +142,7 @@ class VQ_VAE_2Layer(nn.Module):
         loss_fine, quantized_fine, perplexity_fine, _ = self._vq_fine(z_fine)
 
         # Upscale coarse quantized to fine grid and decode jointly (reference: Upscaler then concat)
-        quantized_coarse_up = F.interpolate(quantized_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False)
+        quantized_coarse_up = F.interpolate(quantized_coarse, size=quantized_fine.shape[-2:], mode="bilinear", align_corners=False)
         quant_joined = torch.cat([quantized_coarse_up, quantized_fine], dim=1)
         recon = self._decoder_fine(quant_joined)
 
