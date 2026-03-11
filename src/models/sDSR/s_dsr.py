@@ -210,7 +210,7 @@ class sDSR(nn.Module):
 
         # Inject anomalies randomly fine level, coarse level, or both levels
         has_anomaly = (M_gt.sum(dim=(1, 2, 3)) > 0).view(batch_size, 1, 1, 1).float()
-        inject_location = torch.randint(0, 3, (batch_size,))
+        inject_location = torch.randint(0, 3, (batch_size,), device=device)
         use_fine = ((inject_location == 0) | (inject_location == 2)).float().view(batch_size, 1, 1, 1)
         use_coarse = ((inject_location == 1) | (inject_location == 2)).float().view(batch_size, 1, 1, 1)
         
