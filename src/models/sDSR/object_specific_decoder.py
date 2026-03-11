@@ -102,10 +102,10 @@ class SpectrogramReconstructionNetwork(nn.Module):
     UNet-style decoder: [Q_coarse_upsampled, Q_fine] -> spectrogram (1 ch).
 
     No re-downsampling: two encoder blocks at feature resolution (H_fine, W_fine),
-    then bottleneck (ResidualStack), then symmetric 4x upsample: two 2x2 transposed
-    convs (32x80 -> 64x160 -> 128x320), with skip connections from b1 and b2.
+    then bottleneck (ResidualStack), then asymmetric 2x/4x upsample
+    convs (64x80 -> 128x160 -> 128x320).
 
-    Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/4, T/4) = (32, 80).
+    Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/2, T/4) = (64, 80).
     Output: (B, 1, n_mels, T)
     """
 
@@ -186,22 +186,24 @@ class SpectrogramReconstructionNetwork(nn.Module):
             q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False
         )
         x = torch.cat([q_coarse_up, q_fine], dim=1)
-        x = self._block1(x)
-        x = self._mp1(x)
-        x = self._block2(x)
-        x = self._mp2(x)
+        b1 = self._block1(x)
+        x = self._mp1(b1)
+        b2 = self._block2(x)
+        x = self._mp2(b2)
         x = self._pre_bottleneck(x)
-
         x = self._upblock1(x)
+        x = F.relu(x)
+        x = torch.cat([x, b2], dim=1)
+        x = self._conv_after_skip2(x)
         x = F.relu(x)
         x = self._upblock2(x)
         x = F.relu(x)
-        x = self._conv_1(x)
-
+        x = torch.cat([x, b1], dim=1)
+        x = self._conv_after_skip1(x)
+        x = F.relu(x)
         x = self._residual(x)
-
         x = self._conv_trans_1(x)
         x = F.relu(x)
-
+        
         return self._conv_trans_2(x)
 

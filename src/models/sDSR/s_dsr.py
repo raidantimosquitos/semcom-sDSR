@@ -208,10 +208,14 @@ class sDSR(nn.Module):
             strength_fine=strength_fine, strength_coarse=strength_coarse,
         )
 
-        # Always augment both levels when anomaly mask is non-zero (paper: both Q1 and Q2 replaced in mask regions)
+        # Inject anomalies randomly fine level, coarse level, or both levels
         has_anomaly = (M_gt.sum(dim=(1, 2, 3)) > 0).view(batch_size, 1, 1, 1).float()
-        q_fine_used = has_anomaly * q_fine_a + (1 - has_anomaly) * q_fine
-        q_coarse_used = has_anomaly * q_coarse_a + (1 - has_anomaly) * q_coarse
+        inject_location = torch.randint(0, 3, (batch_size,))
+        use_fine = ((inject_location == 0) | (inject_location == 2)).float().view(batch_size, 1, 1, 1)
+        use_coarse = ((inject_location == 1) | (inject_location == 2)).float().view(batch_size, 1, 1, 1)
+        
+        q_fine_used = has_anomaly * (use_fine * q_fine_a + (1 - use_fine) * q_fine) + (1 - has_anomaly) * use_fine * q_fine
+        q_coarse_used = has_anomaly * (use_coarse * q_coarse_a + (1 - use_coarse) * q_coarse) + (1 - has_anomaly) * use_coarse * q_coarse
 
         with torch.no_grad():
             x_g = self._vq_vae.decode_general(q_fine_used, q_coarse_used)
