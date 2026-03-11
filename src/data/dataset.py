@@ -2,7 +2,7 @@ import random
 import re
 import math
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
 import torch.nn.functional as F
@@ -52,11 +52,14 @@ class DCASE2020Task2LogMelDataset(Dataset):
         norm_mean: torch.Tensor | None = None,
         norm_std: torch.Tensor | None = None,
         target_T_override: int | None = None,
+        machine_id: str | None = None,
     ):
         if machine_types is not None:
+            if machine_id is not None:
+                raise ValueError("machine_id filter only applies to single machine_type")
             self._init_multi(root, machine_types, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, normalize)
         elif machine_type is not None:
-            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, normalize, norm_mean, norm_std, target_T_override)
+            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, normalize, norm_mean, norm_std, target_T_override, machine_id)
         else:
             raise ValueError("Provide either machine_type or machine_types")
 
@@ -98,6 +101,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
         norm_mean: torch.Tensor | None = None,
         norm_std: torch.Tensor | None = None,
         target_T_override: int | None = None,
+        machine_id: str | None = None,
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -116,6 +120,18 @@ class DCASE2020Task2LogMelDataset(Dataset):
         self.data = torch.stack(spectrograms)
         self.machine_ids = sorted(set(machine_id_strs))
         self._machine_id_strs = machine_id_strs
+
+        if machine_id is not None:
+            indices = [i for i, mid in enumerate(self._machine_id_strs) if mid == machine_id]
+            if not indices:
+                raise ValueError(f"No samples found for machine_id={machine_id} in {machine_type}")
+            self.data = self.data[indices]
+            self._machine_id_strs = [self._machine_id_strs[i] for i in indices]
+            self.machine_ids = [machine_id]
+            print(
+                f"DCASE2020Task2LogMelDataset: filtered to machine_id={machine_id} | "
+                f"{len(self.data)} spectrograms"
+            )
 
         use_provided_norm = normalize and norm_mean is not None and norm_std is not None
         if use_provided_norm:
@@ -249,6 +265,11 @@ class AudDSRAnomTrainDataset(Dataset):
     is zero (normal); otherwise a mask is generated with the chosen strategy
     (perlin, audio_specific, or both). The model uses the mask for codebook
     replacement in feature space.
+
+    When adversarial_dataset is provided (e.g. other machine_ids same type),
+    the anomaly half is split 50-50: 50% synthetic masks, 50% adversarial
+    samples with mask of all 1s. Overall: zero_mask_prob normal,
+    (1-zero_mask_prob)*0.5 synthetic, (1-zero_mask_prob)*0.5 adversarial.
     """
 
     def __init__(
@@ -256,10 +277,16 @@ class AudDSRAnomTrainDataset(Dataset):
         base_dataset: DCASE2020Task2LogMelDataset,
         strategy: Literal["perlin", "audio_specific", "both"] = "both",
         zero_mask_prob: float = 0.5,
+        adversarial_dataset: Dataset | None = None,
     ) -> None:
         self.base = base_dataset
         self.strategy = strategy
         self.zero_mask_prob = zero_mask_prob
+        self.adversarial_dataset = (
+            adversarial_dataset
+            if (adversarial_dataset is not None and len(cast(Any, adversarial_dataset)) > 0)
+            else None
+        )
         self.machine_type = getattr(base_dataset, "machine_type", None)
         # Spectrogram space: (n_mels, T); mask shape (1, 1, n_mels, T)
         _, _, n_mels, T = base_dataset.data.shape
@@ -278,21 +305,34 @@ class AudDSRAnomTrainDataset(Dataset):
         return len(self.base)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor | int | str]:
-        spectrogram, label, machine_id = self.base[idx]
         n_mels, T = self.n_mels, self.T
         if random.random() < self.zero_mask_prob:
+            spectrogram, label, machine_id = self.base[idx]
             mask = torch.zeros(1, 1, n_mels, T, dtype=torch.float32)
             has_anomaly = 0.0
         else:
-            mask = self._mask_generator.generate(
-                1, device="cpu", force_anomaly=True
+            # Anomaly branch: 50% synthetic mask, 50% adversarial (if available)
+            adv_ds = self.adversarial_dataset
+            use_adversarial = (
+                adv_ds is not None
+                and random.random() < 0.5
             )
-            has_anomaly = 1.0
+            if use_adversarial and adv_ds is not None:
+                j = random.randint(0, len(cast(Any, adv_ds)) - 1)
+                spectrogram, label, machine_id = adv_ds[j]
+                mask = torch.ones(1, 1, n_mels, T, dtype=torch.float32)
+                has_anomaly = 1.0
+            else:
+                spectrogram, label, machine_id = self.base[idx]
+                mask = self._mask_generator.generate(
+                    1, device="cpu", force_anomaly=True
+                )
+                has_anomaly = 1.0
         return {
             "image": spectrogram,
             "anomaly_mask": mask.squeeze(0),
             "has_anomaly": torch.tensor(has_anomaly, dtype=torch.float32),
-            "label": label,
+            "label": 1 if has_anomaly else 0,
             "machine_id": machine_id,
         }
 
@@ -328,6 +368,7 @@ class DCASE2020Task2TestDataset(Dataset):
         mean: torch.Tensor | None = None,
         std: torch.Tensor | None = None,
         target_T: int | None = None,
+        machine_id: str | None = None,
     ):
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -356,9 +397,10 @@ class DCASE2020Task2TestDataset(Dataset):
             if m:
                 label = 0 if m.group(1).lower() == "normal" else 1
                 mid = m.group(2)
+                if machine_id is not None and mid != machine_id:
+                    continue
                 machine_ids.add(mid)
                 self.samples.append((str(wav_path), label, mid))
-
 
         self.machine_ids = sorted(machine_ids)
         self.machine_type = machine_type

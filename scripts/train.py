@@ -15,6 +15,7 @@ import argparse
 from pathlib import Path
 
 import torch
+from torch.utils.data import Subset
 
 from src.data.dataset import (
     DCASE2020Task2LogMelDataset,
@@ -50,12 +51,15 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--num_embeddings_fine", type=int, default=4096)
     s1.add_argument("--embedding_dim", type=int, default=64)
     s1.add_argument("--hidden_channels", type=int, default=128)
+    s1.add_argument("--commitment_cost", type=float, default=0.25)
+    s1.add_argument("--decay", type=float, default=0.99)
     s1.add_argument("--lambda_recon", type=float, default=1.0)
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
     # Stage 2
     s2 = sub.choices["stage2"]
     s2.add_argument("--machine_type", type=str, default="fan", help="Machine type (e.g. fan, pump)")
+    s2.add_argument("--machine_id", type=str, default=None, help="If set, train on this machine_id only; other IDs (same type) used as adversarial samples (mask all 1s)")
     s2.add_argument("--batch_size", type=int, default=16, help="Batch size (default: 16)")
     s2.add_argument("--n_iter", type=int, default=10000)
     s2.add_argument("--stage1_ckpt", type=str, required=True, help="Path to Stage 1 checkpoint")
@@ -85,14 +89,16 @@ def build_vq_vae(
     num_embeddings_fine: int,
     embedding_dim: int,
     num_residual_layers: int = 2,
+    commitment_cost: float = 0.25,
+    decay: float = 0.99,
 ) -> VQ_VAE_2Layer:
     return VQ_VAE_2Layer(
         hidden_channels=hidden_channels,
         num_residual_layers=num_residual_layers,
         num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
         embedding_dim=embedding_dim,
-        commitment_cost=0.25,
-        decay=0.99,
+        commitment_cost=commitment_cost,
+        decay=decay,
     )
 
 
@@ -131,6 +137,8 @@ def run_stage1(args: argparse.Namespace) -> None:
         args.num_embeddings_coarse, args.num_embeddings_fine,
         args.embedding_dim,
         num_residual_layers=2,
+        commitment_cost=args.commitment_cost,
+        decay=args.decay,
     )
     trainer = Stage1Trainer(
         model=model,
@@ -160,19 +168,47 @@ def run_stage2(args: argparse.Namespace) -> None:
             norm_mean=norm_mean,
             norm_std=norm_std,
             target_T_override=ckpt["target_T"],
+            machine_id=args.machine_id,
         )
     else:
         q_vae_dataset = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=args.machine_type,
             normalize=True,
+            machine_id=args.machine_id,
         )
     _, _, n_mels, T = q_vae_dataset.data.shape
+
+    adversarial_dataset = None
+    if args.machine_id is not None:
+        # Full machine_type dataset (no machine_id filter) for adversarial samples
+        if norm_mean is not None and norm_std is not None and "target_T" in ckpt:
+            q_vae_full = DCASE2020Task2LogMelDataset(
+                root=args.data_path,
+                machine_type=args.machine_type,
+                normalize=True,
+                norm_mean=norm_mean,
+                norm_std=norm_std,
+                target_T_override=ckpt["target_T"],
+            )
+        else:
+            q_vae_full = DCASE2020Task2LogMelDataset(
+                root=args.data_path,
+                machine_type=args.machine_type,
+                normalize=True,
+            )
+        adversarial_indices = [
+            i for i in range(len(q_vae_full._machine_id_strs))
+            if q_vae_full._machine_id_strs[i] != args.machine_id
+        ]
+        if adversarial_indices:
+            adversarial_dataset = Subset(q_vae_full, adversarial_indices)
 
     train_dataset = AudDSRAnomTrainDataset(
         q_vae_dataset,
         strategy=args.anomaly_strategy,
         zero_mask_prob=0.5,
+        adversarial_dataset=adversarial_dataset,
     )
 
     # Load VQ-VAE from Stage 1 (same architecture as training; support old checkpoint keys)
@@ -197,6 +233,7 @@ def run_stage2(args: argparse.Namespace) -> None:
         model=model,
         dataset=train_dataset,
         machine_type=args.machine_type,
+        machine_id=args.machine_id,
         lambda_recon=args.lambda_recon,
         lambda_focal=args.lambda_focal,
         lambda_sub=args.lambda_sub,

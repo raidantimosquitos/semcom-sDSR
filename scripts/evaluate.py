@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stage2_ckpt", type=str, required=True, help="Stage 2 checkpoint (object-specific decoder, anomaly detector)")
     p.add_argument("--data_path", type=str, required=True, help="Path to DCASE root")
     p.add_argument("--machine_type", type=str, default="fan")
+    p.add_argument("--machine_id", type=str, default=None, help="If set, evaluate only on this machine_id (train calibration and test)")
     p.add_argument("--output", type=str, default=None, help="CSV output path (default: <stage2_ckpt_parent>/results/results.csv)")
     p.add_argument("--plot", type=str, default=None, help="Path to save comparison plot (default: <stage2_ckpt_parent>/results/comparison.png)")
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
@@ -146,12 +147,14 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
             norm_mean=norm_mean,
             norm_std=norm_std,
             target_T_override=stage1_ckpt["target_T"],
+            machine_id=args.machine_id,
         )
     else:
         train_ds = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=args.machine_type,
             normalize=True,
+            machine_id=args.machine_id,
         )
     _, _, n_mels, T = train_ds.data.shape
 
@@ -161,6 +164,7 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         mean=train_ds.mean,
         std=train_ds.std,
         target_T=train_ds.target_T,
+        machine_id=args.machine_id,
     )
 
     # Architecture from checkpoint (same as training); fallback for old checkpoints

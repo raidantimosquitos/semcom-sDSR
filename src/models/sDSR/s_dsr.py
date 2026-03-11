@@ -75,7 +75,7 @@ class sDSR(nn.Module):
         self._anomaly_detection = AnomalyDetectionModule(
             in_channels=2,
             out_channels=2,
-            base_width=cfg.hidden_channels//2,
+            base_width=cfg.hidden_channels,
         )
 
         # Anomaly generation (training only): codebook replacement using dataset-provided mask

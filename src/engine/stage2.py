@@ -38,6 +38,7 @@ class Stage2Trainer(BaseTrainer):
         model: nn.Module,
         dataset: Any,
         machine_type: str = "unknown",
+        machine_id: str | None = None,
         lambda_recon: float = 10.0,
         lambda_focal: float = 1.0,
         lambda_sub: float = 1.0,
@@ -65,6 +66,8 @@ class Stage2Trainer(BaseTrainer):
             raise ValueError(f"Dataset machine_type '{getattr(dataset, 'machine_type')}' != trainer machine_type '{machine_type}'")
 
         ckpt_path = Path(ckpt_dir) / "stage2" / machine_type
+        if machine_id is not None:
+            ckpt_path = ckpt_path / machine_id
         super().__init__(
             model=model,
             dataset=dataset,

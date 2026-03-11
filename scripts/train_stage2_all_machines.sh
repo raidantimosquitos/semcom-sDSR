@@ -28,6 +28,10 @@ fi
 # All 6 DCASE2020 Task 2 machine types for stage2
 MACHINE_TYPES=(fan pump slider valve ToyCar ToyConveyor)
 
+# Optional: space-separated machine_ids (e.g. "id_00 id_01 id_02"). When set, train/eval per (machine_type, machine_id)
+# with other machine_ids of same type used as adversarial samples (mask all 1s). When unset, one run per machine_type (all IDs).
+MACHINE_IDS="${MACHINE_IDS:-}"
+
 # Stamp for this stage2 run on GCS
 STAMP="stage2_10k_bs${BATCH_SIZE}"
 
@@ -42,34 +46,72 @@ if [[ ! -f "$STAGE1_BEST" ]]; then
   exit 1
 fi
 
-for machine_type in "${MACHINE_TYPES[@]}"; do
-  echo "=============================================="
-  echo "Stage2: machine_type=$machine_type ($N_ITER iter, bs=$BATCH_SIZE)"
-  echo "=============================================="
+if [[ -n "$MACHINE_IDS" ]]; then
+  # Per-machine_id runs: train and eval with --machine_id; adversarial samples from other IDs (same type)
+  for machine_type in "${MACHINE_TYPES[@]}"; do
+    for machine_id in $MACHINE_IDS; do
+      echo "=============================================="
+      echo "Stage2: machine_type=$machine_type machine_id=$machine_id ($N_ITER iter, bs=$BATCH_SIZE)"
+      echo "=============================================="
 
-  python scripts/train.py stage2 \
-    --data_path "$DATA_PATH" \
-    --machine_type "$machine_type" \
-    --ckpt_dir "$CKPT_DIR" \
-    --stage1_ckpt "$STAGE1_BEST" \
-    --n_iter "$N_ITER" \
-    --batch_size "$BATCH_SIZE"
+      python scripts/train.py stage2 \
+        --data_path "$DATA_PATH" \
+        --machine_type "$machine_type" \
+        --machine_id "$machine_id" \
+        --ckpt_dir "$CKPT_DIR" \
+        --stage1_ckpt "$STAGE1_BEST" \
+        --n_iter "$N_ITER" \
+        --batch_size "$BATCH_SIZE"
 
-  python scripts/evaluate.py \
-    --data_path "$DATA_PATH" \
-    --machine_type "$machine_type" \
-    --stage1_ckpt "$STAGE1_BEST" \
-    --stage2_ckpt "$CKPT_DIR/stage2/${machine_type}/stage2_${machine_type}_best.pt" \
-    --output "$CKPT_DIR/stage2/${machine_type}/results/results.csv"
+      python scripts/evaluate.py \
+        --data_path "$DATA_PATH" \
+        --machine_type "$machine_type" \
+        --machine_id "$machine_id" \
+        --stage1_ckpt "$STAGE1_BEST" \
+        --stage2_ckpt "$CKPT_DIR/stage2/${machine_type}/${machine_id}/stage2_${machine_type}_best.pt" \
+        --output "$CKPT_DIR/stage2/${machine_type}/${machine_id}/results/results.csv"
 
-  stage2_dir="${CKPT_DIR}/stage2/${machine_type}"
-  if [[ -d "$stage2_dir" ]]; then
-    dest="${GCS_CHECKPOINTS}/${STAMP}/${machine_type}/"
-    echo "Uploading $stage2_dir -> $dest"
-    gsutil -m cp -r "$stage2_dir" "$dest"
-  else
-    echo "Warning: stage2 dir not found at $stage2_dir, skipping upload"
-  fi
-done
+      stage2_dir="${CKPT_DIR}/stage2/${machine_type}/${machine_id}"
+      if [[ -d "$stage2_dir" ]]; then
+        dest="${GCS_CHECKPOINTS}/${STAMP}/${machine_type}/${machine_id}/"
+        echo "Uploading $stage2_dir -> $dest"
+        gsutil -m cp -r "$stage2_dir" "$dest"
+      else
+        echo "Warning: stage2 dir not found at $stage2_dir, skipping upload"
+      fi
+    done
+  done
+else
+  # One run per machine_type (all machine_ids)
+  for machine_type in "${MACHINE_TYPES[@]}"; do
+    echo "=============================================="
+    echo "Stage2: machine_type=$machine_type ($N_ITER iter, bs=$BATCH_SIZE)"
+    echo "=============================================="
 
-echo "Stage2 finished for all machine types. Checkpoints uploaded under ${GCS_CHECKPOINTS}/${STAMP}/"
+    python scripts/train.py stage2 \
+      --data_path "$DATA_PATH" \
+      --machine_type "$machine_type" \
+      --ckpt_dir "$CKPT_DIR" \
+      --stage1_ckpt "$STAGE1_BEST" \
+      --n_iter "$N_ITER" \
+      --batch_size "$BATCH_SIZE"
+
+    python scripts/evaluate.py \
+      --data_path "$DATA_PATH" \
+      --machine_type "$machine_type" \
+      --stage1_ckpt "$STAGE1_BEST" \
+      --stage2_ckpt "$CKPT_DIR/stage2/${machine_type}/stage2_${machine_type}_best.pt" \
+      --output "$CKPT_DIR/stage2/${machine_type}/results/results.csv"
+
+    stage2_dir="${CKPT_DIR}/stage2/${machine_type}"
+    if [[ -d "$stage2_dir" ]]; then
+      dest="${GCS_CHECKPOINTS}/${STAMP}/${machine_type}/"
+      echo "Uploading $stage2_dir -> $dest"
+      gsutil -m cp -r "$stage2_dir" "$dest"
+    else
+      echo "Warning: stage2 dir not found at $stage2_dir, skipping upload"
+    fi
+  done
+fi
+
+echo "Stage2 finished. Checkpoints uploaded under ${GCS_CHECKPOINTS}/${STAMP}/"
