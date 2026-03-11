@@ -36,17 +36,17 @@ class DecoderFine(nn.Module):
             num_residual_layers=num_residual_layers,
             num_residual_hiddens=num_residual_hiddens,
         )
-        # Single transposed conv: 2x up freq, 4x up time
+        # Transposed conv: 2x up freq, 4x up time
         self._conv_trans_1 = nn.ConvTranspose2d(
             in_channels=num_hiddens,
-            out_channels=num_hiddens//2,
+            out_channels=num_hiddens,
             kernel_size=4,
             stride=2,
             padding=1,
         )
 
         self._conv_trans_2 = nn.ConvTranspose2d(
-            in_channels=num_hiddens//2,
+            in_channels=num_hiddens,
             out_channels=1,
             kernel_size=(3,4),
             stride=(1, 2),
