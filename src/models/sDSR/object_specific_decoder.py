@@ -116,65 +116,55 @@ class SpectrogramReconstructionNetwork(nn.Module):
         num_residual_layers: int,
     ) -> None:
         super().__init__()
+        self._in_channels = in_channels
         norm_layer = nn.InstanceNorm2d
-        # Encoder at feature resolution (no downsampling)
+        # Encoder at feature resolution
         self._block1 = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
             norm_layer(in_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels, in_channels*2, kernel_size=3, padding=1),
-            norm_layer(in_channels*2),
+            nn.Conv2d(in_channels, in_channels * 2, kernel_size=3, padding=1),
+            norm_layer(in_channels * 2),
             nn.ReLU(inplace=True),
         )
-        self._mp1 = nn.Sequential(nn.MaxPool2d(2))
+        self._mp1 = nn.MaxPool2d(2)
         self._block2 = nn.Sequential(
-            nn.Conv2d(in_channels*2, in_channels*2, kernel_size=3, padding=1),
-            norm_layer(in_channels*2),
+            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, padding=1),
+            norm_layer(in_channels * 2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels*2, in_channels*4, kernel_size=3, padding=1),
-            norm_layer(in_channels*4),
+            nn.Conv2d(in_channels * 2, in_channels * 4, kernel_size=3, padding=1),
+            norm_layer(in_channels * 4),
             nn.ReLU(inplace=True),
         )
-        self._mp2 = nn.Sequential(nn.MaxPool2d(2))
-
-        # Bottleneck at feature resolution (middle channels = hidden_channels // 2)
-        self._pre_bottleneck = nn.Conv2d(in_channels*4, hidden_channels//2, kernel_size=3, padding=1)
-        
-
-        self._upblock1 = nn.ConvTranspose2d(in_channels=hidden_channels//2,
-                                                out_channels=hidden_channels//2,
-                                                kernel_size=4,
-                                                stride=2, padding=1)
-
-        self._upblock2 = nn.ConvTranspose2d(in_channels=hidden_channels//2,
-                                                out_channels=hidden_channels//2,
-                                                kernel_size=4,
-                                                stride=2, padding=1)
-
-        self._conv_1 = nn.Conv2d(
-            in_channels=hidden_channels//2,
-            out_channels=hidden_channels,
-            kernel_size=3,
-            padding=1,
+        self._mp2 = nn.MaxPool2d(2)
+        # Bottleneck
+        self._pre_bottleneck = nn.Conv2d(
+            in_channels * 4, hidden_channels // 2, kernel_size=3, padding=1
         )
-
-        self._residual = ResidualStack(hidden_channels, hidden_channels, num_residual_layers, hidden_channels // 2)
-
-        # Decoder
+        # Decoder with skip connections: fuse decoder features with b2 then b1
+        self._upblock1 = nn.ConvTranspose2d(
+            hidden_channels // 2, hidden_channels // 2, kernel_size=4, stride=2, padding=1
+        )
+        self._conv_after_skip2 = nn.Conv2d(
+            hidden_channels // 2 + in_channels * 4, hidden_channels // 2,
+            kernel_size=3, stride=1, padding=1,
+        )
+        self._upblock2 = nn.ConvTranspose2d(
+            hidden_channels // 2, hidden_channels // 2, kernel_size=4, stride=2, padding=1
+        )
+        self._conv_after_skip1 = nn.Conv2d(
+            hidden_channels // 2 + in_channels * 2, hidden_channels,
+            kernel_size=3, stride=1, padding=1,
+        )
+        self._residual = ResidualStack(
+            hidden_channels, hidden_channels, num_residual_layers, hidden_channels // 2
+        )
+        # Upsample to spectrogram resolution (match DecoderFine: 2x then 1x/2x)
         self._conv_trans_1 = nn.ConvTranspose2d(
-            in_channels=hidden_channels,
-            out_channels=hidden_channels,
-            kernel_size=4,
-            stride=2,
-            padding=1,
+            hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1,
         )
-
         self._conv_trans_2 = nn.ConvTranspose2d(
-            in_channels=hidden_channels,
-            out_channels=1,
-            kernel_size=(3,4),
-            stride=(1, 2),
-            padding=1,
+            hidden_channels, 1, kernel_size=(3, 4), stride=(1, 2), padding=1,
         )
 
     def forward(
@@ -204,6 +194,6 @@ class SpectrogramReconstructionNetwork(nn.Module):
         x = self._residual(x)
         x = self._conv_trans_1(x)
         x = F.relu(x)
-        
+
         return self._conv_trans_2(x)
 
