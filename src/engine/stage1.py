@@ -159,8 +159,11 @@ class Stage1Trainer(BaseTrainer):
             }
             payload["machine_types"] = list(norm_stats.keys())
         else:
-            payload["norm_mean"] = self.dataset.mean.cpu().clone()
-            payload["norm_std"] = self.dataset.std.cpu().clone()
+            mean = getattr(self.dataset, "mean", None)
+            std = getattr(self.dataset, "std", None)
+            if mean is not None and std is not None:
+                payload["norm_mean"] = mean.cpu().clone()
+                payload["norm_std"] = std.cpu().clone()
 
         # 1. Delete previous latest checkpoint before saving new one
         tag = tag or f"iter_{self.global_step:06d}"

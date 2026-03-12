@@ -73,7 +73,7 @@ class sDSR(nn.Module):
             use_subspace_restriction=cfg.use_subspace_restriction,
         )
         self._anomaly_detection = AnomalyDetectionModule(
-            in_channels=2,
+            in_channels=6,
             out_channels=2,
             base_width=cfg.hidden_channels,
         )
@@ -113,7 +113,7 @@ class sDSR(nn.Module):
         No anomaly simulation; deployable for evaluation.
 
         Args:
-            x: (B, 1, n_mels, T) Mel spectrogram
+            x: (B, 3, n_mels, T) Mel spectrogram
             return_intermediates: if True, return (M_out, X_G, X_S, M_out)
 
         Returns:
@@ -173,14 +173,14 @@ class sDSR(nn.Module):
         anomalies (codebook replacement), then returns outputs for loss computation.
 
         Args:
-            x: (B, 1, n_mels, T) Mel spectrogram (normal)
+            x: (B, 3, n_mels, T) Mel spectrogram (normal)
             M_gt: (B, 1, n_mels, T) ground-truth anomaly map from dataset
 
         Returns:
             dict with:
                 m_out: (B, 2, n_mels, T) segmentation logits
-                x_g: (B, 1, n_mels, T) general reconstruction
-                x_s: (B, 1, n_mels, T) object-specific reconstruction
+                x_g: (B, 3, n_mels, T) general reconstruction
+                x_s: (B, 3, n_mels, T) object-specific reconstruction
                 M: (B, 1, n_mels, T) anomaly map for focal loss target
                 x: input (for L2 reconstruction target)
                 When subspace restriction is enabled, also:
@@ -266,7 +266,7 @@ if __name__ == "__main__":
     )
     cfg = sDSRConfig(n_mels=128, T=320, embedding_dim=128, hidden_channels=128)
     model = sDSR(vq, cfg).to(device)
-    x = _torch.randn(2, 1, 128, 320, device=device)
+    x = _torch.randn(2, 3, 128, 320, device=device)
 
     print("sDSR pipeline shapes (inference):")
     print("-" * 50)
@@ -293,8 +293,8 @@ if __name__ == "__main__":
     m_out = model(x)
     assert m_out.shape == (2, 2, 128, 320)
     m_out, x_g, x_s = model(x, return_intermediates=True)
-    assert x_g.shape == (2, 1, 128, 320)
-    assert x_s.shape == (2, 1, 128, 320)
+    assert x_g.shape == (2, 3, 128, 320)
+    assert x_s.shape == (2, 3, 128, 320)
 
     print("Training path shapes:")
     print("-" * 50)
@@ -310,6 +310,6 @@ if __name__ == "__main__":
     print("-" * 50)
 
     assert out["m_out"].shape == (2, 2, 128, 320)
-    assert out["x_s"].shape == (2, 1, 128, 320)
+    assert out["x_s"].shape == (2, 3, 128, 320)
     assert out["M"].shape == (2, 1, 128, 320), "M (loss target) must be spectrogram shape"
     print("sDSR smoke test passed.")

@@ -135,13 +135,13 @@ class AnomalyDetectionModule(nn.Module):
     """
     UNet: [X_G, X_S] -> segmentation logits.
 
-    Input: (B, 2, n_mels, T) — concatenation of general and object-specific reconstructions
+    Input: (B, 6, n_mels, T) — concatenation of general and object-specific reconstructions
     Output: (B, 2, n_mels, T) — logits (normal vs anomaly)
     """
 
     def __init__(
         self,
-        in_channels: int = 2,
+        in_channels: int = 6,
         out_channels: int = 2,
         base_width: int = 64,
     ) -> None:
@@ -156,8 +156,8 @@ class AnomalyDetectionModule(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            x_g: (B, 1, n_mels, T) general reconstruction (anomalies preserved)
-            x_s: (B, 1, n_mels, T) object-specific reconstruction (anomaly-free)
+            x_g: (B, 3, n_mels, T) general reconstruction (anomalies preserved)
+            x_s: (B, 3, n_mels, T) object-specific reconstruction (anomaly-free)
 
         Returns:
             logits: (B, 2, n_mels, T) segmentation logits [normal, anomaly]

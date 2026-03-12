@@ -7,7 +7,7 @@ downscale/upscale factors, ReZero residuals, BatchNorm, and 2-level hierarchy.
 
 Input spectrograms are 2-D: (B, C, n_mels, T)
   B       – batch size
-  C       – channels (1 for mono mel-spectrogram)
+  C       – channels (1 for mono mel-spectrogram / 3 for RGB spectrogram)
   n_mels  – frequency bins (e.g. 128)
   T       – time frames (e.g. 256)
 
@@ -77,7 +77,7 @@ class VQ_VAE_2Layer(nn.Module):
 
         # Encoders (reference: first from image, rest from previous level output)
         self._encoder_fine = EncoderFine(
-            in_channels=1,
+            in_channels=3,
             num_hiddens=hidden_channels,
             num_residual_layers=num_residual_layers,
             num_residual_hiddens=hidden_channels // 2
@@ -156,7 +156,7 @@ class VQ_VAE_2Layer(nn.Module):
         Encode and quantize input spectrogram (for AudDSR inference/training).
 
         Args:
-            x: (B, 1, n_mels, T) Mel spectrogram
+            x: (B, 3, n_mels, T) Mel spectrogram
 
         Returns:
             q_fine: (B, emb_dim, H_q, W_q) fine quantized features
@@ -247,7 +247,7 @@ class VQ_VAE_2Layer(nn.Module):
             q_coarse: (B, emb_dim, H_q_coarse, W_q_coarse)
 
         Returns:
-            X_G: (B, 1, n_mels, T) reconstructed spectrogram
+            X_G: (B, 3, n_mels, T) reconstructed spectrogram
         """
         quantized_coarse_up = F.interpolate(q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False)
         quant_joined = torch.cat([quantized_coarse_up, q_fine], dim=1)
@@ -282,7 +282,7 @@ if __name__ == "__main__":
         decay=0.99,
     ).to(device)
 
-    x = torch.randn(1, 1, 128, 320, device=device)
+    x = torch.randn(1, 3, 128, 320, device=device)
 
     for name, m in [("same", model_same), ("diff", model_diff)]:
         loss_fine, loss_coarse, recon, q_coarse, q_fine, perp_coarse, perp_fine = m(x)

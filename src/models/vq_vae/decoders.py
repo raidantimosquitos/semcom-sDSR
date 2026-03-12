@@ -47,7 +47,7 @@ class DecoderFine(nn.Module):
 
         self._conv_trans_2 = nn.ConvTranspose2d(
             in_channels=num_hiddens,
-            out_channels=1,
+            out_channels=3,
             kernel_size=(3,4),
             stride=(1, 2),
             padding=1,

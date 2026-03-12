@@ -69,7 +69,7 @@ class ObjectSpecificDecoder(nn.Module):
             return_aux: if True, return (x_s, aux_dict) with recon_feat_coarse/fine for L_sub
 
         Returns:
-            x_s: (B, 1, n_mels, T)
+            x_s: (B, 3, n_mels, T)
             When return_aux=True: (x_s, {"recon_feat_coarse": ..., "recon_feat_fine": ...}) or (x_s, {})
         """
         use_sub = (
@@ -101,12 +101,13 @@ class SpectrogramReconstructionNetwork(nn.Module):
     """
     UNet-style decoder: [Q_coarse_upsampled, Q_fine] -> spectrogram (1 ch).
 
-    No re-downsampling: two encoder blocks at feature resolution (H_fine, W_fine),
-    then bottleneck (ResidualStack), then asymmetric 2x/4x upsample
-    convs (64x80 -> 128x160 -> 128x320).
+    Encoder: two strided-conv blocks (2x down each) -> 4x down, then bottleneck.
+    Decoder: two upscale stages with skip connections; after each concat, a conv
+    plus ResidualStack for stronger denoising, then a final ResidualStack before
+    asymmetric 2x/4x upsample to spectrogram resolution.
 
     Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/2, T/4) = (64, 80).
-    Output: (B, 1, n_mels, T)
+    Output: (B, 3, n_mels, T)
     """
 
     def __init__(
@@ -118,53 +119,60 @@ class SpectrogramReconstructionNetwork(nn.Module):
         super().__init__()
         self._in_channels = in_channels
         norm_layer = nn.InstanceNorm2d
-        # Encoder at feature resolution
+        half = max(1, hidden_channels // 2)
+
+        # Encoder: strided convs (no MaxPool)
         self._block1 = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-            norm_layer(in_channels),
-            nn.ReLU(inplace=True),
             nn.Conv2d(in_channels, in_channels * 2, kernel_size=3, padding=1),
             norm_layer(in_channels * 2),
             nn.ReLU(inplace=True),
-        )
-        self._mp1 = nn.MaxPool2d(2)
-        self._block2 = nn.Sequential(
-            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, stride=2, padding=1),
             norm_layer(in_channels * 2),
             nn.ReLU(inplace=True),
+        )
+        self._block2 = nn.Sequential(
             nn.Conv2d(in_channels * 2, in_channels * 4, kernel_size=3, padding=1),
             norm_layer(in_channels * 4),
             nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels * 4, hidden_channels, kernel_size=3, stride=2, padding=1),
+            norm_layer(hidden_channels),
+            nn.ReLU(inplace=True),
         )
-        self._mp2 = nn.MaxPool2d(2)
-        # Bottleneck
         self._pre_bottleneck = nn.Conv2d(
-            in_channels * 4, hidden_channels // 2, kernel_size=3, padding=1
+            hidden_channels, half, kernel_size=3, padding=1
         )
-        # Decoder with skip connections: fuse decoder features with b2 then b1
-        self._upblock1 = nn.ConvTranspose2d(
-            hidden_channels // 2, hidden_channels // 2, kernel_size=4, stride=2, padding=1
+
+        # Decoder stage 1: upsample, concat skip from b2, conv, then residual stack
+        self._upblock1 = nn.Sequential(
+            nn.ConvTranspose2d(half, half, kernel_size=4, stride=2, padding=1),
+            norm_layer(half),
+            nn.ReLU(inplace=True),
         )
         self._conv_after_skip2 = nn.Conv2d(
-            hidden_channels // 2 + in_channels * 4, hidden_channels // 2,
-            kernel_size=3, stride=1, padding=1,
+            half + hidden_channels, half, kernel_size=3, stride=1, padding=1,
         )
-        self._upblock2 = nn.ConvTranspose2d(
-            hidden_channels // 2, hidden_channels // 2, kernel_size=4, stride=2, padding=1
+        self._residual_after_skip2 = ResidualStack(
+            half, half, num_residual_layers, max(1, half // 2)
         )
+
+        # Decoder stage 2: upsample, concat skip from b1, conv, then residual stack
+        self._upblock2 = nn.ConvTranspose2d(half, half, kernel_size=4, stride=2, padding=1)
         self._conv_after_skip1 = nn.Conv2d(
-            hidden_channels // 2 + in_channels * 2, hidden_channels,
-            kernel_size=3, stride=1, padding=1,
+            half + in_channels * 2, hidden_channels, kernel_size=3, stride=1, padding=1,
         )
+        self._residual_after_skip1 = ResidualStack(
+            hidden_channels, hidden_channels, num_residual_layers + 1, half
+        )
+
+        # Final residual head and upsample to spectrogram resolution
         self._residual = ResidualStack(
-            hidden_channels, hidden_channels, num_residual_layers, hidden_channels // 2
+            hidden_channels, hidden_channels, num_residual_layers, half
         )
-        # Upsample to spectrogram resolution (match DecoderFine: 2x then 1x/2x)
         self._conv_trans_1 = nn.ConvTranspose2d(
             hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1,
         )
         self._conv_trans_2 = nn.ConvTranspose2d(
-            hidden_channels, 1, kernel_size=(3, 4), stride=(1, 2), padding=1,
+            hidden_channels, 3, kernel_size=(3, 4), stride=(1, 2), padding=1,
         )
 
     def forward(
@@ -177,23 +185,19 @@ class SpectrogramReconstructionNetwork(nn.Module):
         )
         x = torch.cat([q_coarse_up, q_fine], dim=1)
         b1 = self._block1(x)
-        x = self._mp1(b1)
-        b2 = self._block2(x)
-        x = self._mp2(b2)
-        x = self._pre_bottleneck(x)
+        b2 = self._block2(b1)
+        x = F.relu(self._pre_bottleneck(b2))
         x = self._upblock1(x)
-        x = F.relu(x)
-        x = torch.cat([x, b2], dim=1)
-        x = self._conv_after_skip2(x)
-        x = F.relu(x)
-        x = self._upblock2(x)
-        x = F.relu(x)
-        x = torch.cat([x, b1], dim=1)
-        x = self._conv_after_skip1(x)
-        x = F.relu(x)
+        b2_up = F.interpolate(b2, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        x = torch.cat([x, b2_up], dim=1)
+        x = F.relu(self._conv_after_skip2(x))
+        x = self._residual_after_skip2(x)
+        x = F.relu(self._upblock2(x))
+        b1_up = F.interpolate(b1, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        x = torch.cat([x, b1_up], dim=1)
+        x = F.relu(self._conv_after_skip1(x))
+        x = self._residual_after_skip1(x)
         x = self._residual(x)
-        x = self._conv_trans_1(x)
-        x = F.relu(x)
-
+        x = F.relu(self._conv_trans_1(x))
         return self._conv_trans_2(x)
 
