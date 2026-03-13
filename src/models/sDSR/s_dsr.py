@@ -214,9 +214,9 @@ class sDSR(nn.Module):
         use_fine = ((inject_location == 0) | (inject_location == 2)).float().view(batch_size, 1, 1, 1)
         use_coarse = ((inject_location == 1) | (inject_location == 2)).float().view(batch_size, 1, 1, 1)
         
-        q_fine_used = has_anomaly * (use_fine * q_fine_a + (1 - use_fine) * q_fine) + (1 - has_anomaly) * use_fine * q_fine
-        q_coarse_used = has_anomaly * (use_coarse * q_coarse_a + (1 - use_coarse) * q_coarse) + (1 - has_anomaly) * use_coarse * q_coarse
-
+        q_fine_used = has_anomaly * (use_fine * q_fine_a + (1 - use_fine) * q_fine) + (1 - has_anomaly) * q_fine
+        q_coarse_used = has_anomaly * (use_coarse * q_coarse_a + (1 - use_coarse) * q_coarse) + (1 - has_anomaly) * q_coarse
+        
         with torch.no_grad():
             x_g = self._vq_vae.decode_general(q_fine_used, q_coarse_used)
 
