@@ -84,7 +84,7 @@ class sDSR(nn.Module):
         self._freeze_stage1()
 
     def _get_q_shape(self, n_mels: int, T: int) -> tuple[int, int]:
-        """Infer q_fine spatial shape from spectrogram shape (encoder fine: 4x4 symmetric down -> 32x80 for 128x320)."""
+        """Infer q_fine spatial shape from spectrogram (symmetric: fine 4x down -> 32x80 for 128x320)."""
         H = n_mels // 4
         W = T // 4
         return (max(1, H), max(1, W))

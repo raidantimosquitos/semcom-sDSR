@@ -104,9 +104,9 @@ class SpectrogramReconstructionNetwork(nn.Module):
     Encoder: two strided-conv blocks (2x down each) -> 4x down, then bottleneck.
     Decoder: two upscale stages with skip connections; after each concat, a conv
     plus ResidualStack for stronger denoising, then a final ResidualStack before
-    asymmetric 2x/4x upsample to spectrogram resolution.
+    symmetric 4x upsample to spectrogram resolution.
 
-    Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/2, T/4) = (64, 80).
+    Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/4, T/4) = (32, 80).
     Output: (B, 3, n_mels, T)
     """
 
@@ -172,7 +172,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1,
         )
         self._conv_trans_2 = nn.ConvTranspose2d(
-            hidden_channels, 3, kernel_size=(3, 4), stride=(1, 2), padding=1,
+            hidden_channels, 3, kernel_size=4, stride=2, padding=1,
         )
 
     def forward(

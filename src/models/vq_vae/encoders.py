@@ -7,13 +7,13 @@ from .res_blocks_2d import ResidualStack
 
 class EncoderFine(nn.Module):
     """
-    Asymmetric downsampling: 2x in frequency, 4x in time.
-    Input (n_mels, T) -> output (n_mels//2, T//4), e.g. (128, 320) -> (64, 80).
+    Symmetric downsampling: 4x in frequency, 4x in time.
+    Input (n_mels, T) -> output (n_mels//4, T//4), e.g. (128, 320) -> (32, 80).
     """
     def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
         super(EncoderFine, self).__init__()
 
-        # Single conv: 2x down freq, 4x down time (kernel (4,4), stride (2,4), padding (1,0))
+        # Two convs: 4x down freq, 4x down time
         self._conv_1 = nn.Conv2d(
             in_channels=in_channels,
             out_channels=num_hiddens // 2,
@@ -24,8 +24,8 @@ class EncoderFine(nn.Module):
         self._conv_2 = nn.Conv2d(
             in_channels=num_hiddens // 2,
             out_channels=num_hiddens,
-            kernel_size=(3, 4),
-            stride=(1, 2),
+            kernel_size=4,
+            stride=2,
             padding=1,
         )
         self._conv_3 = nn.Conv2d(
@@ -52,6 +52,10 @@ class EncoderFine(nn.Module):
 
 
 class EncoderCoarse(nn.Module):
+    """
+    Symmetric downsampling: 2x in frequency, 2x in time.
+    Input (n_mels//4, T//4) -> output (n_mels//8, T//8), e.g. (32, 80) -> (16, 40).
+    """
     def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
         super(EncoderCoarse, self).__init__()
 

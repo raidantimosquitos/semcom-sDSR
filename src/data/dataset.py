@@ -372,7 +372,7 @@ class DCASE2020Task2TestDataset(Dataset):
             elif T > self.target_T:
                 log_mel_rgb = log_mel_rgb[..., : self.target_T]
         else:
-            # Pad to multiple of 16 for VQ-VAE 4x downsampling
+            # Pad to multiple of 16 for VQ-VAE (4x fine, 8x coarse symmetric downsampling)
             target = math.ceil(T / 16) * 16
             if T != target:
                 log_mel_rgb = F.pad(log_mel_rgb, (0, target - T))

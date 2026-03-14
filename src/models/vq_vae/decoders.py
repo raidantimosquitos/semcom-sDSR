@@ -17,8 +17,8 @@ from .res_blocks_2d import ResidualStack
 
 class DecoderFine(nn.Module):
     """
-    Asymmetric upsampling: 2x in frequency, 4x in time (inverse of EncoderFine).
-    Input (n_mels//2, T//4) -> output (n_mels, T), e.g. (64, 80) -> (128, 320).
+    Symmetric upsampling: 4x in frequency, 4x in time (inverse of EncoderFine).
+    Input (n_mels//4, T//4) -> output (n_mels, T), e.g. (32, 80) -> (128, 320).
     """
     def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
         super(DecoderFine, self).__init__()
@@ -36,7 +36,6 @@ class DecoderFine(nn.Module):
             num_residual_layers=num_residual_layers,
             num_residual_hiddens=num_residual_hiddens,
         )
-        # Transposed conv: 2x up freq, 4x up time
         self._conv_trans_1 = nn.ConvTranspose2d(
             in_channels=num_hiddens,
             out_channels=num_hiddens,
@@ -48,8 +47,8 @@ class DecoderFine(nn.Module):
         self._conv_trans_2 = nn.ConvTranspose2d(
             in_channels=num_hiddens,
             out_channels=3,
-            kernel_size=(3,4),
-            stride=(1, 2),
+            kernel_size=4,
+            stride=2,
             padding=1,
         )
 
@@ -63,9 +62,9 @@ class DecoderFine(nn.Module):
 
 class DecoderCoarse(nn.Module):
     """
-    Upsamples coarse latent to fine latent grid (2x2).
-    With asymmetric fine: input (emb_dim, n_mels//4, T//8) e.g. (32, 40);
-    output (num_hiddens, n_mels//2, T//4) e.g. (64, 80).
+    Upsamples coarse latent to fine latent grid (2x in each dimension).
+    Symmetric: input (emb_dim, n_mels//8, T//8) e.g. (16, 40);
+    output (num_hiddens, n_mels//4, T//4) e.g. (32, 80).
     """
     def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
         super(DecoderCoarse, self).__init__()

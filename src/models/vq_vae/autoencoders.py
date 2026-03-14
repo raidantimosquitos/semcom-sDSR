@@ -11,13 +11,13 @@ Input spectrograms are 2-D: (B, C, n_mels, T)
   n_mels  – frequency bins (e.g. 128)
   T       – time frames (e.g. 256)
 
-2-level flow (reference style):
+2-level flow (symmetric sampling: x4 fine, x8 coarse from input):
   Encoder fine   : X -> f_fine        (4x down, 32x80 for 128x320, hidden_channels)
-  Encoder coarse : f_fine -> f_coarse (2x down, 16x40 for scaling_rates=(4,2), hidden_channels)
+  Encoder coarse : f_fine -> f_coarse (2x down -> 8x from input, 16x40, hidden_channels)
   VQ coarse      : f_coarse -> z_coarse (1x1 conv to embed_dim) -> Q_coarse
   Decoder coarse : Q_coarse -> decoded_coarse (2x up to 32x80, embed_dim)
   Fine input     : [f_fine, decoded_coarse] -> 1x1 conv -> z_fine -> Q_fine
-  Upscaler       : Q_coarse (16x40) -> (32x80) in embed space when coarse downscale=2
+  Upscaler       : Q_coarse (16x40) -> (32x80) in embed space (2x from coarse grid)
   Decoder fine   : [Q_coarse_up, Q_fine] -> X_out (4x up to 128x320)
 """
 
