@@ -122,13 +122,13 @@ class Stage2Trainer(BaseTrainer):
         with autocast(device_type=self.device.type, enabled=self.use_amp):
             out = self.model.forward_train(x, M_gt=M_gt)
             m_out = out["m_out"]
-            x_s = out["x_s"]
+            x_specific = out["x_specific"]
             M = out["M"]
 
-            # Reconstruction: L2(x, x_s) on full batch (normal + anomalous).
-            # For normal samples: object decoder learns x_s ≈ x. For anomalous:
+            # Reconstruction: L2(x, x_specific) on full batch (normal + anomalous).
+            # For normal samples: object decoder learns x_specific ≈ x. For anomalous:
             # decoder learns to reconstruct original normal x from corrected codes.
-            loss_recon = F.mse_loss(out["x"], x_s)
+            loss_recon = F.mse_loss(out["x"], x_specific)
             loss_focal = self.focal_loss(m_out, M)
 
             total_loss = (

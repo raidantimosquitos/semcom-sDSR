@@ -10,6 +10,40 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+class AnomalyDetectionModule(nn.Module):
+    """
+    UNet: [X_specific, X_general] -> segmentation logits.
+
+    Input: (B, 6, n_mels, T) — concatenation of general and object-specific reconstructions
+    Output: (B, 2, n_mels, T) — logits (normal vs anomaly)
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 6,
+        out_channels: int = 2,
+        base_width: int = 64,
+    ) -> None:
+        super().__init__()
+        self.unet_enc = _UnetEncoder(in_channels, base_width)
+        self.unet_dec = _UnetDecoder(base_width, out_channels)
+
+    def forward(
+        self,
+        x_specific: torch.Tensor,
+        x_general: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            x_specific: (B, 3, n_mels, T) object-specific reconstruction (anomaly-free)
+            x_general: (B, 3, n_mels, T) general reconstruction (anomalies preserved)
+
+        Returns:
+            logits: (B, 2, n_mels, T) segmentation logits [normal, anomaly]
+        """
+        x = torch.cat([x_specific, x_general], dim=1)
+        b1, b2, b3, b4 = self.unet_enc(x)
+        return self.unet_dec(b1, b2, b3, b4)
 
 class _UnetEncoder(nn.Module):
     def __init__(self, in_channels: int, base_width: int) -> None:
@@ -129,39 +163,3 @@ class _UnetDecoder(nn.Module):
         cat3 = torch.cat([up3, b1], dim=1)
         db3 = self.db3(cat3)
         return self.fin_out(db3)
-
-
-class AnomalyDetectionModule(nn.Module):
-    """
-    UNet: [X_G, X_S] -> segmentation logits.
-
-    Input: (B, 6, n_mels, T) — concatenation of general and object-specific reconstructions
-    Output: (B, 2, n_mels, T) — logits (normal vs anomaly)
-    """
-
-    def __init__(
-        self,
-        in_channels: int = 6,
-        out_channels: int = 2,
-        base_width: int = 64,
-    ) -> None:
-        super().__init__()
-        self.unet_enc = _UnetEncoder(in_channels, base_width)
-        self.unet_dec = _UnetDecoder(base_width, out_channels)
-
-    def forward(
-        self,
-        x_g: torch.Tensor,
-        x_s: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Args:
-            x_g: (B, 3, n_mels, T) general reconstruction (anomalies preserved)
-            x_s: (B, 3, n_mels, T) object-specific reconstruction (anomaly-free)
-
-        Returns:
-            logits: (B, 2, n_mels, T) segmentation logits [normal, anomaly]
-        """
-        x = torch.cat([x_g, x_s], dim=1)
-        b1, b2, b3, b4 = self.unet_enc(x)
-        return self.unet_dec(b1, b2, b3, b4)

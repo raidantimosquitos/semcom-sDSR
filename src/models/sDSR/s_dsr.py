@@ -42,13 +42,13 @@ class sDSR(nn.Module):
 
     Inference path (no anomaly simulation):
       X -> vq_vae.encode() -> q_fine, q_coarse
-      q_fine, q_coarse -> vq_vae.decode_general() -> X_G
-      q_fine, q_coarse -> ObjectSpecificDecoder -> X_S
-      [X_G, X_S] -> AnomalyDetectionModule -> M_out
+      q_fine, q_coarse -> vq_vae.decode_general() -> X_general
+      q_fine, q_coarse -> ObjectSpecificDecoder -> X_specific
+      [X_specific, X_general] -> AnomalyDetectionModule -> M_out
 
     Training path (stage 2): uses AnomalyMapGenerator and AnomalyGeneration
     to augment q_fine, q_coarse -> q_fine_a, q_coarse_a (both levels always);
-    then X_S is reconstructed from augmented features.
+    then X_specific is reconstructed from augmented features.
     """
 
     def __init__(
@@ -121,15 +121,15 @@ class sDSR(nn.Module):
             If return_intermediates: (M_out, X_G, X_S, M_out) — M_out repeated for convenience
         """
         q_fine, q_coarse = self._vq_vae.encode(x)
-        x_g = self._vq_vae.decode_general(q_fine, q_coarse)
-        x_s = self._object_decoder(
+        x_general = self._vq_vae.decode_general(q_fine, q_coarse)
+        x_specific = self._object_decoder(
             q_coarse, q_fine,
             self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
-        m_out = self._anomaly_detection(x_g, x_s.detach())
+        m_out = self._anomaly_detection(x_specific, x_general.detach())
         if return_intermediates:
-            return m_out, x_g, x_s
+            return m_out, x_general, x_specific
         return m_out
 
     def forward_from_quantized(
@@ -150,15 +150,15 @@ class sDSR(nn.Module):
         Returns:
             M_out: (B, 2, n_mels, T) segmentation logits
         """
-        x_g = self._vq_vae.decode_general(q_fine, q_coarse)
-        x_s = self._object_decoder(
+        x_general = self._vq_vae.decode_general(q_fine, q_coarse)
+        x_specific = self._object_decoder(
             q_coarse, q_fine,
             self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
-        m_out = self._anomaly_detection(x_g, x_s.detach())
+        m_out = self._anomaly_detection(x_specific, x_general.detach())
         if return_intermediates:
-            return m_out, x_g, x_s
+            return m_out, x_general, x_specific
         return m_out
 
     def forward_train(
@@ -218,21 +218,21 @@ class sDSR(nn.Module):
         q_coarse_used = has_anomaly * (use_coarse * q_coarse_a + (1 - use_coarse) * q_coarse) + (1 - has_anomaly) * q_coarse
         
         with torch.no_grad():
-            x_g = self._vq_vae.decode_general(q_fine_used, q_coarse_used)
+            x_general = self._vq_vae.decode_general(q_fine_used, q_coarse_used)
 
         out_dec = self._object_decoder(
             q_coarse_used, q_fine_used,
             vq_coarse, vq_fine,
             return_aux=True,
         )
-        x_s, aux = out_dec
-        m_out = self._anomaly_detection(x_g, x_s.detach())
+        x_specific, aux = out_dec
+        m_out = self._anomaly_detection(x_specific, x_general.detach())
 
         # GT mask for focal loss: M_gt at spectrogram shape (same as m_out spatial dims)
         result = {
             "m_out": m_out,
-            "x_g": x_g,
-            "x_s": x_s,
+            "x_general": x_general,
+            "x_specific": x_specific,
             "M": M_gt.float(),
             "x": x,
         }
@@ -276,25 +276,25 @@ if __name__ == "__main__":
     _print_shape("q_fine (quantized fine)", q_fine)
     _print_shape("q_coarse (quantized coarse)", q_coarse)
 
-    x_g = model._vq_vae.decode_general(q_fine, q_coarse)
-    _print_shape("x_g (general reconstruction)", x_g)
+    x_general = model._vq_vae.decode_general(q_fine, q_coarse)
+    _print_shape("x_general (general reconstruction)", x_general)
 
-    x_s = model._object_decoder(
+    x_specific = model._object_decoder(
         q_coarse, q_fine,
         model._vq_vae._vq_coarse, model._vq_vae._vq_fine,
         return_aux=False,
     )
-    _print_shape("x_s (object-specific reconstruction)", x_s)
+    _print_shape("x_specific (object-specific reconstruction)", x_specific)
 
-    m_out = model._anomaly_detection(x_g, x_s.detach())
+    m_out = model._anomaly_detection(x_specific, x_general.detach())
     _print_shape("m_out (segmentation logits)", m_out)
     print("-" * 50)
 
     m_out = model(x)
     assert m_out.shape == (2, 2, 128, 320)
-    m_out, x_g, x_s = model(x, return_intermediates=True)
-    assert x_g.shape == (2, 3, 128, 320)
-    assert x_s.shape == (2, 3, 128, 320)
+    m_out, x_general, x_specific = model(x, return_intermediates=True)
+    assert x_general.shape == (2, 3, 128, 320)
+    assert x_specific.shape == (2, 3, 128, 320)
 
     print("Training path shapes:")
     print("-" * 50)
@@ -303,13 +303,13 @@ if __name__ == "__main__":
     M_gt[0] = 1.0  # one sample with anomaly mask for testing
     out = model.forward_train(x, M_gt=M_gt)
     _print_shape("forward_train -> m_out", out["m_out"])
-    _print_shape("forward_train -> x_g", out["x_g"])
-    _print_shape("forward_train -> x_s", out["x_s"])
+    _print_shape("forward_train -> x_general", out["x_general"])
+    _print_shape("forward_train -> x_specific", out["x_specific"])
     _print_shape("forward_train -> M (anomaly map)", out["M"])
     _print_shape("forward_train -> x (input)", out["x"])
     print("-" * 50)
 
     assert out["m_out"].shape == (2, 2, 128, 320)
-    assert out["x_s"].shape == (2, 3, 128, 320)
+    assert out["x_specific"].shape == (2, 3, 128, 320)
     assert out["M"].shape == (2, 1, 128, 320), "M (loss target) must be spectrogram shape"
     print("sDSR smoke test passed.")

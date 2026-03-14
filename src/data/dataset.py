@@ -48,17 +48,14 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_max:         float = 8_000.0,
         top_db:        float = 80.0,
         target_T_override: int | None = None,
-        machine_id: str | None = None,
-        normalize: bool = False,
-        norm_mean: torch.Tensor | None = None,
-        norm_std: torch.Tensor | None = None,
+        machine_id: str | None = None
     ):
         if machine_types is not None:
             if machine_id is not None:
                 raise ValueError("machine_id filter only applies to single machine_type")
             self._init_multi(root, machine_types, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db)
         elif machine_type is not None:
-            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, target_T_override, machine_id, normalize, norm_mean, norm_std)
+            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, target_T_override, machine_id)
         else:
             raise ValueError("Provide either machine_type or machine_types")
 
@@ -74,10 +71,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_max: float,
         top_db: float,
         target_T_override: int | None = None,
-        machine_id: str | None = None,
-        normalize: bool = False,
-        norm_mean: torch.Tensor | None = None,
-        norm_std: torch.Tensor | None = None,
+        machine_id: str | None = None
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -133,16 +127,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
         elif self.data.shape[-1] > target_T:
             self.data = self.data[..., :target_T]
             print(f"Truncated T: {self.data.shape[-1]} → {target_T} (target: {target_T})")
-
-        use_provided_norm = normalize and norm_mean is not None and norm_std is not None
-        if use_provided_norm:
-            assert norm_mean is not None and norm_std is not None
-            self.mean = norm_mean.to(dtype=self.data.dtype, device=self.data.device)
-            self.std = norm_std.to(dtype=self.data.dtype, device=self.data.device)
-            self.data = (self.data - self.mean) / (self.std + 1e-8)
-        else:
-            self.mean = None
-            self.std = None
 
         print(
             f"DCASE2020Task2LogMelDataset: {machine_type} | {len(self.data)} spectrograms, "
@@ -327,9 +311,7 @@ class DCASE2020Task2TestDataset(Dataset):
         f_max: float = 8_000.0,
         top_db: float = 80.0,
         target_T: int | None = None,
-        machine_id: str | None = None,
-        mean: torch.Tensor | None = None,
-        std: torch.Tensor | None = None,
+        machine_id: str | None = None
     ):
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -343,8 +325,6 @@ class DCASE2020Task2TestDataset(Dataset):
         self.n_mels = n_mels
         self.sample_rate = sample_rate
         self.target_T = target_T
-        self.mean = mean
-        self.std = std
 
         base = Path(root) / machine_type / "test"
         if not base.exists():
@@ -397,24 +377,7 @@ class DCASE2020Task2TestDataset(Dataset):
             if T != target:
                 log_mel_rgb = F.pad(log_mel_rgb, (0, target - T))
 
-        if self.mean is not None and self.std is not None:
-            # Broadcast (1, 3, n_mels, 1) or similar to (3, n_mels, T)
-            log_mel_rgb = (log_mel_rgb.unsqueeze(0) - self.mean) / (self.std + 1e-8)
-            log_mel_rgb = log_mel_rgb.squeeze(0)
-
         return log_mel_rgb, label, machine_id
-
-
-def get_norm_stats_from_stage1_ckpt(
-    ckpt: dict[str, Any], machine_type: str
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """Get (norm_mean, norm_std) for the given machine_type from a stage1 checkpoint."""
-    if "norm_stats" in ckpt and machine_type in ckpt["norm_stats"]:
-        entry = ckpt["norm_stats"][machine_type]
-        return (entry["mean"], entry["std"])
-    if "norm_mean" in ckpt and "norm_std" in ckpt:
-        return (ckpt["norm_mean"], ckpt["norm_std"])
-    return (None, None)
 
 
 def make_dataloader(dataset: DCASE2020Task2LogMelDataset | DCASE2020Task2TestDataset, batch_size: int = 256) -> DataLoader:
@@ -453,18 +416,10 @@ if __name__ == "__main__":
     print(f"Label shape: {tuple(labels.shape)}")
     print(f"Machine IDs (batch): {machine_ids[:3]}...")
 
-    norm_stats = getattr(dataset, "norm_stats", None)
-    if norm_stats is not None and MACHINE_TYPE in norm_stats:
-        mean, std = norm_stats[MACHINE_TYPE]
-    else:
-        mean, std = getattr(dataset, "mean", None), getattr(dataset, "std", None)
-
     test_dataset = DCASE2020Task2TestDataset(
         root=root_str,
         machine_type=MACHINE_TYPE,
         target_T=dataset.target_T,
-        mean=mean,
-        std=std,
     )
     test_loader = make_dataloader(test_dataset, batch_size=min(32, len(test_dataset)))
     specs, labels, machine_ids = next(iter(test_loader))
