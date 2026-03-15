@@ -128,7 +128,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
             norm_layer(in_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels, in_channels * 2, kernel_size=3, padding=1),
             norm_layer(in_channels * 2),
             nn.ReLU(inplace=True),
         )
@@ -137,7 +137,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, padding=1),
             norm_layer(in_channels * 2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels * 4, hidden_channels, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels * 4, in_channels * 4, kernel_size=3, padding=1),
             norm_layer(in_channels * 4),
             nn.ReLU(inplace=True),
         )
