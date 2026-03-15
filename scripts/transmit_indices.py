@@ -93,13 +93,13 @@ def main() -> None:
     vq_vae = vq_vae.to(device)
     vq_vae.eval()
 
-    # Symmetric sampling: fine 4x down (n_mels/4, T/4), coarse 8x down (n_mels/8, T/8)
+    # Fine x2/x4 down (n_mels/2, T/4), coarse x8/x16 down (n_mels/8, T/16)
     bits_coarse = int(math.log2(num_embeddings_coarse))
     bits_fine = int(math.log2(num_embeddings_fine))
-    H_fine = max(1, n_mels // 4)
+    H_fine = max(1, n_mels // 2)
     W_fine = max(1, T // 4)
     H_coarse = max(1, n_mels // 8)
-    W_coarse = max(1, T // 8)
+    W_coarse = max(1, T // 16)
     frame_sz = frame_size_bytes(H_coarse, W_coarse, H_fine, W_fine, bits_coarse, bits_fine)
 
     frames: list[bytes] = []

@@ -11,21 +11,21 @@ This document describes the binary format of the codebook-index bitstream produc
 
 Each frame encodes the VQ-VAE codebook indices for one spectrogram (one test clip).
 
-- **Coarse indices**: grid `H_coarse × W_coarse` (e.g. 8×20 for 128×320 spectrograms). Each index is **10 bits** (codebook size 1024). Indices are in **row-major** order.
-- **Fine indices**: grid `H_fine × W_fine` (e.g. 32×80). Each index is **12 bits** (codebook size 4096). Row-major order.
+- **Coarse indices**: grid `H_coarse × W_coarse` (e.g. 16×20 for 128×320 spectrograms, x8/x16 down). Each index is **10 bits** (codebook size 1024). Indices are in **row-major** order.
+- **Fine indices**: grid `H_fine × W_fine` (e.g. 64×80, x2/x4 down). Each index is **12 bits** (codebook size 4096). Row-major order.
 
 **Bit packing**: Within each index, bits are **LSB first** (bit 0 = LSB). Indices are packed in order: all coarse indices first, then all fine indices. The resulting bit stream is then packed into bytes (byte 0 = bits 0–7 of the stream, byte 1 = bits 8–15, etc.).
 
 ## Frame size (default 128×320, 1024/4096 codebooks)
 
-- `H_coarse = 8`, `W_coarse = 20` → 160 coarse indices × 10 bits = 1,600 bits.
-- `H_fine = 32`, `W_fine = 80` → 2,560 fine indices × 12 bits = 30,720 bits.
-- Total per frame: **32,320 bits = 4,040 bytes**.
+- `H_coarse = 16`, `W_coarse = 20` → 320 coarse indices × 10 bits = 3,200 bits.
+- `H_fine = 64`, `W_fine = 80` → 5,120 fine indices × 12 bits = 61,440 bits.
+- Total per frame: **64,640 bits = 8,080 bytes**.
 
 ## Usage with GNURadio
 
 1. **Transmitter**: Run `transmit_indices.py` to produce a single binary file (header + N frames). Feed this file (or the raw payload after skipping the 4-byte header if your flow expects only frames) into your FEC encoder and then modulator. The FEC encoder typically expects a stream of bits; you can unpack the bytes to bits in the same order (LSB of first byte = first bit).
-2. **Receiver**: After demodulation and FEC decoding, write the decoded bitstream to a file in the **same format** (4-byte `N` + N × 4,040 bytes). Run `receive_and_evaluate.py --input_bitstream <file>` to decode indices and evaluate AUC/pAUC.
+2. **Receiver**: After demodulation and FEC decoding, write the decoded bitstream to a file in the **same format** (4-byte `N` + N × 8,080 bytes for 128×320). Run `receive_and_evaluate.py --input_bitstream <file>` to decode indices and evaluate AUC/pAUC.
 
 ## Changing spectrogram or codebook size
 

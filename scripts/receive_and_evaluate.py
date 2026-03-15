@@ -103,11 +103,11 @@ def main() -> None:
 
     bits_coarse = int(math.log2(num_embeddings_coarse))
     bits_fine = int(math.log2(num_embeddings_fine))
-    # Symmetric sampling: fine 4x down, coarse 8x down from spectrogram
-    H_fine = max(1, n_mels // 4)
+    # Fine x2/x4 down, coarse x8/x16 down from spectrogram
+    H_fine = max(1, n_mels // 2)
     W_fine = max(1, T // 4)
     H_coarse = max(1, n_mels // 8)
-    W_coarse = max(1, T // 8)
+    W_coarse = max(1, T // 16)
     frame_sz = frame_size_bytes(H_coarse, W_coarse, H_fine, W_fine, bits_coarse, bits_fine)
 
     num_clips, frames = read_bitstream_file(args.input_bitstream, frame_sz)

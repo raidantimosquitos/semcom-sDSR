@@ -17,8 +17,8 @@ from .res_blocks_2d import ResidualStack
 
 class DecoderFine(nn.Module):
     """
-    Symmetric upsampling: 4x in frequency, 4x in time (inverse of EncoderFine).
-    Input (n_mels//4, T//4) -> output (n_mels, T), e.g. (32, 80) -> (128, 320).
+    Upsampling: 2x in frequency, 4x in time (inverse of EncoderFine).
+    Input (n_mels//2, T//4) -> output (n_mels, T), e.g. (64, 80) -> (128, 320).
     """
     def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
         super(DecoderFine, self).__init__()
@@ -43,13 +43,12 @@ class DecoderFine(nn.Module):
             stride=2,
             padding=1,
         )
-
         self._conv_trans_2 = nn.ConvTranspose2d(
             in_channels=num_hiddens,
             out_channels=3,
-            kernel_size=4,
-            stride=2,
-            padding=1,
+            kernel_size=(3, 4),
+            stride=(1, 2),
+            padding=(1, 1),
         )
 
     def forward(self, inputs):
@@ -62,9 +61,9 @@ class DecoderFine(nn.Module):
 
 class DecoderCoarse(nn.Module):
     """
-    Upsamples coarse latent to fine latent grid (2x in each dimension).
-    Symmetric: input (emb_dim, n_mels//8, T//8) e.g. (16, 40);
-    output (num_hiddens, n_mels//4, T//4) e.g. (32, 80).
+    Upsamples coarse latent to fine latent grid (4x in each dimension).
+    Input (emb_dim, n_mels//8, T//16) e.g. (16, 20);
+    output (num_hiddens, n_mels//2, T//4) e.g. (64, 80).
     """
     def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
         super(DecoderCoarse, self).__init__()
@@ -83,13 +82,15 @@ class DecoderCoarse(nn.Module):
                                                 out_channels=num_hiddens,
                                                 kernel_size=4,
                                                 stride=2, padding=1)
-        
-    
+        self._conv_trans_2 = nn.ConvTranspose2d(in_channels=num_hiddens,
+                                                out_channels=num_hiddens,
+                                                kernel_size=4,
+                                                stride=2, padding=1)
+
     def forward(self, inputs):
         x = self._conv_1(inputs)
-
         x = self._residual_stack(x)
-
         x = self._conv_trans_1(x)
-
+        x = F.relu(x)
+        x = self._conv_trans_2(x)
         return x

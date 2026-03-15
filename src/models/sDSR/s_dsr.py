@@ -84,8 +84,8 @@ class sDSR(nn.Module):
         self._freeze_stage1()
 
     def _get_q_shape(self, n_mels: int, T: int) -> tuple[int, int]:
-        """Infer q_fine spatial shape from spectrogram (symmetric: fine 4x down -> 32x80 for 128x320)."""
-        H = n_mels // 4
+        """Infer q_fine spatial shape from spectrogram (fine x2/x4 down -> 64x80 for 128x320)."""
+        H = n_mels // 2
         W = T // 4
         return (max(1, H), max(1, W))
 
@@ -109,16 +109,16 @@ class sDSR(nn.Module):
         """
         Inference forward pass.
 
-        Uses the standard path: X -> q -> X_G, X_S -> M_out.
+        Uses the standard path: X -> q -> X_general, X_specific -> M_out.
         No anomaly simulation; deployable for evaluation.
 
         Args:
             x: (B, 3, n_mels, T) Mel spectrogram
-            return_intermediates: if True, return (M_out, X_G, X_S, M_out)
+            return_intermediates: if True, return (M_out, X_general, X_specific)
 
         Returns:
             M_out: (B, 2, n_mels, T) segmentation logits
-            If return_intermediates: (M_out, X_G, X_S, M_out) — M_out repeated for convenience
+            If return_intermediates: (M_out, X_general, X_specific)
         """
         q_fine, q_coarse = self._vq_vae.encode(x)
         x_general = self._vq_vae.decode_general(q_fine, q_coarse)
@@ -145,7 +145,7 @@ class sDSR(nn.Module):
         Args:
             q_fine: (B, emb_dim, H_fine, W_fine)
             q_coarse: (B, emb_dim, H_coarse, W_coarse)
-            return_intermediates: if True, return (M_out, X_G, X_S)
+            return_intermediates: if True, return (M_out, X_general, X_specific)
 
         Returns:
             M_out: (B, 2, n_mels, T) segmentation logits

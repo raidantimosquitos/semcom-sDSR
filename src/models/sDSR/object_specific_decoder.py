@@ -106,7 +106,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
     plus ResidualStack for stronger denoising, then a final ResidualStack before
     symmetric 4x upsample to spectrogram resolution.
 
-    Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/4, T/4) = (32, 80).
+    Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/2, T/4) = (64, 80).
     Output: (B, 3, n_mels, T)
     """
 

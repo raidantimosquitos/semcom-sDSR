@@ -11,14 +11,14 @@ Input spectrograms are 2-D: (B, C, n_mels, T)
   n_mels  – frequency bins (e.g. 128)
   T       – time frames (e.g. 256)
 
-2-level flow (symmetric sampling: x4 fine, x8 coarse from input):
-  Encoder fine   : X -> f_fine        (4x down, 32x80 for 128x320, hidden_channels)
-  Encoder coarse : f_fine -> f_coarse (2x down -> 8x from input, 16x40, hidden_channels)
+2-level flow (fine x2/x4, coarse x8/x16 from input):
+  Encoder fine   : X -> f_fine        (x2/x4 down, 64x80 for 128x320, hidden_channels)
+  Encoder coarse : f_fine -> f_coarse (x4 down -> x8/x16 from input, 16x20, hidden_channels)
   VQ coarse      : f_coarse -> z_coarse (1x1 conv to embed_dim) -> Q_coarse
-  Decoder coarse : Q_coarse -> decoded_coarse (2x up to 32x80, embed_dim)
+  Decoder coarse : Q_coarse -> decoded_coarse (4x up to 64x80, hidden_channels)
   Fine input     : [f_fine, decoded_coarse] -> 1x1 conv -> z_fine -> Q_fine
-  Upscaler       : Q_coarse (16x40) -> (32x80) in embed space (2x from coarse grid)
-  Decoder fine   : [Q_coarse_up, Q_fine] -> X_out (4x up to 128x320)
+  Upscaler       : Q_coarse (16x20) -> (64x80) in embed space (4x from coarse grid)
+  Decoder fine   : [Q_coarse_up, Q_fine] -> X_out (x2/x4 up to 128x320)
 """
 
 from __future__ import annotations
@@ -41,9 +41,10 @@ class VQ_VAE_2Layer(nn.Module):
     """
     Two-layer VQ-VAE for spectrograms (reference VQ-VAE-2 structure).
 
-    - Encoders: generic Encoder with downscale_factor=4, BatchNorm, ReZero ResidualStack.
-    - Coarse codebook: encoder_coarse (hidden_channels) -> 1x1 conv -> embed_dim -> VQ.
-    - Coarse decoder: quantized_coarse -> Decoder -> embed_dim at fine spatial res (for conditioning).
+    - Fine latent: x2/x4 down from input (e.g. 128x320 -> 64x80).
+    - Coarse latent: x8/x16 down from input (e.g. 128x320 -> 16x20).
+    - Coarse codebook: encoder_coarse -> 1x1 conv -> embed_dim -> VQ.
+    - Coarse decoder: quantized_coarse -> Decoder (4x up) -> fine grid for conditioning.
     - Fine codebook: concat(encoder_fine, decoded_coarse) -> 1x1 conv -> embed_dim -> VQ.
     - Fine decoder: concat(upscaled_coarse, quantized_fine) -> Decoder -> image.
     """
@@ -286,7 +287,11 @@ if __name__ == "__main__":
 
     for name, m in [("same", model_same), ("diff", model_diff)]:
         loss_fine, loss_coarse, recon, q_coarse, q_fine, perp_coarse, perp_fine = m(x)
+        assert q_fine.shape[-2:] == (64, 80), f"q_fine shape {q_fine.shape}"
+        assert q_coarse.shape[-2:] == (16, 20), f"q_coarse shape {q_coarse.shape}"
+        assert recon.shape == (1, 3, 128, 320), f"recon shape {recon.shape}"
         n_params = sum(p.numel() for p in m.parameters() if p.requires_grad)
         print(f"[{name}] params={n_params:,}  loss_fine={loss_fine.item():.4f}  loss_coarse={loss_coarse.item():.4f}  recon={recon.shape}")
         print(f"Quantized coarse: {q_coarse.shape}")
         print(f"Quantized fine: {q_fine.shape}")
+    print("Smoke test passed: fine 64x80, coarse 16x20, recon 128x320.")
