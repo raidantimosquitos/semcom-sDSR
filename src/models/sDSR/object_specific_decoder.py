@@ -137,37 +137,25 @@ class SpectrogramReconstructionNetwork(nn.Module):
             norm_layer(in_channels * 4),
             nn.ReLU(inplace=True),
             nn.Conv2d(in_channels * 4, hidden_channels, kernel_size=3, stride=2, padding=1),
-            norm_layer(hidden_channels),
+            norm_layer(in_channels * 4),
             nn.ReLU(inplace=True),
         )
-        self._pre_bottleneck = nn.Conv2d(
-            hidden_channels, half, kernel_size=3, padding=1
+        self._pre_vq_conv = nn.Conv2d(
+            in_channels * 4, half, kernel_size=3, padding=1
         )
 
-        # Decoder stage 1: upsample, concat skip from b2, conv, then residual stack
-        self._upblock1 = nn.Sequential(
-            nn.ConvTranspose2d(half, half, kernel_size=4, stride=2, padding=1),
-            norm_layer(half),
-            nn.ReLU(inplace=True),
-        )
-        self._conv_after_skip2 = nn.Conv2d(
-            half + hidden_channels, half, kernel_size=3, stride=1, padding=1,
-        )
-        self._residual_after_skip2 = ResidualStack(
-            half, half, num_residual_layers, max(1, half // 2)
-        )
+        # Decoder stage 1
+        self._upblock1 =  nn.ConvTranspose2d(half, half, kernel_size=4, stride=2, padding=1)
 
-        # Decoder stage 2: upsample, concat skip from b1, conv, then residual stack
+        # Decoder stage 2
         self._upblock2 = nn.ConvTranspose2d(half, half, kernel_size=4, stride=2, padding=1)
-        self._conv_after_skip1 = nn.Conv2d(
-            half + in_channels * 2, hidden_channels, kernel_size=3, stride=1, padding=1,
-        )
-        self._residual_after_skip1 = ResidualStack(
-            hidden_channels, hidden_channels, num_residual_layers + 1, half
+
+        self._conv_1 = nn.Conv2d(
+            half, hidden_channels, kernel_size=3, stride=1, padding=1,
         )
 
         # Final residual head and upsample to spectrogram resolution
-        self._residual = ResidualStack(
+        self._residual_stack = ResidualStack(
             hidden_channels, hidden_channels, num_residual_layers, half
         )
         self._conv_trans_1 = nn.ConvTranspose2d(
@@ -186,15 +174,15 @@ class SpectrogramReconstructionNetwork(nn.Module):
             q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False
         )
         x = torch.cat([q_coarse_up, q_fine], dim=1)
-        x = self.block1(x)
-        x = self.mp1(x)
-        x = self.block2(x)
-        x = self.mp2(x)
-        x = self.pre_vq_conv(x)
+        x = self._block1(x)
+        x = self._mp1(x)
+        x = self._block2(x)
+        x = self._mp2(x)
+        x = self._pre_vq_conv(x)
 
-        x = self.upblock1(x)
+        x = self._upblock1(x)
         x = F.relu(x)
-        x = self.upblock2(x)
+        x = self._upblock2(x)
         x = F.relu(x)
         x = self._conv_1(x)
 
