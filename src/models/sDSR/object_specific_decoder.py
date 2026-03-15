@@ -132,6 +132,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             norm_layer(in_channels * 2),
             nn.ReLU(inplace=True),
         )
+        self._mp1 = nn.Sequential(nn.MaxPool2d(2))
         self._block2 = nn.Sequential(
             nn.Conv2d(in_channels * 2, in_channels * 4, kernel_size=3, padding=1),
             norm_layer(in_channels * 4),
@@ -140,6 +141,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             norm_layer(in_channels * 4),
             nn.ReLU(inplace=True),
         )
+        self._mp2 = nn.Sequential(nn.MaxPool2d(2))
         self._pre_vq_conv = nn.Conv2d(
             in_channels * 4, half, kernel_size=3, padding=1
         )
