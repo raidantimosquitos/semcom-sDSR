@@ -125,19 +125,19 @@ class SpectrogramReconstructionNetwork(nn.Module):
 
         # Encoder: strided convs (no MaxPool)
         self._block1 = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels * 2, kernel_size=3, padding=1),
-            norm_layer(in_channels * 2),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+            norm_layer(in_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, padding=1),
             norm_layer(in_channels * 2),
             nn.ReLU(inplace=True),
         )
         self._mp1 = nn.Sequential(nn.MaxPool2d(2))
         self._block2 = nn.Sequential(
-            nn.Conv2d(in_channels * 2, in_channels * 4, kernel_size=3, padding=1),
-            norm_layer(in_channels * 4),
+            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, padding=1),
+            norm_layer(in_channels * 2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels * 4, hidden_channels, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(in_channels * 4, hidden_channels, kernel_size=3, padding=1),
             norm_layer(in_channels * 4),
             nn.ReLU(inplace=True),
         )
