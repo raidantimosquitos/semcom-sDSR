@@ -172,7 +172,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1,
         )
         self._conv_trans_2 = nn.ConvTranspose2d(
-            hidden_channels, 3, kernel_size=4, stride=2, padding=1,
+            hidden_channels, 3, kernel_size=(3,4), stride=(1,2), padding=(1,1),
         )
 
     def forward(
