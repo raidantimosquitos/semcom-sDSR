@@ -11,14 +11,14 @@ Input spectrograms are 2-D: (B, C, n_mels, T)
   n_mels  – frequency bins (e.g. 128)
   T       – time frames (e.g. 256)
 
-2-level flow (fine x2/x4, coarse x8/x16 from input):
-  Encoder fine   : X -> f_fine        (x2/x4 down, 64x80 for 128x320, hidden_channels)
-  Encoder coarse : f_fine -> f_coarse (x4 down -> x8/x16 from input, 16x20, hidden_channels)
+2-level flow (fine x4/x4, coarse x8/x8 from input):
+  Encoder fine   : X -> f_fine        (x4/x4 down, 32x80 for 128x320, hidden_channels)
+  Encoder coarse : f_fine -> f_coarse (x4 down -> x8/x8 from input, 16x40, hidden_channels)
   VQ coarse      : f_coarse -> z_coarse (1x1 conv to embed_dim) -> Q_coarse
-  Decoder coarse : Q_coarse -> decoded_coarse (4x up to 64x80, hidden_channels)
+  Decoder coarse : Q_coarse -> decoded_coarse (2x up to 32x80, hidden_channels)
   Fine input     : [f_fine, decoded_coarse] -> 1x1 conv -> z_fine -> Q_fine
-  Upscaler       : Q_coarse (16x20) -> (64x80) in embed space (4x from coarse grid)
-  Decoder fine   : [Q_coarse_up, Q_fine] -> X_out (x2/x4 up to 128x320)
+  Upscaler       : Q_coarse (16x40) -> (32x80) in embed space (2x from coarse grid)
+  Decoder fine   : [Q_coarse_up, Q_fine] -> X_out (x4/x4 up to 128x320)
 """
 
 from __future__ import annotations
@@ -287,11 +287,11 @@ if __name__ == "__main__":
 
     for name, m in [("same", model_same), ("diff", model_diff)]:
         loss_fine, loss_coarse, recon, q_coarse, q_fine, perp_coarse, perp_fine = m(x)
-        assert q_fine.shape[-2:] == (64, 80), f"q_fine shape {q_fine.shape}"
-        assert q_coarse.shape[-2:] == (16, 20), f"q_coarse shape {q_coarse.shape}"
+        assert q_fine.shape[-2:] == (32, 80), f"q_fine shape {q_fine.shape}"
+        assert q_coarse.shape[-2:] == (16, 40), f"q_coarse shape {q_coarse.shape}"
         assert recon.shape == (1, 3, 128, 320), f"recon shape {recon.shape}"
         n_params = sum(p.numel() for p in m.parameters() if p.requires_grad)
         print(f"[{name}] params={n_params:,}  loss_fine={loss_fine.item():.4f}  loss_coarse={loss_coarse.item():.4f}  recon={recon.shape}")
         print(f"Quantized coarse: {q_coarse.shape}")
         print(f"Quantized fine: {q_fine.shape}")
-    print("Smoke test passed: fine 64x80, coarse 16x20, recon 128x320.")
+    print("Smoke test passed: fine 32x80, coarse 16x40, recon 128x320.")

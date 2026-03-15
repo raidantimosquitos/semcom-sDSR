@@ -18,6 +18,8 @@ from ..vq_vae.res_blocks_2d import ResidualStack
 from .subspace_restriction import SubspaceRestrictionModule
 
 
+
+
 class ObjectSpecificDecoder(nn.Module):
     """
     Object Specific Decoder: Q or Q_A -> (optional) subspace restriction -> quantize -> spectrogram -> X_S.
@@ -106,7 +108,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
     plus ResidualStack for stronger denoising, then a final ResidualStack before
     symmetric 4x upsample to spectrogram resolution.
 
-    Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/2, T/4) = (64, 80).
+    Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/4, T/4) = (32, 80).
     Output: (B, 3, n_mels, T)
     """
 
@@ -172,7 +174,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1,
         )
         self._conv_trans_2 = nn.ConvTranspose2d(
-            hidden_channels, 3, kernel_size=(3,4), stride=(1,2), padding=(1,1),
+            hidden_channels, 3, kernel_size=4, stride=2, padding=1,
         )
 
     def forward(
@@ -184,20 +186,22 @@ class SpectrogramReconstructionNetwork(nn.Module):
             q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False
         )
         x = torch.cat([q_coarse_up, q_fine], dim=1)
-        b1 = self._block1(x)
-        b2 = self._block2(b1)
-        x = F.relu(self._pre_bottleneck(b2))
-        x = self._upblock1(x)
-        b2_up = F.interpolate(b2, size=x.shape[-2:], mode="bilinear", align_corners=False)
-        x = torch.cat([x, b2_up], dim=1)
-        x = F.relu(self._conv_after_skip2(x))
-        x = self._residual_after_skip2(x)
-        x = F.relu(self._upblock2(x))
-        b1_up = F.interpolate(b1, size=x.shape[-2:], mode="bilinear", align_corners=False)
-        x = torch.cat([x, b1_up], dim=1)
-        x = F.relu(self._conv_after_skip1(x))
-        x = self._residual_after_skip1(x)
-        x = self._residual(x)
-        x = F.relu(self._conv_trans_1(x))
+        x = self.block1(x)
+        x = self.mp1(x)
+        x = self.block2(x)
+        x = self.mp2(x)
+        x = self.pre_vq_conv(x)
+
+        x = self.upblock1(x)
+        x = F.relu(x)
+        x = self.upblock2(x)
+        x = F.relu(x)
+        x = self._conv_1(x)
+
+        x = self._residual_stack(x)
+
+        x = self._conv_trans_1(x)
+        x = F.relu(x)
+
         return self._conv_trans_2(x)
 
