@@ -161,7 +161,7 @@ class AudioSpecificStrategy:
 def _draw_fan(n_mels: int, T: int) -> np.ndarray:
     """Horizontal stripes at harmonic-like intervals; freq-specific, not broadband."""
     M = np.zeros((n_mels, T), dtype=np.float32)
-    n_stripes = random.randint(2, 5)
+    n_stripes = random.randint(1, 5)
     stripe_height_wide = random.randint(12, 17)
     stripe_height_wide = max(MIN_FREQ_BINS, min(stripe_height_wide, n_mels))
     stripe_height_narrow = random.randint(4, 7)

@@ -30,9 +30,9 @@ class sDSRConfig:
     num_residual_layers: int = 2
     n_mels: int = 128
     T: int = 320
-    anomaly_sampling: Literal["distant", "uniform"] = "uniform"
-    anomaly_strength_min: float = 0.2
-    anomaly_strength_max: float = 1.0
+    anomaly_sampling: Literal["distant", "uniform"] = "distant"
+    anomaly_strength_min: float = 0.08
+    anomaly_strength_max: float = 0.25
     use_subspace_restriction: bool = False
     # Stage 2 injection: fine_only_prob = fraction of anomaly samples that corrupt fine only; rest corrupt both (same mask).
     fine_only_prob: float = 0.65
