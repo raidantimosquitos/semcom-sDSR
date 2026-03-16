@@ -30,11 +30,14 @@ class DCASE2020Task2LogMelDataset(Dataset):
 
     Stage2 uses a machine-type-specific dataset that includes anomalies (see AudDSRAnomTrainDataset).
 
-    Expected layout: root/{machine_type}/train/
-        normal_id_01_00000000.wav, normal_id_02_00000000.wav, ...
+    Expected layout:
+        root/{machine_type}/train/  -> normal_id_01_00000000.wav, ...
+        root/{machine_type}/test/  -> normal_id_01_*.wav, anomaly_id_01_*.wav (only used when include_test=True in _init_multi)
     """
 
     _FILENAME_RE = re.compile(r"^normal_(id_\d+)_\d+\.wav$", re.IGNORECASE)
+    # test/ has both normal_* and anomaly_*; use this when loading from test/
+    _FILENAME_RE_TEST = re.compile(r"^(?:normal|anomaly)_(id_\d+)_\d+\.wav$", re.IGNORECASE)
 
     def __init__(
         self,
@@ -49,12 +52,13 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_max:         float = 8_000.0,
         top_db:        float = 80.0,
         target_T_override: int | None = None,
-        machine_id: str | None = None
+        machine_id: str | None = None,
+        include_test: bool = True
     ):
         if machine_types is not None:
             if machine_id is not None:
                 raise ValueError("machine_id filter only applies to single machine_type")
-            self._init_multi(root, machine_types, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db)
+            self._init_multi(root, machine_types, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, include_test)
         elif machine_type is not None:
             self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, target_T_override, machine_id)
         else:
@@ -146,6 +150,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_min: float,
         f_max: float,
         top_db: float,
+        include_test: bool = True
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -163,10 +168,33 @@ class DCASE2020Task2LogMelDataset(Dataset):
         all_machine_id_strs: list[str] = []
         orig_lengths: list[int] = []
 
-        # 1. Load each type at native length; record original T per machine type
+        # 1. Load each type at native length; record original T per machine type.
+        # When include_test=True, also load from test/ (normal + anomaly) and combine with train/.
         for mt in sorted(machine_types):
-            audio_dir = root_path / mt / "train"
-            spectrograms, machine_id_strs = load_mel_for_dir(audio_dir, sample_rate, self.mel_transform, self.to_db, self._FILENAME_RE)
+            train_dir = root_path / mt / "train"
+            spectrograms, machine_id_strs = load_mel_for_dir(
+                train_dir, sample_rate, self.mel_transform, self.to_db, self._FILENAME_RE
+            )
+            if include_test:
+                test_dir = root_path / mt / "test"
+                if test_dir.exists():
+                    spec_test, mid_test = load_mel_for_dir(
+                        test_dir, sample_rate, self.mel_transform, self.to_db, self._FILENAME_RE_TEST
+                    )
+                    spectrograms = spectrograms + spec_test
+                    machine_id_strs = machine_id_strs + mid_test
+            # Pad/truncate to common max T for this machine type, then stack
+            max_T_mt = max(s.shape[-1] for s in spectrograms)
+            if max_T_mt > 0:
+                padded = []
+                for s in spectrograms:
+                    T_s = s.shape[-1]
+                    if T_s < max_T_mt:
+                        s = F.pad(s, (0, max_T_mt - T_s))
+                    elif T_s > max_T_mt:
+                        s = s[..., :max_T_mt]
+                    padded.append(s)
+                spectrograms = padded
             data_mt = torch.stack(spectrograms)
             orig_lengths.append(data_mt.shape[-1])
             all_spectrograms.append(data_mt)
@@ -187,11 +215,14 @@ class DCASE2020Task2LogMelDataset(Dataset):
         self._machine_id_strs = all_machine_id_strs
         self.machine_ids = sorted(set(self._machine_id_strs))
 
-        print(
-            f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (per-machine per-mel norm, T→{target_T}), "
+        msg = (
+            f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (T→{target_T}), "
             f"shape {tuple(self.data.shape)} | IDs: {self.machine_ids} | "
             f"{self.data.nbytes / 1e9:.2f} GB in RAM"
         )
+        if include_test:
+            msg += " (train+test)"
+        print(msg)
 
     def __len__(self) -> int:
         return len(self.data)

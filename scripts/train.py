@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--decay", type=float, default=0.99)
     s1.add_argument("--lambda_recon", type=float, default=1.0)
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
+    s1.add_argument("--include_test", action="store_true", help="Include test data in stage1 training")
 
     # Stage 2
     s2 = sub.choices["stage2"]
@@ -131,9 +132,11 @@ def run_stage1(args: argparse.Namespace) -> None:
         )
         run_name = machine_types[0]
     else:
+        include_test = args.include_test
         dataset = DCASE2020Task2LogMelDataset(
             root=args.data_path,
-            machine_types=machine_types
+            machine_types=machine_types,
+            include_test=include_test
         )
         run_name = "+".join(sorted(machine_types))
     _, _, n_mels, T = dataset.data.shape
