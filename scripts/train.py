@@ -116,7 +116,7 @@ def build_s_dsr(
         num_residual_layers=2,
         n_mels=n_mels,
         T=T,
-        anomaly_sampling="uniform",
+        anomaly_sampling="distant",
         fine_only_prob=fine_only_prob,
     )
     return sDSR(vq_vae, cfg)
