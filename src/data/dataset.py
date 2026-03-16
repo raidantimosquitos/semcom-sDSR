@@ -1,3 +1,4 @@
+import logging
 import random
 import re
 import math
@@ -220,11 +221,17 @@ class AudDSRAnomTrainDataset(Dataset):
     def __init__(
         self,
         base_dataset: DCASE2020Task2LogMelDataset,
-        strategy: Literal["perlin", "audio_specific", "both"] = "both",
+        strategy: Literal["perlin", "audio_specific", "both", "machine_specific"] = "both",
         zero_mask_prob: float = 0.5,
         adversarial_dataset: Dataset | None = None,
     ) -> None:
         self.base = base_dataset
+        self.machine_type = getattr(base_dataset, "machine_type", None)
+        if strategy == "machine_specific" and not self.machine_type:
+            logging.warning(
+                "AudDSRAnomTrainDataset: strategy is 'machine_specific' but base_dataset has no machine_type; falling back to 'both'"
+            )
+            strategy = "both"
         self.strategy = strategy
         self.zero_mask_prob = zero_mask_prob
         self.adversarial_dataset = (
@@ -232,7 +239,6 @@ class AudDSRAnomTrainDataset(Dataset):
             if (adversarial_dataset is not None and len(cast(Any, adversarial_dataset)) > 0)
             else None
         )
-        self.machine_type = getattr(base_dataset, "machine_type", None)
         # Spectrogram space: (n_mels, T); mask shape (1, 1, n_mels, T)
         _, _, n_mels, T = base_dataset.data.shape
         self.n_mels = n_mels
@@ -244,6 +250,7 @@ class AudDSRAnomTrainDataset(Dataset):
             n_mels=n_mels,
             T=T,
             zero_mask_prob=0.0,
+            machine_type=self.machine_type,
         )
 
     def __len__(self) -> int:

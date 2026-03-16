@@ -66,7 +66,8 @@ def parse_args() -> argparse.Namespace:
     s2.add_argument("--lambda_recon", type=float, default=10.0)
     s2.add_argument("--lambda_focal", type=float, default=1.0)
     s2.add_argument("--lambda_sub", type=float, default=1.0, help="Weight for subspace restriction loss L2(F̃, Q)")
-    s2.add_argument("--anomaly_strategy", type=str, default="both", choices=["perlin", "audio_specific", "both"], help="Synthetic anomaly mask strategy at dataset level")
+    s2.add_argument("--anomaly_strategy", type=str, default="both", choices=["perlin", "audio_specific", "both", "machine_specific"], help="Synthetic anomaly mask strategy; use 'machine_specific' for Stage 2 machine-type-specific masks")
+    s2.add_argument("--fine_only_prob", type=float, default=0.65, help="Fraction of anomaly samples that inject at fine level only; rest inject at both levels (default 0.65 = 65%% fine-only, 35%% both)")
     s2.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
     # Full
@@ -101,7 +102,14 @@ def build_vq_vae(
     )
 
 
-def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int, hidden_channels: int, embedding_dim: int) -> sDSR:
+def build_s_dsr(
+    vq_vae: VQ_VAE_2Layer,
+    n_mels: int,
+    T: int,
+    hidden_channels: int,
+    embedding_dim: int,
+    fine_only_prob: float = 0.65,
+) -> sDSR:
     cfg = sDSRConfig(
         embedding_dim=embedding_dim,
         hidden_channels=hidden_channels,
@@ -109,6 +117,7 @@ def build_s_dsr(vq_vae: VQ_VAE_2Layer, n_mels: int, T: int, hidden_channels: int
         n_mels=n_mels,
         T=T,
         anomaly_sampling="uniform",
+        fine_only_prob=fine_only_prob,
     )
     return sDSR(vq_vae, cfg)
 
@@ -215,7 +224,10 @@ def run_stage2(args: argparse.Namespace) -> None:
     migrate_vq_vae_state_dict(state)
     vq_vae.load_state_dict(state)
 
-    model = build_s_dsr(vq_vae, n_mels, T, hidden_channels, embedding_dim)
+    model = build_s_dsr(
+        vq_vae, n_mels, T, hidden_channels, embedding_dim,
+        fine_only_prob=getattr(args, "fine_only_prob", 0.65),
+    )
     trainer = Stage2Trainer(
         model=model,
         dataset=train_dataset,

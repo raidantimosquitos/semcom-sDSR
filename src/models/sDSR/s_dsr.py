@@ -34,6 +34,8 @@ class sDSRConfig:
     anomaly_strength_min: float = 0.2
     anomaly_strength_max: float = 1.0
     use_subspace_restriction: bool = False
+    # Stage 2 injection: fine_only_prob = fraction of anomaly samples that corrupt fine only; rest corrupt both (same mask).
+    fine_only_prob: float = 0.65
 
 
 class sDSR(nn.Module):
@@ -202,19 +204,21 @@ class sDSR(nn.Module):
             torch.rand(batch_size, device=device) * (self.config.anomaly_strength_max - self.config.anomaly_strength_min)
             + self.config.anomaly_strength_min
         )
+        # Single spectrogram mask M_gt → projected to fine and coarse in AnomalyGeneration (spatially coherent)
         q_fine_a, q_coarse_a = self._anomaly_generation(
             q_fine, q_coarse, M_gt, vq_fine, vq_coarse,
             z_fine=z_fine, z_coarse=z_coarse,
             strength_fine=strength_fine, strength_coarse=strength_coarse,
         )
 
-        # Inject anomalies randomly fine level, coarse level, or both levels
+        # 65% fine-only, 35% both levels (same mask at both; no coarse-only)
         has_anomaly = (M_gt.sum(dim=(1, 2, 3)) > 0).view(batch_size, 1, 1, 1).float()
-        inject_location = torch.randint(0, 3, (batch_size,), device=device)
-        use_fine = ((inject_location == 0) | (inject_location == 2)).float().view(batch_size, 1, 1, 1)
-        use_coarse = ((inject_location == 1) | (inject_location == 2)).float().view(batch_size, 1, 1, 1)
-        
-        q_fine_used = has_anomaly * (use_fine * q_fine_a + (1 - use_fine) * q_fine) + (1 - has_anomaly) * q_fine
+        use_fine = has_anomaly  # always use augmented fine when anomaly
+        use_coarse = has_anomaly * (
+            (torch.rand(batch_size, device=device) >= self.config.fine_only_prob)
+            .float().view(batch_size, 1, 1, 1)
+        )
+        q_fine_used = has_anomaly * q_fine_a + (1 - has_anomaly) * q_fine
         q_coarse_used = has_anomaly * (use_coarse * q_coarse_a + (1 - use_coarse) * q_coarse) + (1 - has_anomaly) * q_coarse
         
         with torch.no_grad():
