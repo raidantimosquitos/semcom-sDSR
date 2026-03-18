@@ -18,7 +18,7 @@ def load_mel_for_dir(
     assert files, f"No .wav files found in {audio_dir}"
     spectrograms: list[torch.Tensor] = []
     machine_id_strs: list[str] = []
-    cmap = plt.get_cmap('jet')
+    cmap = plt.get_cmap('viridis')
     for path in files:
         m = filename_re.match(path.name)
         mid = m.group(1) if m else "id_00"
