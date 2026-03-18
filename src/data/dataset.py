@@ -12,40 +12,17 @@ import torchaudio.transforms as T
 from torch.utils.data import DataLoader, Dataset
 
 from ..utils.anomalies import AnomalyMapGenerator
-from ..utils.audio import load_mel_for_dir, log_mel_to_delta3, pad_time_replicate
-
-_EPS = 1e-8
-
-def normalize_per_clip_melbin_1ch(x: torch.Tensor) -> torch.Tensor:
-    """
-    Per-spectrogram normalization for a single-channel log-mel spectrogram.
-
-    For each clip and mel bin f:
-        x[0,f,:] <- (x[0,f,:] - mean_t) / (std_t + eps)
-    where mean_t and std_t are computed over time frames only.
-
-    Args:
-        x: (1, n_mels, T)
-
-    Returns:
-        Normalized tensor (1, n_mels, T).
-    """
-    if x.dim() != 3 or x.shape[0] != 1:
-        raise ValueError(f"normalize_per_clip_melbin_1ch expects (1,n_mels,T), got shape={tuple(x.shape)}")
-    mu = x.mean(dim=-1, keepdim=True)
-    std = x.std(dim=-1, keepdim=True, unbiased=False)
-    return (x - mu) / (std + _EPS)
+from ..utils.audio import load_mel_for_dir, log_mel_to_rgb
 
 class DCASE2020Task2LogMelDataset(Dataset):
     """
-    Training dataset: pre-computes log-mel spectrograms into RAM, then converts
-    to 3 channels: (logmel_dB, delta, delta-delta).
+    Training dataset: pre-computes log-mel spectrograms into RAM.
     Single machine type or multiple (machine_types); machine_id parsed from filenames (normal_id_XX_....wav).
     All training samples are normal (no anomalies), so label is always 0..    
     
-    For multiple types: (1) each type is truncated to the minimum T across types; 
+    For multiple types: (1) each type is truncated to 313 samples; 
     (2) result is padded to the next multiple of 16. 
-    For a single type, T is padded or truncated to a multiple of 16.
+    For a single type, T is padded to a multiple of 16.
 
     __getitem__ returns (spectrogram, label, machine_id) with label 0 = normal.
 
@@ -74,7 +51,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_min:         float = 0.0,
         f_max:         float = 8_000.0,
         top_db:        float = 80.0,
-        target_T_override: int | None = None,
         machine_id: str | None = None,
         include_test: bool = True,
     ):
@@ -83,7 +59,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
                 raise ValueError("machine_id filter only applies to single machine_type")
             self._init_multi(root, machine_types, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, include_test)
         elif machine_type is not None:
-            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, target_T_override, machine_id)
+            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, machine_id)
         else:
             raise ValueError("Provide either machine_type or machine_types")
 
@@ -98,7 +74,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_min: float,
         f_max: float,
         top_db: float,
-        target_T_override: int | None = None,
         machine_id: str | None = None
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
@@ -115,18 +90,14 @@ class DCASE2020Task2LogMelDataset(Dataset):
         audio_dir = Path(root) / machine_type / "train"
         spectrograms, machine_id_strs = load_mel_for_dir(audio_dir, sample_rate, self.mel_transform, self.to_db, self._FILENAME_RE)
 
-        # Support variable-length clips: pad each to max T before stacking
+        # Pad with zeros to the next multiple of 16
         max_T = max(s.shape[-1] for s in spectrograms)
-        if max_T > 0:
-            padded = []
-            for s in spectrograms:
-                T_s = s.shape[-1]
-                if T_s < max_T:
-                    s = pad_time_replicate(s, max_T)
-                elif T_s > max_T:
-                    s = s[..., :max_T]
-                padded.append(s)
-            spectrograms = padded
+        target_T = min(320, math.ceil(max_T / 16) * 16)
+        for s in spectrograms:
+            if s.shape[-1] < target_T:
+                s = torch.cat([s, torch.zeros(s.shape[0], s.shape[1], target_T - s.shape[-1])], dim=-1)
+
+        self.target_T = target_T
         self.data = torch.stack(spectrograms)
         self.machine_ids = sorted(set(machine_id_strs))
         self._machine_id_strs = machine_id_strs
@@ -142,20 +113,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
                 f"DCASE2020Task2LogMelDataset: filtered to machine_id={machine_id} | "
                 f"{len(self.data)} spectrograms"
             )
-
-        if target_T_override is not None:
-            target_T = target_T_override
-        else:
-            target_T = min(320, math.ceil(self.data.shape[-1] / 16) * 16)
-        self.target_T = target_T
-        if self.data.shape[-1] < target_T:
-            old_T = self.data.shape[-1]
-            self.data = pad_time_replicate(self.data, target_T)
-            print(f"Padded T (replicate): {old_T} → {self.data.shape[-1]} (target: {target_T})")
-        elif self.data.shape[-1] > target_T:
-            old_T = self.data.shape[-1]
-            self.data = self.data[..., :target_T]
-            print(f"Truncated T: {old_T} → {target_T} (target: {target_T})")
 
         print(
             f"DCASE2020Task2LogMelDataset: {machine_type} | {len(self.data)} spectrograms, "
@@ -207,57 +164,34 @@ class DCASE2020Task2LogMelDataset(Dataset):
                     )
                     spectrograms = spectrograms + spec_test
                     machine_id_strs = machine_id_strs + mid_test
-            # Pad/truncate to common max T for this machine type, then stack
-            max_T_mt = max(s.shape[-1] for s in spectrograms)
-            if max_T_mt > 0:
-                padded = []
-                for s in spectrograms:
-                    T_s = s.shape[-1]
-                    if T_s < max_T_mt:
-                        s = pad_time_replicate(s, max_T_mt)
-                    elif T_s > max_T_mt:
-                        s = s[..., :max_T_mt]
-                    padded.append(s)
-                spectrograms = padded
-            data_mt = torch.stack(spectrograms)
-            orig_lengths.append(data_mt.shape[-1])
-            all_spectrograms.append(data_mt)
+
+            # Truncate to 313 samples (length of the shortest spectrogram)
+            spectrograms = [s[..., :313] for s in spectrograms]
+
+            # Pad with zeros to the next multiple of 16
+            target_T = math.ceil(313 / 16) * 16
+            if spectrograms[-1].shape[-1] < target_T:
+                spectrograms[-1] = torch.cat([spectrograms[-1], torch.zeros(spectrograms[-1].shape[0], spectrograms[-1].shape[1], target_T - spectrograms[-1].shape[-1])], dim=-1)
+            spectrograms = torch.stack(spectrograms)
+            orig_lengths.append(spectrograms.shape[-1])
+            all_spectrograms.append(spectrograms)
             all_machine_id_strs.extend(machine_id_strs)
 
-        # 2. Truncate to minimum T across all machine types
-        min_T = min(orig_lengths)
-        truncated = [data_mt[..., :min_T].contiguous() for data_mt in all_spectrograms]
-        n_mels = truncated[0].shape[2]
-
-        self.data = torch.cat(truncated, dim=0)
-
-        # 3. Pad to the next multiple of 16
-        target_T = math.ceil(min_T / 16) * 16
-        if self.data.shape[-1] < target_T:
-            self.data = pad_time_replicate(self.data, target_T)
+        self.data = torch.cat(all_spectrograms, dim=0)
         self.target_T = target_T
         self._machine_id_strs = all_machine_id_strs
         self.machine_ids = sorted(set(self._machine_id_strs))
 
-        msg = (
-            f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (T→{target_T}), "
-            f"shape {tuple(self.data.shape)} | IDs: {self.machine_ids} | "
-            f"{self.data.nbytes / 1e9:.2f} GB in RAM"
-        )
-        if include_test:
-            msg += " (train+test)"
-        print(msg)
+        print(f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (T→{target_T}), shape {tuple(self.data.shape)} | IDs: {self.machine_ids} | {self.data.nbytes / 1e9:.2f} GB in RAM")
 
     def __len__(self) -> int:
         return len(self.data)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, str]:
         # label 0 = normal (all training samples are normal)
-        # self.data stores raw log-mel (N, 1, n_mels, T)
-        x_logmel = self.data[idx]  # (1, n_mels, T)
-        x_norm = normalize_per_clip_melbin_1ch(x_logmel)
-        x3 = log_mel_to_delta3(x_norm)  # (3, n_mels, T)
-        return x3, 0, self._machine_id_strs[idx]
+        # self.data stores raw log-mel (N, 3, n_mels, T)
+        x_logmel = self.data[idx]  # (1, 3, n_mels, T)
+        return x_logmel, 0, self._machine_id_strs[idx]
 
 
 class AudDSRAnomTrainDataset(Dataset):
@@ -351,7 +285,7 @@ class AudDSRAnomTrainDataset(Dataset):
 class DCASE2020Task2TestDataset(Dataset):
     """
     Test dataset: normal and anomalous samples per machine ID.
-    Uses mean, std, and target_T from the training dataset for consistent normalization and length.
+    Uses target_T from the training dataset for consistent normalization and length.
 
     __getitem__ returns (spectrogram, label, machine_id):
         label 0 = normal, 1 = anomalous (from filename).
@@ -429,17 +363,16 @@ class DCASE2020Task2TestDataset(Dataset):
             wav = wav.mean(0, keepdim=True)
         mel = self.mel_transform(wav)
         log_mel = self.to_db(mel).float()  # (1, n_mels, T)
-        T = log_mel.shape[-1]
-        if self.target_T is not None:
-            log_mel = pad_time_replicate(log_mel, self.target_T)
-        else:
-            # Pad to multiple of 16 for VQ-VAE (4x fine, 8x coarse symmetric downsampling)
-            target = math.ceil(T / 16) * 16
-            log_mel = pad_time_replicate(log_mel, target)
 
-        log_mel = normalize_per_clip_melbin_1ch(log_mel)  # (1, n_mels, T')
-        x3 = log_mel_to_delta3(log_mel)  # (3, n_mels, T')
-        return x3, label, machine_id
+        # Convert to RGB three channels
+        log_mel_rgb = log_mel_to_rgb(log_mel)
+        T = log_mel.shape[-1]
+
+        # Pad with zeros up to target_T
+        if T < self.target_T:
+            log_mel_rgb = torch.cat([log_mel_rgb, torch.zeros(3, log_mel_rgb.shape[1], self.target_T - T)], dim=-1)
+
+        return log_mel_rgb, label, machine_id
 
 
 def make_dataloader(dataset: DCASE2020Task2LogMelDataset | DCASE2020Task2TestDataset, batch_size: int = 256) -> DataLoader:
@@ -474,10 +407,10 @@ if __name__ == "__main__":
     loader = make_dataloader(dataset, batch_size=min(32, len(dataset)))
 
     specs, labels, machine_ids = next(iter(loader))
-    print(f"Train batch shape: {tuple(specs.shape)}  (B, 3, n_mels, T) (logmel, delta, delta2)")
+    print(f"Train batch shape: {tuple(specs.shape)}  (B, 3, n_mels, T) (R, G, B)")
     print(f"Label shape: {tuple(labels.shape)}")
     print(f"Machine IDs (batch): {machine_ids[:3]}...")
-    for c, name in enumerate(["amp", "delta", "delta2"]):
+    for c, name in enumerate(["R", "G", "B"]):
         mn = specs[:, c].min()
         mx = specs[:, c].max()
         print(f"{name} range: [{mn:.2f}, {mx:.2f}]")
@@ -489,9 +422,9 @@ if __name__ == "__main__":
     )
     test_loader = make_dataloader(test_dataset, batch_size=min(32, len(test_dataset)))
     specs, labels, machine_ids = next(iter(test_loader))
-    print(f"Test batch shape: {tuple(specs.shape)}  (B, 3, n_mels, T) (logmel, delta, delta2)")
+    print(f"Test batch shape: {tuple(specs.shape)}  (B, 3, n_mels, T) (R, G, B)")
     print(f"Label shape: {tuple(labels.shape)}")
-    for c, name in enumerate(["amp", "delta", "delta2"]):
+    for c, name in enumerate(["R", "G", "B"]):
         mn = specs[:, c].min()
         mx = specs[:, c].max()
         print(f"{name} range: [{mn:.2f}, {mx:.2f}]")

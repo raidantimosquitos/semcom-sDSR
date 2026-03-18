@@ -171,7 +171,6 @@ def run_stage2(args: argparse.Namespace) -> None:
         q_vae_dataset = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=args.machine_type,
-            target_T_override=ckpt["target_T"],
             machine_id=args.machine_id,
         )
     else:
@@ -189,7 +188,6 @@ def run_stage2(args: argparse.Namespace) -> None:
             q_vae_full = DCASE2020Task2LogMelDataset(
                 root=args.data_path,
                 machine_type=args.machine_type,
-                target_T_override=ckpt["target_T"],
             )
         else:
             q_vae_full = DCASE2020Task2LogMelDataset(
