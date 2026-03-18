@@ -20,7 +20,6 @@ import torch
 from src.data.dataset import (
     DCASE2020Task2LogMelDataset,
     DCASE2020Task2TestDataset,
-    get_norm_stats_from_stage1_ckpt,
 )
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.utils.bitstream import (
@@ -47,28 +46,21 @@ def main() -> None:
 
     # Load Stage 1 checkpoint for norm stats and model weights
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    norm_mean, norm_std = get_norm_stats_from_stage1_ckpt(ckpt, args.machine_type)
-    if norm_mean is not None and norm_std is not None and "target_T" in ckpt:
+    if "target_T" in ckpt:
         train_ds = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=args.machine_type,
-            normalize=True,
-            norm_mean=norm_mean,
-            norm_std=norm_std,
             target_T_override=ckpt["target_T"],
         )
     else:
         train_ds = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=args.machine_type,
-            normalize=True,
         )
     _, _, n_mels, T = train_ds.data.shape
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
         machine_type=args.machine_type,
-        mean=train_ds.mean,
-        std=train_ds.std,
         target_T=train_ds.target_T,
     )
 

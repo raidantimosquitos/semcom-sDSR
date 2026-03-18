@@ -140,8 +140,8 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         train_ds = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=args.machine_type,
-            target_T_override=stage1_ckpt["target_T"],
             machine_id=args.machine_id,
+            target_T_override=stage1_ckpt["target_T"],
         )
     else:
         train_ds = DCASE2020Task2LogMelDataset(
