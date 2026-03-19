@@ -49,7 +49,13 @@ class PerlinNoiseStrategy:
         """
         self.spectrogram_shape = spectrogram_shape
         self.threshold = threshold
-        self.perlin_scale_range = perlin_scale_range
+        n_mels, T = spectrogram_shape
+        # Cap max exponent so Perlin wavelength >= MIN_* (blobs survive max-pool)
+        max_exp_freq = int(np.log2(max(1, n_mels // MIN_FREQ_BINS)))
+        max_exp_time = int(np.log2(max(1, T // MIN_TIME_FRAMES)))
+        effective_max = min(max_exp_freq, max_exp_time, perlin_scale_range[1])
+        effective_min = min(perlin_scale_range[0], effective_max)
+        self.perlin_scale_range = (effective_min, effective_max)
         self.rotate = rotate
         self.rotation_range = rotation_range
 
@@ -80,86 +86,12 @@ class PerlinNoiseStrategy:
             mask = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)
             masks.append(mask)
         M = torch.cat(masks, dim=0).to(device)
-        # M = F.max_pool2d(M, kernel_size=(2, 4), stride=(2, 4))
-        return M
-
-
-class AudioSpecificStrategy:
-    """
-    Generate anomaly map for spectrograms (sDSR-defined).
-
-    Choose a frequency band and several time segments; mark their intersection.
-    Models anomalies that span full duration or specific frequency bands.
-    """
-
-    def __init__(
-        self,
-        spectrogram_shape: tuple[int, int],
-        n_mels: int,
-        T: int,
-        min_band_fraction: float = 0.03,
-        max_band_fraction: float = 0.25,
-        min_segments: int = 3,
-        max_segments: int = 25,
-        min_seg_len: int = 5,
-        max_seg_len: int = 80,
-    ) -> None:
-        """
-        Args:
-            spectrogram_shape: (n_mels, T)
-            n_mels, T: spectrogram dimensions
-            min_band_fraction, max_band_fraction: band width as fraction of n_mels
-            min_segments, max_segments: number of time segments to augment
-        """
-        self.spectrogram_shape = spectrogram_shape
-        self.n_mels = n_mels
-        self.T = T
-        self.min_band_fraction = min_band_fraction
-        self.max_band_fraction = max_band_fraction
-        self.min_segments = min_segments
-        self.max_segments = max_segments
-        self.min_seg_len = min_seg_len
-        self.max_seg_len = max_seg_len
-
-    def __call__(
-        self,
-        batch_size: int,
-        device: torch.device | str,
-    ) -> torch.Tensor:
-        """
-        Generate anomaly map M.
-
-        Returns:
-            M: (B, 1, n_mels, T) binary mask
-        """
-        masks = []
-        for _ in range(batch_size):
-            M = np.zeros(self.spectrogram_shape, dtype=np.float32)   
-            n_seg = random.randint(self.min_segments, self.max_segments + 1)
-            for _ in range(n_seg):
-                band_width = int(
-                    self.n_mels
-                    * random.uniform(self.min_band_fraction, self.max_band_fraction)
-                )
-                band_width = max(1, band_width)      
-                f_low = random.randint(0, self.n_mels - band_width)
-                f_high = min(f_low + band_width, self.n_mels)
-                seg_len = random.randint(
-                    self.min_seg_len, min(self.max_seg_len + 1, self.T)
-                )
-                seg_len = max(1, seg_len)
-                t_start = random.randint(0, max(0, self.T - seg_len))
-                t_end = min(t_start + seg_len, self.T)
-                M[f_low:f_high, t_start:t_end] = 1.0
-            mask = torch.from_numpy(M).unsqueeze(0).unsqueeze(0)
-            masks.append(mask)
-        M = torch.cat(masks, dim=0).to(device)
-        # M = F.max_pool2d(M, kernel_size=(2, 4), stride=(2, 4))
         return M
 
 
 def _draw_fan(n_mels: int, T: int) -> np.ndarray:
-    """Horizontal stripes at harmonic-like intervals; freq-specific, not broadband."""
+    """
+    Horizontal stripes at harmonic-like intervals; freq-specific, not broadband."""
     M = np.zeros((n_mels, T), dtype=np.float32)
     n_stripes = random.randint(1, 5)
     stripe_height_wide = random.randint(12, 17)
@@ -298,17 +230,6 @@ class MachineSpecificStrategy:
         self.n_mels = n_mels
         self.T = T
         self._types = [t.strip() for t in machine_type.split("+") if t.strip()]
-        self._fallback = AudioSpecificStrategy(
-            spectrogram_shape,
-            n_mels,
-            T,
-            min_band_fraction=0.06,
-            max_band_fraction=0.3,
-            min_segments=1,
-            max_segments=15,
-            min_seg_len=MIN_TIME_FRAMES,
-            max_seg_len=80,
-        )
 
     def __call__(
         self,
@@ -325,9 +246,9 @@ class MachineSpecificStrategy:
                     M = drawer(n_mels, T)
                     mask = torch.from_numpy(M.astype(np.float32)).unsqueeze(0).unsqueeze(0)
                 else:
-                    mask = self._fallback(1, device)
+                    mask = torch.zeros(1, 1, n_mels, T, device=device, dtype=torch.float32)
             else:
-                mask = self._fallback(1, device)
+                mask = torch.zeros(1, 1, n_mels, T, device=device, dtype=torch.float32)
             masks.append(mask)
         return torch.cat(masks, dim=0).to(device)
 
@@ -364,11 +285,6 @@ class AnomalyMapGenerator:
             if strategy in ("perlin", "both")
             else None
         )
-        self.audio_specific = (
-            AudioSpecificStrategy(spectrogram_shape, n_mels, T)
-            if strategy in ("audio_specific", "both") and n_mels is not None and T is not None
-            else None
-        )
         self.machine_specific = (
             MachineSpecificStrategy(spectrogram_shape, n_mels, T, machine_type=machine_type or "")
             if strategy == "machine_specific" and n_mels is not None and T is not None
@@ -380,17 +296,14 @@ class AnomalyMapGenerator:
         if self.strategy_name == "perlin":
             assert self.perlin is not None
             return self.perlin(1, device)
-        if self.strategy_name == "audio_specific":
-            assert self.audio_specific is not None
-            return self.audio_specific(1, device)
         if self.strategy_name == "machine_specific":
             assert self.machine_specific is not None
             return self.machine_specific(1, device)
-        if random.random() < 0.5:
+        if random.random() < 0.2:
             assert self.perlin is not None
             return self.perlin(1, device)
-        assert self.audio_specific is not None
-        return self.audio_specific(1, device)
+        assert self.machine_specific is not None
+        return self.machine_specific(1, device)
 
     def generate(
         self,
@@ -417,17 +330,14 @@ class AnomalyMapGenerator:
             if self.strategy_name == "perlin":
                 assert self.perlin is not None
                 return self.perlin(batch_size, device)
-            if self.strategy_name == "audio_specific":
-                assert self.audio_specific is not None
-                return self.audio_specific(batch_size, device)
             if self.strategy_name == "machine_specific":
                 assert self.machine_specific is not None
                 return self.machine_specific(batch_size, device)
-            if random.random() < 0.5:
+            if random.random() < 0.2:
                 assert self.perlin is not None
                 return self.perlin(batch_size, device)
-            assert self.audio_specific is not None
-            return self.audio_specific(batch_size, device)
+            assert self.machine_specific is not None
+            return self.machine_specific(batch_size, device)
 
         masks = []
         for _ in range(batch_size):
