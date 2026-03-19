@@ -9,7 +9,6 @@ Anomaly simulation utilities for AudDSR training.
 
 from .anomaly_map import (
     AnomalyMapGenerator,
-    AudioSpecificStrategy,
     MachineSpecificStrategy,
     PerlinNoiseStrategy,
 )
@@ -20,7 +19,6 @@ from .anomaly_generation import (
 
 __all__ = [
     "AnomalyMapGenerator",
-    "AudioSpecificStrategy",
     "MachineSpecificStrategy",
     "PerlinNoiseStrategy",
     "generate_fake_anomalies_distant",
