@@ -40,7 +40,7 @@ def load_mel_for_dir(
 def log_mel_to_rgb(log_mel: torch.Tensor, cmap: colors.Colormap | None = None) -> torch.Tensor:
     """Convert log-mel spectrogram (1 or 2D) to RGB tensor (3, n_mels, T) in [0, 1]."""
     if cmap is None:
-        cmap = plt.get_cmap("viridis")
+        cmap = plt.get_cmap("jet")
     log_mel_np = log_mel.squeeze().cpu().numpy()
     lo, hi = float(log_mel_np.min()), float(log_mel_np.max())
     span = hi - lo
