@@ -90,15 +90,23 @@ class DCASE2020Task2LogMelDataset(Dataset):
         audio_dir = Path(root) / machine_type / "train"
         spectrograms, machine_id_strs = load_mel_for_dir(audio_dir, sample_rate, self.mel_transform, self.to_db, self._FILENAME_RE)
 
-        # Pad with zeros to the next multiple of 16
-        max_T = max(s.shape[-1] for s in spectrograms)
-        target_T = min(320, math.ceil(max_T / 16) * 16)
-        for s in spectrograms:
-            if s.shape[-1] < target_T:
-                s = torch.cat([s, torch.zeros(s.shape[0], s.shape[1], target_T - s.shape[-1])], dim=-1)
 
+        # Truncate to 313 samples (length of the shortest spectrogram)
+        spectrograms = [s[..., :313] for s in spectrograms]
+
+        # Pad with zeros to the next multiple of 16, truncate to 320 if longer
+        target_T = ((313 + 15) // 16) * 16  # 320
+
+        padded = []
+        for s in spectrograms:
+            pad = target_T - s.shape[-1]
+            if pad > 0:
+                s = torch.nn.functional.pad(s, (0, pad), mode="constant", value=0.0)
+            padded.append(s)
+        spectrograms = torch.stack(padded)
+        
+        self.data = spectrograms
         self.target_T = target_T
-        self.data = torch.stack(spectrograms)
         self.machine_ids = sorted(set(machine_id_strs))
         self._machine_id_strs = machine_id_strs
 
@@ -168,11 +176,17 @@ class DCASE2020Task2LogMelDataset(Dataset):
             # Truncate to 313 samples (length of the shortest spectrogram)
             spectrograms = [s[..., :313] for s in spectrograms]
 
-            # Pad with zeros to the next multiple of 16
-            target_T = math.ceil(313 / 16) * 16
-            if spectrograms[-1].shape[-1] < target_T:
-                spectrograms[-1] = torch.cat([spectrograms[-1], torch.zeros(spectrograms[-1].shape[0], spectrograms[-1].shape[1], target_T - spectrograms[-1].shape[-1])], dim=-1)
-            spectrograms = torch.stack(spectrograms)
+            # Pad ALL to the next multiple of 16 (320)
+            target_T = ((313 + 15) // 16) * 16  # 320
+            padded = []
+            for s in spectrograms:
+                pad = target_T - s.shape[-1]
+                if pad > 0:
+                    s = torch.nn.functional.pad(s, (0, pad), mode="constant", value=0.0)
+                    # or: s = torch.cat([s, s.new_zeros(s.shape[0], s.shape[1], pad)], dim=-1)
+                padded.append(s)
+            spectrograms = torch.stack(padded)
+
             orig_lengths.append(spectrograms.shape[-1])
             all_spectrograms.append(spectrograms)
             all_machine_id_strs.extend(machine_id_strs)
