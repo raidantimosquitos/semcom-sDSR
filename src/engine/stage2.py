@@ -98,11 +98,12 @@ class Stage2Trainer(BaseTrainer):
 
     def _get_lr(self, step: int, total_steps: int) -> float:
         if step < self.lr_warmup_iters:
-            return self.lr * step / self.lr_warmup_iters
-        elif step < total_steps - self.lr_warmup_iters:
-            return self.lr
-        else:
-            return self.lr * (total_steps - step) / self.lr_warmup_iters
+            return self.lr * (step + 1) / self.lr_warmup_iters
+        progress = (step - self.lr_warmup_iters) / max(
+            1, total_steps - self.lr_warmup_iters
+        )
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return self.lr_min + cosine * (self.lr - self.lr_min)
 
     def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
         """
