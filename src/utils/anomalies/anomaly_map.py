@@ -287,7 +287,7 @@ class AnomalyMapGenerator:
         )
         self.machine_specific = (
             MachineSpecificStrategy(spectrogram_shape, n_mels, T, machine_type=machine_type or "")
-            if strategy == "machine_specific" and n_mels is not None and T is not None
+            if strategy in ("both", "machine_specific") and n_mels is not None and T is not None
             else None
         )
 
