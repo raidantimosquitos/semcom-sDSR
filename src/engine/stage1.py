@@ -54,7 +54,7 @@ class Stage1Trainer(BaseTrainer):
         self.lr_min = lr_min
         self.dataset = dataset
         self.total_steps = total_steps
-        
+
         # Dataset is already for a single machine_type; no filtering needed
         if getattr(dataset, "machine_type", None) not in (None, machine_type):
             raise ValueError(f"Dataset machine_type '{getattr(dataset, 'machine_type')}' != trainer machine_type '{machine_type}'")
@@ -88,14 +88,14 @@ class Stage1Trainer(BaseTrainer):
         else:
             return self.lr * (total_steps - step) / self.lr_warmup_iters
 
-    def _step(self, batch: Any) -> dict[str, float]:
+    def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
         if isinstance(batch, (list, tuple)):
             x = batch[0]
         else:
             x = batch
         x = x.to(self.device, non_blocking=True)
 
-        lr = self._get_lr(self.global_step, self.total_steps)
+        lr = self._get_lr(step, total_steps)
         for pg in self.optimizer.param_groups:
             pg["lr"] = lr
 
