@@ -24,7 +24,7 @@ from .loss import FocalLoss
 from ...utils.anomalies import (
     AnomalyMapGenerator,
     PerlinNoiseStrategy,
-    AudioSpecificStrategy,
+    MachineSpecificStrategy,
     generate_fake_anomalies_distant,
 )
 
@@ -36,7 +36,7 @@ __all__ = [
     "SubspaceRestrictionNetwork",
     "AnomalyMapGenerator",
     "PerlinNoiseStrategy",
-    "AudioSpecificStrategy",
+    "MachineSpecificStrategy",
     "AnomalyGeneration",
     "generate_fake_anomalies_distant",
     "AnomalyDetectionModule",
