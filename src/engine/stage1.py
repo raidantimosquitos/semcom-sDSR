@@ -78,23 +78,17 @@ class Stage1Trainer(BaseTrainer):
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         self._tee(f"Stage1 | Device: {self.device} | AMP: {self.use_amp} | Params: {n_params:,}")
 
-    def _get_lr(self, step: int, total_steps: int) -> float:
-        if step < self.lr_warmup_iters:
-            return self.lr * (step + 1) / self.lr_warmup_iters
-        progress = (step - self.lr_warmup_iters) / max(
-            1, total_steps - self.lr_warmup_iters
-        )
-        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return self.lr_min + cosine * (self.lr - self.lr_min)
+    def _get_lr(self) -> float:
+        return self.lr
 
-    def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
+    def _step(self, batch: Any) -> dict[str, float]:
         if isinstance(batch, (list, tuple)):
             x = batch[0]
         else:
             x = batch
         x = x.to(self.device, non_blocking=True)
 
-        lr = self._get_lr(step, total_steps)
+        lr = self._get_lr()
         for pg in self.optimizer.param_groups:
             pg["lr"] = lr
 

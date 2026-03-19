@@ -94,16 +94,10 @@ class Stage2Trainer(BaseTrainer):
         n_params = sum(p.numel() for p in trainable)
         self._tee(f"Stage2 | Device: {self.device} | AMP: {self.use_amp} | Trainable params: {n_params:,}")
 
-    def _get_lr(self, step: int, total_steps: int) -> float:
-        if step < self.lr_warmup_iters:
-            return self.lr * (step + 1) / self.lr_warmup_iters
-        progress = (step - self.lr_warmup_iters) / max(
-            1, total_steps - self.lr_warmup_iters
-        )
-        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return self.lr_min + cosine * (self.lr - self.lr_min)
+    def _get_lr(self) -> float:
+        return self.lr
 
-    def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
+    def _step(self, batch: Any) -> dict[str, float]:
         """
         One training step. Reconstruction and subspace losses are computed on the
         full batch (all samples: normal and synthetically anomalous) so that the
@@ -113,7 +107,7 @@ class Stage2Trainer(BaseTrainer):
         x = batch["image"].to(self.device, non_blocking=True)
         M_gt = batch["anomaly_mask"].to(self.device, non_blocking=True)
 
-        lr = self._get_lr(step, total_steps)
+        lr = self._get_lr()
         for pg in self.optimizer.param_groups:
             pg["lr"] = lr
 

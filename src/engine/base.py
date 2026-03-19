@@ -1,7 +1,7 @@
 """
 Base trainer: shared training loop, checkpointing, and logging.
 
-Designed for generalization: subclasses implement _step(batch, step, total_steps).
+Designed for generalization: subclasses implement _step(batch).
 Model interfaces (for swapping encoder/DSR implementations):
   - Stage 1: forward(x) -> (loss_fine, loss_coarse, recon, q_coarse, q_fine, perp_coarse, perp_fine)
   - Stage 2: forward_train(x, M_gt) -> dict with m_out, x_s, M, x
@@ -91,7 +91,7 @@ class BaseTrainer(ABC):
         return batch
 
     @abstractmethod
-    def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
+    def _step(self, batch: Any) -> dict[str, float]:
         """Perform one training step. Return loss_dict for logging."""
         raise NotImplementedError
 
@@ -111,7 +111,7 @@ class BaseTrainer(ABC):
 
             while self.global_step < n_iterations:
                 batch = self._next_batch()
-                loss_dict = self._step(batch, self.global_step, n_iterations)
+                loss_dict = self._step(batch)
                 self.global_step += 1
 
                 for k, v in loss_dict.items():
