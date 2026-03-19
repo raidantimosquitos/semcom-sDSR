@@ -52,6 +52,7 @@ class Stage2Trainer(BaseTrainer):
         ckpt_dir: str | Path = "./checkpoints",
         use_amp: bool = True,
         device: str = "cuda",
+        total_steps: int = 20000,
     ) -> None:
         self.machine_type = machine_type
         self.lambda_recon = lambda_recon
@@ -60,6 +61,7 @@ class Stage2Trainer(BaseTrainer):
         self.lr = lr
         self.lr_warmup_iters = lr_warmup_iters
         self.lr_min = lr_min
+        self.total_steps = total_steps
 
         # Dataset is already for a single machine_type; no filtering needed
         if getattr(dataset, "machine_type", None) not in (None, machine_type):
@@ -94,8 +96,13 @@ class Stage2Trainer(BaseTrainer):
         n_params = sum(p.numel() for p in trainable)
         self._tee(f"Stage2 | Device: {self.device} | AMP: {self.use_amp} | Trainable params: {n_params:,}")
 
-    def _get_lr(self) -> float:
-        return self.lr
+    def _get_lr(self, step: int, total_steps: int) -> float:
+        if step < self.lr_warmup_iters:
+            return self.lr * step / self.lr_warmup_iters
+        elif step < total_steps - self.lr_warmup_iters:
+            return self.lr
+        else:
+            return self.lr * (total_steps - step) / self.lr_warmup_iters
 
     def _step(self, batch: Any) -> dict[str, float]:
         """
@@ -107,7 +114,7 @@ class Stage2Trainer(BaseTrainer):
         x = batch["image"].to(self.device, non_blocking=True)
         M_gt = batch["anomaly_mask"].to(self.device, non_blocking=True)
 
-        lr = self._get_lr()
+        lr = self._get_lr(self.global_step, self.total_steps)
         for pg in self.optimizer.param_groups:
             pg["lr"] = lr
 

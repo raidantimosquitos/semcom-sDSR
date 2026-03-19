@@ -91,7 +91,7 @@ class BaseTrainer(ABC):
         return batch
 
     @abstractmethod
-    def _step(self, batch: Any) -> dict[str, float]:
+    def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
         """Perform one training step. Return loss_dict for logging."""
         raise NotImplementedError
 
@@ -111,7 +111,7 @@ class BaseTrainer(ABC):
 
             while self.global_step < n_iterations:
                 batch = self._next_batch()
-                loss_dict = self._step(batch)
+                loss_dict = self._step(batch, self.global_step, n_iterations)
                 self.global_step += 1
 
                 for k, v in loss_dict.items():
