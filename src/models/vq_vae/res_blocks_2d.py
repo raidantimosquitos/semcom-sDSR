@@ -13,11 +13,11 @@ class Residual(nn.Module):
             nn.ReLU(False),
             nn.Conv2d(in_channels=in_channels,
                       out_channels=num_residual_hiddens,
-                      kernel_size=3, stride=1, padding=1, bias=False),
+                      kernel_size=3, stride=1, padding=1, bias=True),
             nn.ReLU(False),
             nn.Conv2d(in_channels=num_residual_hiddens,
                       out_channels=num_hiddens,
-                      kernel_size=1, stride=1, bias=False)
+                      kernel_size=1, stride=1, bias=True)
         )
 
     def forward(self, x):
@@ -34,4 +34,4 @@ class ResidualStack(nn.Module):
     def forward(self, x):
         for i in range(self._num_residual_layers):
             x = self._layers[i](x)
-        return F.relu(x)
+        return x

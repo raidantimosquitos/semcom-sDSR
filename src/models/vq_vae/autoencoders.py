@@ -41,8 +41,8 @@ class VQ_VAE_2Layer(nn.Module):
     """
     Two-layer VQ-VAE for spectrograms (reference VQ-VAE-2 structure).
 
-    - Fine latent: x2/x4 down from input (e.g. 128x320 -> 64x80).
-    - Coarse latent: x8/x16 down from input (e.g. 128x320 -> 16x20).
+    - Fine latent: x4/x4 down from input (e.g. 128x320 -> 32x80).
+    - Coarse latent: x8/x8 down from input (e.g. 128x320 -> 16x40).
     - Coarse codebook: encoder_coarse -> 1x1 conv -> embed_dim -> VQ.
     - Coarse decoder: quantized_coarse -> Decoder (4x up) -> fine grid for conditioning.
     - Fine codebook: concat(encoder_fine, decoded_coarse) -> 1x1 conv -> embed_dim -> VQ.
