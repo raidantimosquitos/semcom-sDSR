@@ -51,20 +51,40 @@ class VQ_VAE_2Layer(nn.Module):
 
     def __init__(
         self,
-        hidden_channels: int,
+        hidden_channels: Union[int, tuple[int, int]],
         num_residual_layers: int,
         num_embeddings: Union[int, tuple[int, int]],
-        embedding_dim: int,
+        embedding_dim: Union[int, tuple[int, int]],
         commitment_cost: float,
         decay: float = 0.0,
         test: bool = False,
     ):
         super().__init__()
         self.test = test
-        self.embedding_dim = embedding_dim
-        self.hidden_channels = hidden_channels
+
+        if isinstance(hidden_channels, int):
+            hidden_channels_coarse = hidden_channels_fine = hidden_channels
+            self.hidden_channels_coarse = hidden_channels_coarse
+            self.hidden_channels_fine = hidden_channels_fine
+            self.res_channels_coarse = hidden_channels // 2
+            self.res_channels_fine = hidden_channels // 2
+        else:
+            hidden_channels_coarse, hidden_channels_fine = hidden_channels
+            self.hidden_channels_coarse = hidden_channels_coarse
+            self.hidden_channels_fine = hidden_channels_fine
+            self.res_channels_coarse = hidden_channels_coarse // 2
+            self.res_channels_fine = hidden_channels_fine // 2
+
+        if isinstance(embedding_dim, int):
+            embedding_dim_coarse = embedding_dim_fine = embedding_dim
+            self.embedding_dim_coarse = embedding_dim_coarse
+            self.embedding_dim_fine = embedding_dim_fine
+        else:
+            embedding_dim_coarse, embedding_dim_fine = embedding_dim
+            self.embedding_dim_coarse = embedding_dim_coarse
+            self.embedding_dim_fine = embedding_dim_fine
+
         self.num_residual_layers = num_residual_layers
-        self.res_channels = hidden_channels // 2
 
         # Resolve codebook sizes: int -> (coarse, fine) same; tuple -> (coarse, fine) explicit
         if isinstance(num_embeddings, int):
@@ -79,44 +99,46 @@ class VQ_VAE_2Layer(nn.Module):
         # Encoders (reference: first from image, rest from previous level output)
         self._encoder_fine = EncoderFine(
             in_channels=1,
-            num_hiddens=hidden_channels,
+            num_hiddens=self.hidden_channels_fine,
             num_residual_layers=num_residual_layers,
-            num_residual_hiddens=hidden_channels // 2
+            num_residual_hiddens=self.res_channels_fine
         )
         self._encoder_coarse = EncoderCoarse(
-            in_channels=hidden_channels,
-            num_hiddens=hidden_channels,
+            in_channels=self.hidden_channels_fine,
+            num_hiddens=self.hidden_channels_coarse,
             num_residual_layers=num_residual_layers * 2,
-            num_residual_hiddens=hidden_channels
+            num_residual_hiddens=self.res_channels_coarse
         )
 
         # Codebook input channels: coarse = hidden_channels; fine = hidden_channels + embed_dim (conditioned on decoded coarse)
-        self._pre_vq_conv_coarse = nn.Conv2d(hidden_channels*2, embedding_dim*2, kernel_size=1, stride=1)
+        self._pre_vq_conv_coarse = nn.Conv2d(self.hidden_channels_coarse, self.embedding_dim_coarse, kernel_size=1, stride=1)
+
         self._pre_vq_conv_fine = nn.Conv2d(
-            hidden_channels*2, embedding_dim, kernel_size=1, stride=1
+            self.hidden_channels_fine + self.hidden_channels_fine, self.embedding_dim_fine, kernel_size=1, stride=1
         )
 
         # Vector quantizers
         self._vq_coarse = VectorQuantizerEMA(
-            num_embeddings_coarse, embedding_dim*2, commitment_cost, decay
+            num_embeddings_coarse, self.embedding_dim_coarse, commitment_cost, decay
         )
         self._vq_fine = VectorQuantizerEMA(
-            num_embeddings_fine, embedding_dim, commitment_cost, decay
+            num_embeddings_fine, self.embedding_dim_fine, commitment_cost, decay
         )
 
         # Coarse decoder: quantized (embed_dim) at coarse res -> decoded at fine res (embed_dim). Upscale must match coarse downscale (scaling_rates[1]) so output matches f_fine grid.
         self._decoder_coarse = DecoderCoarse(
-            in_channels=embedding_dim*2,
-            num_hiddens=hidden_channels,
+            in_channels=self.embedding_dim_coarse,
+            num_hiddens=self.hidden_channels_coarse,
+            out_channels=self.hidden_channels_fine,
             num_residual_layers=num_residual_layers,
-            num_residual_hiddens=hidden_channels
+            num_residual_hiddens=self.res_channels_coarse
         )
         # Fine decoder: concat(upscaled_coarse, quantized_fine) -> image
         self._decoder_fine = DecoderFine(
-            in_channels=embedding_dim*2 + embedding_dim, # 256 channels from q_coarse and 128 channels from q_fine
-            num_hiddens=hidden_channels,
+            in_channels=self.embedding_dim_fine + self.embedding_dim_coarse,
+            num_hiddens=self.hidden_channels_fine,
             num_residual_layers=num_residual_layers,
-            num_residual_hiddens=hidden_channels // 2
+            num_residual_hiddens=self.res_channels_fine
         )
 
     def forward(
@@ -265,10 +287,10 @@ if __name__ == "__main__":
 
     # Different codebook sizes: coarse smaller, fine larger
     m = VQ_VAE_2Layer(
-        hidden_channels=128,
+        hidden_channels=(256,64),
         num_residual_layers=2,
         num_embeddings=(1024, 4096),
-        embedding_dim=128,
+        embedding_dim=(256,64),
         commitment_cost=0.25,
         decay=0.99,
     ).to(device)

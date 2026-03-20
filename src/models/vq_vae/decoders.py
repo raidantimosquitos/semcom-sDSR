@@ -65,21 +65,21 @@ class DecoderCoarse(nn.Module):
     Input (emb_dim, n_mels//8, T//8) e.g. (16, 40);
     output (num_hiddens, n_mels//4, T//4) e.g. (32, 80).
     """
-    def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
+    def __init__(self, in_channels, num_hiddens, out_channels, num_residual_layers, num_residual_hiddens):
         super(DecoderCoarse, self).__init__()
 
         self._conv_1 = nn.Conv2d(in_channels=in_channels,
-                                 out_channels=num_hiddens*2,
+                                 out_channels=num_hiddens,
                                  kernel_size=3,
                                  stride=1, padding=1)
 
-        self._residual_stack = ResidualStack(in_channels=num_hiddens*2,
-                                             num_hiddens=num_hiddens*2,
+        self._residual_stack = ResidualStack(in_channels=num_hiddens,
+                                             num_hiddens=num_hiddens,
                                              num_residual_layers=num_residual_layers,
                                              num_residual_hiddens=num_residual_hiddens)
 
-        self._conv_trans_1 = nn.ConvTranspose2d(in_channels=num_hiddens*2,
-                                                out_channels=num_hiddens,
+        self._conv_trans_1 = nn.ConvTranspose2d(in_channels=num_hiddens,
+                                                out_channels=out_channels,
                                                 kernel_size=4,
                                                 stride=2, padding=1)
 
