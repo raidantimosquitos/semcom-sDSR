@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer, embedding_dim: int, hidden_channels: int) -> sDSR:
+def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer, embedding_dim: Tuple[int, int], hidden_channels: Tuple[int, int]) -> sDSR:
     cfg = sDSRConfig(
         embedding_dim=embedding_dim,
         hidden_channels=hidden_channels,
@@ -142,9 +142,6 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         root=args.data_path,
         machine_type=args.machine_type,
         machine_id=args.machine_id,
-        norm_mean=norm_mean,
-        norm_std=norm_std,
-        standardize=norm_mean is None,
     )
     _, _, n_mels, T = train_ds.data.shape
 
@@ -153,22 +150,22 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         machine_type=args.machine_type,
         target_T=train_ds.target_T,
         machine_id=args.machine_id,
-        norm_mean=norm_mean,
-        norm_std=norm_std,
     )
 
     # Architecture from checkpoint (same as training); fallback for old checkpoints
-    num_embeddings_coarse = stage1_ckpt.get("num_embeddings_coarse", stage1_ckpt.get("num_embeddings_top"))
-    num_embeddings_fine = stage1_ckpt.get("num_embeddings_fine", stage1_ckpt.get("num_embeddings_bot"))
-    embedding_dim = stage1_ckpt["embedding_dim"]
-    hidden_channels = stage1_ckpt["hidden_channels"]
-    num_residual_layers = stage1_ckpt.get("num_residual_layers", 2)
+    num_embeddings_coarse = stage1_ckpt["num_embeddings_coarse"]
+    num_embeddings_fine = stage1_ckpt["num_embeddings_fine"]
+    embedding_dim_coarse = stage1_ckpt["embedding_dim_coarse"]
+    embedding_dim_fine = stage1_ckpt["embedding_dim_fine"]
+    hidden_channels_coarse = stage1_ckpt["hidden_channels_coarse"]
+    hidden_channels_fine = stage1_ckpt["hidden_channels_fine"]
+    num_residual_layers = stage1_ckpt["num_residual_layers"]
     # Stage 1: encoder, codebook (VQ coarse/fine), and General Object Decoder
     vq_vae = VQ_VAE_2Layer(
-        hidden_channels=hidden_channels,
+        hidden_channels=(hidden_channels_coarse, hidden_channels_fine),
         num_residual_layers=num_residual_layers,
         num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
-        embedding_dim=embedding_dim,
+        embedding_dim=(embedding_dim_coarse, embedding_dim_fine),
         commitment_cost=0.25,
         decay=0.99,
     )
@@ -178,7 +175,12 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
     vq_vae.load_state_dict(state)
 
     # Full sDSR: Stage 1 modules (frozen in training) + Stage 2 modules
-    model = build_s_dsr(n_mels, T, vq_vae, embedding_dim, hidden_channels)
+    model = build_s_dsr(
+        n_mels, T, 
+        vq_vae=vq_vae, 
+        embedding_dim=(embedding_dim_coarse, embedding_dim_fine), 
+        hidden_channels=(hidden_channels_coarse, hidden_channels_fine)
+        )
 
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     stage2_state = dict(stage2["model_state_dict"])
