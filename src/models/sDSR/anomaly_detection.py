@@ -1,7 +1,7 @@
 """
 Anomaly Detection Module for sDSR.
 
-UNet: [X_G, X_S] (2 ch) -> segmentation logits (2 ch: normal vs anomaly).
+UNet: [X_G, X_S, abs_diff] (3 ch) -> segmentation logits (2 ch: normal vs anomaly).
 Trained with Focal loss during stage 2.
 """
 
@@ -12,15 +12,15 @@ import torch.nn as nn
 
 class AnomalyDetectionModule(nn.Module):
     """
-    UNet: [X_specific, X_general] -> segmentation logits.
+    UNet: [X_specific, X_general, abs_diff] -> segmentation logits.
 
-    Input: (B, 6, n_mels, T) — concatenation of general and object-specific reconstructions
+    Input: (B, 1, n_mels, T) — concatenation of general and object-specific reconstructions
     Output: (B, 2, n_mels, T) — logits (normal vs anomaly)
     """
 
     def __init__(
         self,
-        in_channels: int = 6,
+        in_channels: int = 3,
         out_channels: int = 2,
         base_width: int = 64,
     ) -> None:
@@ -32,16 +32,17 @@ class AnomalyDetectionModule(nn.Module):
         self,
         x_specific: torch.Tensor,
         x_general: torch.Tensor,
+        abs_diff: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
-            x_specific: (B, 3, n_mels, T) object-specific reconstruction (anomaly-free)
-            x_general: (B, 3, n_mels, T) general reconstruction (anomalies preserved)
-
+            x_specific: (B, 1, n_mels, T) object-specific reconstruction (anomaly-free)
+            x_general: (B, 1, n_mels, T) general reconstruction (anomalies preserved)
+            abs_diff: (B, 1, n_mels, T) absolute difference between x_specific and x_general
         Returns:
             logits: (B, 2, n_mels, T) segmentation logits [normal, anomaly]
         """
-        x = torch.cat([x_specific, x_general], dim=1)
+        x = torch.cat([x_specific, x_general, abs_diff], dim=1)
         b1, b2, b3, b4 = self.unet_enc(x)
         return self.unet_dec(b1, b2, b3, b4)
 

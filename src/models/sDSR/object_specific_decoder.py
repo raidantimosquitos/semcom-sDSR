@@ -8,7 +8,7 @@ Trained with L2 loss during stage 2.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Tuple
 
 import torch
 import torch.nn as nn
@@ -30,25 +30,26 @@ class ObjectSpecificDecoder(nn.Module):
 
     def __init__(
         self,
-        embedding_dim: int,
-        hidden_channels: int,
+        embedding_dim: Tuple[int, int],
+        hidden_channels: Tuple[int, int],
         num_residual_layers: int,
         use_subspace_restriction: bool = True,
     ) -> None:
         super().__init__()
-        self._embedding_dim = embedding_dim
+        self._embedding_dim_coarse, self._embedding_dim_fine = embedding_dim
+        self._hidden_channels_coarse, self._hidden_channels_fine = hidden_channels
         self._use_subspace_restriction = use_subspace_restriction
 
         if use_subspace_restriction:
-            self._subspace_coarse = SubspaceRestrictionModule(embedding_size=embedding_dim)
-            self._subspace_fine = SubspaceRestrictionModule(embedding_size=embedding_dim)
+            self._subspace_coarse = SubspaceRestrictionModule(embedding_size=self._embedding_dim_coarse)
+            self._subspace_fine = SubspaceRestrictionModule(embedding_size=self._embedding_dim_fine)
         else:
             self._subspace_coarse = None
             self._subspace_fine = None
 
         self.spectrogram_reconstruction_network = SpectrogramReconstructionNetwork(
-            in_channels=2 * embedding_dim,
-            hidden_channels=hidden_channels,
+            in_channels=self._embedding_dim_coarse + self._embedding_dim_fine,
+            hidden_channels=self._hidden_channels_coarse + self._hidden_channels_fine,
             num_residual_layers=num_residual_layers,
         )
 
@@ -119,7 +120,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
         num_residual_layers: int,
     ) -> None:
         super().__init__()
-        self._in_channels = in_channels
+        self._in_channels = in_channels 
         norm_layer = nn.InstanceNorm2d
         half = max(1, hidden_channels // 2)
 
@@ -164,7 +165,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1,
         )
         self._conv_trans_2 = nn.ConvTranspose2d(
-            hidden_channels, 3, kernel_size=4, stride=2, padding=1,
+            hidden_channels, 1, kernel_size=4, stride=2, padding=1,
         )
 
     def forward(

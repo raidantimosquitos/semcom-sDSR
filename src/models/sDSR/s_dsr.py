@@ -8,7 +8,7 @@ decoder, anomaly map generation, anomaly generation, and anomaly detection modul
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Tuple
 
 import torch
 import torch.nn as nn
@@ -25,8 +25,8 @@ from .anomaly_detection import AnomalyDetectionModule
 class sDSRConfig:
     """Configuration for sDSR model."""
 
-    embedding_dim: int = 64
-    hidden_channels: int = 64
+    embedding_dim: Tuple[int, int] = (256, 64)
+    hidden_channels: Tuple[int, int] = (256, 64)
     num_residual_layers: int = 2
     n_mels: int = 128
     T: int = 320
@@ -75,9 +75,9 @@ class sDSR(nn.Module):
             use_subspace_restriction=cfg.use_subspace_restriction,
         )
         self._anomaly_detection = AnomalyDetectionModule(
-            in_channels=6,
+            in_channels=3,
             out_channels=2,
-            base_width=cfg.hidden_channels,
+            base_width=128,
         )
 
         # Anomaly generation (training only): codebook replacement using dataset-provided mask
@@ -129,7 +129,8 @@ class sDSR(nn.Module):
             self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
-        m_out = self._anomaly_detection(x_specific, x_general.detach())
+        abs_diff = torch.abs(x_specific - x_general.detach())
+        m_out = self._anomaly_detection(x_specific, x_general.detach(), abs_diff)
         if return_intermediates:
             return m_out, x_general, x_specific
         return m_out
@@ -158,7 +159,8 @@ class sDSR(nn.Module):
             self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
-        m_out = self._anomaly_detection(x_specific, x_general.detach())
+        abs_diff = torch.abs(x_specific - x_general.detach())
+        m_out = self._anomaly_detection(x_specific, x_general.detach(), abs_diff)
         if return_intermediates:
             return m_out, x_general, x_specific
         return m_out
@@ -230,7 +232,8 @@ class sDSR(nn.Module):
             return_aux=True,
         )
         x_specific, aux = out_dec
-        m_out = self._anomaly_detection(x_specific, x_general.detach())
+        abs_diff = torch.abs(x_specific - x_general.detach())
+        m_out = self._anomaly_detection(x_specific, x_general.detach(), abs_diff)
 
         # GT mask for focal loss: M_gt at spectrogram shape (same as m_out spatial dims)
         result = {
@@ -261,16 +264,16 @@ if __name__ == "__main__":
 
     device = "cuda" if _torch.cuda.is_available() else "cpu"
     vq = VQ_VAE_2Layer(
-        hidden_channels=128,
+        hidden_channels=(256, 64),
         num_residual_layers=2,
         num_embeddings=(4096, 4096),
-        embedding_dim=128,
+        embedding_dim=(256, 64),
         commitment_cost=0.25,
         decay=0.99,
     )
-    cfg = sDSRConfig(n_mels=128, T=320, embedding_dim=128, hidden_channels=128)
+    cfg = sDSRConfig(n_mels=128, T=320, embedding_dim=(256, 64), hidden_channels=(256, 64))
     model = sDSR(vq, cfg).to(device)
-    x = _torch.randn(2, 3, 128, 320, device=device)
+    x = _torch.randn(2, 1, 128, 320, device=device)
 
     print("sDSR pipeline shapes (inference):")
     print("-" * 50)
@@ -288,17 +291,18 @@ if __name__ == "__main__":
         model._vq_vae._vq_coarse, model._vq_vae._vq_fine,
         return_aux=False,
     )
+    abs_diff = torch.abs(x_specific - x_general.detach())
     _print_shape("x_specific (object-specific reconstruction)", x_specific)
 
-    m_out = model._anomaly_detection(x_specific, x_general.detach())
+    m_out = model._anomaly_detection(x_specific, x_general.detach(), abs_diff)
     _print_shape("m_out (segmentation logits)", m_out)
     print("-" * 50)
 
     m_out = model(x)
     assert m_out.shape == (2, 2, 128, 320)
     m_out, x_general, x_specific = model(x, return_intermediates=True)
-    assert x_general.shape == (2, 3, 128, 320)
-    assert x_specific.shape == (2, 3, 128, 320)
+    assert x_general.shape == (2, 1, 128, 320)
+    assert x_specific.shape == (2, 1, 128, 320)
 
     print("Training path shapes:")
     print("-" * 50)
@@ -314,6 +318,6 @@ if __name__ == "__main__":
     print("-" * 50)
 
     assert out["m_out"].shape == (2, 2, 128, 320)
-    assert out["x_specific"].shape == (2, 3, 128, 320)
+    assert out["x_specific"].shape == (2, 1, 128, 320)
     assert out["M"].shape == (2, 1, 128, 320), "M (loss target) must be spectrogram shape"
     print("sDSR smoke test passed.")
