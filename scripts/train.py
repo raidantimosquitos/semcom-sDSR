@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Tuple
+from typing import Literal, Tuple
 
 import torch
 from torch.utils.data import Subset
@@ -73,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     s2.add_argument("--lambda_sub", type=float, default=1.0, help="Weight for subspace restriction loss L2(F̃, Q)")
     s2.add_argument("--anomaly_strategy", type=str, default="both", choices=["perlin", "machine_specific", "both"], help="Synthetic anomaly mask strategy, perlin noise, machine-specific masks or both")
     s2.add_argument("--fine_only_prob", type=float, default=0.65, help="Fraction of anomaly samples that inject at fine level only; rest inject at both levels (default 0.65 = 65%% fine-only, 35%% both)")
+    s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
     s2.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
     # Full
@@ -112,6 +113,7 @@ def build_s_dsr(
     T: int,
     hidden_channels: Tuple[int, int],
     embedding_dim: Tuple[int, int],
+    anomaly_sampling: Literal["distant", "uniform"] = "distant",
     fine_only_prob: float = 0.65,
 ) -> sDSR:
     cfg = sDSRConfig(
@@ -120,7 +122,7 @@ def build_s_dsr(
         num_residual_layers=2,
         n_mels=n_mels,
         T=T,
-        anomaly_sampling="uniform",
+        anomaly_sampling=anomaly_sampling,
         fine_only_prob=fine_only_prob,
     )
     return sDSR(vq_vae, cfg)
@@ -225,6 +227,7 @@ def run_stage2(args: argparse.Namespace) -> None:
         hidden_channels=(hidden_channels_coarse, hidden_channels_fine),
         embedding_dim=(embedding_dim_coarse, embedding_dim_fine),
         fine_only_prob=getattr(args, "fine_only_prob", 0.65),
+        anomaly_sampling=args.anomaly_sampling,
     )
     trainer = Stage2Trainer(
         model=model,
