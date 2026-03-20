@@ -130,9 +130,29 @@ class Stage2Trainer(BaseTrainer):
             
             if step % 100 == 0:
                 abs_diff = torch.abs(out["x_specific"] - out["x_general"].detach())
-                mean_abs_diff_pos = abs_diff[M_gt > 0.5].mean()
-                mean_abs_diff_neg = abs_diff[M_gt <= 0.5].mean()
-                print(f"Mean bs diff pos: {mean_abs_diff_pos:.4f} vs neg: {mean_abs_diff_neg:.4f}(pos must be notably higher)")
+
+                mask_pos = (M_gt > 0.5)                       # (B, 1, H, W) bool/float
+                pos_count = mask_pos.sum(dim=(2,3), keepdim=True).clamp(min=1)   # (B, 1, 1, 1)
+
+                abs_pos_sum = (abs_diff * mask_pos).sum(dim=(2,3), keepdim=True)     # (B, 1, 1, 1)
+                abs_neg_sum = (abs_diff * (~mask_pos)).sum(dim=(2,3), keepdim=True)
+
+                mean_abs_diff_pos_per_sample = abs_pos_sum / pos_count               # (B,1,1,1)
+                mean_abs_diff_neg_per_sample = abs_neg_sum / (~mask_pos).sum(dim=(2,3), keepdim=True).clamp(min=1)
+
+                print(f"Mean bs diff pos: {mean_abs_diff_pos_per_sample.mean():.4f} vs neg: {mean_abs_diff_neg_per_sample.mean():.4f}(pos must be notably higher)")
+
+                anomaly_logit = m_out[:, 1:2, :, :]          # (B, 1, H, W)
+
+                anom_pos = (anomaly_logit * mask_pos).sum(dim=(2,3), keepdim=True) / pos_count
+                anom_neg = (anomaly_logit * (~mask_pos)).sum(dim=(2,3), keepdim=True) / (~mask_pos).sum(dim=(2,3), keepdim=True).clamp(min=1)
+
+                mean_anom_pos = anom_pos.mean()
+                mean_anom_neg = anom_neg.mean()
+                
+                print(f"Mean anomaly logit pos: {mean_anom_pos:.4f} vs neg: {mean_anom_neg:.4f}(pos must be notably higher)")
+
+                
 
             # Reconstruction: L2(x, x_specific) on full batch (normal + anomalous).
             # For normal samples: object decoder learns x_specific ≈ x. For anomalous:
