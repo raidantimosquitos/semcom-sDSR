@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Train stage2 for each machine type: load best stage1 (all types), 10k iter, batch 16.
-# After each machine type, upload stage2 checkpoints to GCS.
+# Train stage2 for each machine type with multiple anomaly strategies:
+# load best stage1 (all types), 10k iter, batch 16.
+# After each run, upload stage2 checkpoints to GCS.
 # Prerequisite: dataset and stage1 best checkpoint available (e.g. from experiment_grid.sh).
 
 set -euo pipefail
@@ -28,6 +29,9 @@ fi
 # All 6 DCASE2020 Task 2 machine types for stage2
 MACHINE_TYPES=(fan pump slider valve ToyCar ToyConveyor)
 
+# Anomaly mask strategies to train stage2 with
+ANOMALY_STRATEGIES=(machine_specific perlin both)
+
 # Optional: space-separated machine_ids (e.g. "id_00 id_01 id_02"). When set, train/eval per (machine_type, machine_id)
 # with other machine_ids of same type used as adversarial samples (mask all 1s). When unset, one run per machine_type (all IDs).
 MACHINE_IDS="${MACHINE_IDS:-}"
@@ -46,72 +50,60 @@ if [[ ! -f "$STAGE1_BEST" ]]; then
   exit 1
 fi
 
-if [[ -n "$MACHINE_IDS" ]]; then
-  # Per-machine_id runs: train and eval with --machine_id; adversarial samples from other IDs (same type)
-  for machine_type in "${MACHINE_TYPES[@]}"; do
-    for machine_id in $MACHINE_IDS; do
-      echo "=============================================="
-      echo "Stage2: machine_type=$machine_type machine_id=$machine_id ($N_ITER iter, bs=$BATCH_SIZE)"
-      echo "=============================================="
-
-      python scripts/train.py stage2 \
-        --data_path "$DATA_PATH" \
-        --machine_type "$machine_type" \
-        --machine_id "$machine_id" \
-        --ckpt_dir "$CKPT_DIR" \
-        --stage1_ckpt "$STAGE1_BEST" \
-        --n_iter "$N_ITER" \
-        --batch_size "$BATCH_SIZE"
-
-      python scripts/evaluate.py \
-        --data_path "$DATA_PATH" \
-        --machine_type "$machine_type" \
-        --machine_id "$machine_id" \
-        --stage1_ckpt "$STAGE1_BEST" \
-        --stage2_ckpt "$CKPT_DIR/stage2/${machine_type}/${machine_id}/stage2_${machine_type}_best.pt" \
-        --output "$CKPT_DIR/stage2/${machine_type}/${machine_id}/results/results.csv"
-
-      stage2_dir="${CKPT_DIR}/stage2/${machine_type}/${machine_id}"
-      if [[ -d "$stage2_dir" ]]; then
-        dest="${GCS_CHECKPOINTS}/${STAMP}/${machine_type}/${machine_id}/"
-        echo "Uploading $stage2_dir -> $dest"
-        gsutil -m cp -r "$stage2_dir" "$dest"
-      else
-        echo "Warning: stage2 dir not found at $stage2_dir, skipping upload"
-      fi
-    done
-  done
-else
-  # One run per machine_type (all machine_ids)
-  for machine_type in "${MACHINE_TYPES[@]}"; do
+# One run per (machine_type, anomaly_strategy) (all machine_ids)
+for machine_type in "${MACHINE_TYPES[@]}"; do
+  for anomaly_strategy in "${ANOMALY_STRATEGIES[@]}"; do
     echo "=============================================="
-    echo "Stage2: machine_type=$machine_type ($N_ITER iter, bs=$BATCH_SIZE)"
+    echo "Stage2: machine_type=$machine_type anomaly_strategy=$anomaly_strategy ($N_ITER iter, bs=$BATCH_SIZE)"
     echo "=============================================="
+
+    # Isolate checkpoints/results per strategy so best checkpoints don't overwrite
+    stage2_dir="${CKPT_DIR}/stage2/${machine_type}/${anomaly_strategy}"
+    mkdir -p "$stage2_dir"
 
     python scripts/train.py stage2 \
       --data_path "$DATA_PATH" \
       --machine_type "$machine_type" \
-      --ckpt_dir "$CKPT_DIR" \
+      --ckpt_dir "$stage2_dir" \
       --stage1_ckpt "$STAGE1_BEST" \
       --n_iter "$N_ITER" \
-      --batch_size "$BATCH_SIZE"
+      --batch_size "$BATCH_SIZE" \
+      --fine_only_prob 0.0 \
+      --anomaly_sampling "uniform" \
+      --anomaly_strategy "$anomaly_strategy"
 
+    stage2_ckpt="${stage2_dir}/stage2_${machine_type}_best.pt"
     python scripts/evaluate.py \
       --data_path "$DATA_PATH" \
       --machine_type "$machine_type" \
       --stage1_ckpt "$STAGE1_BEST" \
-      --stage2_ckpt "$CKPT_DIR/stage2/${machine_type}/stage2_${machine_type}_best.pt" \
-      --output "$CKPT_DIR/stage2/${machine_type}/results/results.csv"
+      --stage2_ckpt "$stage2_ckpt" \
+      --output "${stage2_dir}/results/results.csv" \
+      --no_score_norm
 
-    stage2_dir="${CKPT_DIR}/stage2/${machine_type}"
     if [[ -d "$stage2_dir" ]]; then
-      dest="${GCS_CHECKPOINTS}/${STAMP}/${machine_type}/"
-      echo "Uploading $stage2_dir -> $dest"
-      gsutil -m cp -r "$stage2_dir" "$dest"
+      # Upload only training logs + evaluation results (not model weights).
+      # - Training log:   ${stage2_dir}/train.log
+      # - Eval results:  ${stage2_dir}/results/
+      dest="${GCS_CHECKPOINTS}/${STAMP}/${machine_type}/${anomaly_strategy}"
+
+      if [[ -f "$stage2_dir/train.log" ]]; then
+        echo "Uploading $stage2_dir/train.log -> ${dest}/train.log"
+        gsutil -m cp "$stage2_dir/train.log" "${dest}/train.log"
+      else
+        echo "Warning: train.log not found at $stage2_dir/train.log, skipping"
+      fi
+
+      if [[ -d "$stage2_dir/results" ]]; then
+        echo "Uploading $stage2_dir/results -> ${dest}/results"
+        gsutil -m cp -r "$stage2_dir/results" "${dest}/results"
+      else
+        echo "Warning: results dir not found at $stage2_dir/results, skipping"
+      fi
     else
       echo "Warning: stage2 dir not found at $stage2_dir, skipping upload"
     fi
   done
-fi
+done
 
 echo "Stage2 finished. Checkpoints uploaded under ${GCS_CHECKPOINTS}/${STAMP}/"
