@@ -56,7 +56,7 @@ class VQ_VAE_2Layer(nn.Module):
         num_embeddings: Union[int, tuple[int, int]],
         embedding_dim: Union[int, tuple[int, int]],
         commitment_cost: float,
-        decay: float = 0.0,
+        decay: float = 0.99,
         test: bool = False,
     ):
         super().__init__()
