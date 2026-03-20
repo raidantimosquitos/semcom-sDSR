@@ -256,7 +256,7 @@ def run_full(args: argparse.Namespace) -> None:
         ckpt_every=args.ckpt_every,
         no_amp=args.no_amp,
         n_iter=args.stage1_iter,
-        lr=1e-4,
+        lr=2e-4,
         lambda_recon=1.0,
         resume=None,
     )
