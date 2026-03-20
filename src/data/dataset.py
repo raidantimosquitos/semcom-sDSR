@@ -12,7 +12,7 @@ import torchaudio.transforms as T
 from torch.utils.data import DataLoader, Dataset
 
 from ..utils.anomalies import AnomalyMapGenerator
-from ..utils.audio import load_mel_for_dir, log_mel_to_rgb
+from ..utils.audio import load_mel_for_dir
 
 class DCASE2020Task2LogMelDataset(Dataset):
     """
@@ -20,9 +20,9 @@ class DCASE2020Task2LogMelDataset(Dataset):
     Single machine type or multiple (machine_types); machine_id parsed from filenames (normal_id_XX_....wav).
     All training samples are normal (no anomalies), so label is always 0..    
     
-    For multiple types: (1) each type is truncated to 313 samples; 
-    (2) result is padded to the next multiple of 16. 
-    For a single type, T is padded to a multiple of 16.
+    For multiple types: (1) each type is truncated to 313 samples;
+    (2) optional standardization uses only unpadded content (mean/std over T=313);
+    (3) then zero-pad to the next multiple of 16 (320). Same order for a single type.
 
     __getitem__ returns (spectrogram, label, machine_id) with label 0 = normal.
 
@@ -53,13 +53,14 @@ class DCASE2020Task2LogMelDataset(Dataset):
         top_db:        float = 80.0,
         machine_id: str | None = None,
         include_test: bool = True,
+        standardize: bool = True,
     ):
         if machine_types is not None:
             if machine_id is not None:
                 raise ValueError("machine_id filter only applies to single machine_type")
-            self._init_multi(root, machine_types, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, include_test)
+            self._init_multi(root, machine_types, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, include_test, standardize)
         elif machine_type is not None:
-            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, machine_id)
+            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, machine_id, standardize)
         else:
             raise ValueError("Provide either machine_type or machine_types")
 
@@ -74,7 +75,10 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_min: float,
         f_max: float,
         top_db: float,
-        machine_id: str | None = None
+        machine_id: str | None = None,
+        standardize: bool = True,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -90,22 +94,30 @@ class DCASE2020Task2LogMelDataset(Dataset):
         audio_dir = Path(root) / machine_type / "train"
         spectrograms, machine_id_strs = load_mel_for_dir(audio_dir, sample_rate, self.mel_transform, self.to_db, self._FILENAME_RE)
 
-
         # Truncate to 313 samples (length of the shortest spectrogram)
         spectrograms = [s[..., :313] for s in spectrograms]
+        stacked = torch.stack(spectrograms)
 
-        # Pad with zeros to the next multiple of 16, truncate to 320 if longer
         target_T = ((313 + 15) // 16) * 16  # 320
 
-        padded = []
-        for s in spectrograms:
-            pad = target_T - s.shape[-1]
-            if pad > 0:
-                s = torch.nn.functional.pad(s, (0, pad), mode="constant", value=0.0)
-            padded.append(s)
-        spectrograms = torch.stack(padded)
-        
-        self.data = spectrograms
+        eps = 1e-6
+        if norm_mean is not None and norm_std is not None:
+            self.norm_mean = norm_mean.detach().clone()
+            self.norm_std = norm_std.detach().clone()
+            stacked = (stacked - self.norm_mean) / (self.norm_std + eps)
+        elif standardize:
+            self.norm_mean = stacked.mean(dim=(0, 2, 3), keepdim=True)
+            self.norm_std = stacked.std(dim=(0, 2, 3), keepdim=True).clamp_min(eps)
+            stacked = (stacked - self.norm_mean) / self.norm_std
+        else:
+            self.norm_mean = None
+            self.norm_std = None
+
+        pad = target_T - stacked.shape[-1]
+        if pad > 0:
+            stacked = F.pad(stacked, (0, pad), mode="constant", value=0.0)
+
+        self.data = stacked
         self.target_T = target_T
         self.machine_ids = sorted(set(machine_id_strs))
         self._machine_id_strs = machine_id_strs
@@ -139,7 +151,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_min: float,
         f_max: float,
         top_db: float,
-        include_test: bool = True
+        include_test: bool = True,
+        standardize: bool = True,
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -155,10 +168,10 @@ class DCASE2020Task2LogMelDataset(Dataset):
         root_path = Path(root)
         all_spectrograms: list[torch.Tensor] = []
         all_machine_id_strs: list[str] = []
-        orig_lengths: list[int] = []
 
-        # 1. Load each type at native length; record original T per machine type.
-        # When include_test=True, also load from test/ (normal + anomaly) and combine with train/.
+        target_T = ((313 + 15) // 16) * 16  # 320
+
+        # 1. Load each type; when include_test=True, also load test/ (normal + anomaly).
         for mt in sorted(machine_types):
             train_dir = root_path / mt / "train"
             spectrograms, machine_id_strs = load_mel_for_dir(
@@ -175,23 +188,25 @@ class DCASE2020Task2LogMelDataset(Dataset):
 
             # Truncate to 313 samples (length of the shortest spectrogram)
             spectrograms = [s[..., :313] for s in spectrograms]
-
-            # Pad ALL to the next multiple of 16 (320)
-            target_T = ((313 + 15) // 16) * 16  # 320
-            padded = []
-            for s in spectrograms:
-                pad = target_T - s.shape[-1]
-                if pad > 0:
-                    s = torch.nn.functional.pad(s, (0, pad), mode="constant", value=0.0)
-                    # or: s = torch.cat([s, s.new_zeros(s.shape[0], s.shape[1], pad)], dim=-1)
-                padded.append(s)
-            spectrograms = torch.stack(padded)
-
-            orig_lengths.append(spectrograms.shape[-1])
-            all_spectrograms.append(spectrograms)
+            stacked_mt = torch.stack(spectrograms)
+            all_spectrograms.append(stacked_mt)
             all_machine_id_strs.extend(machine_id_strs)
 
         self.data = torch.cat(all_spectrograms, dim=0)
+
+        eps = 1e-6
+        if standardize:
+            self.norm_mean = self.data.mean(dim=(0, 2, 3), keepdim=True)
+            self.norm_std = self.data.std(dim=(0, 2, 3), keepdim=True).clamp_min(eps)
+            self.data = (self.data - self.norm_mean) / self.norm_std
+        else:
+            self.norm_mean = None
+            self.norm_std = None
+
+        pad = target_T - self.data.shape[-1]
+        if pad > 0:
+            self.data = F.pad(self.data, (0, pad), mode="constant", value=0.0)
+
         self.target_T = target_T
         self._machine_id_strs = all_machine_id_strs
         self.machine_ids = sorted(set(self._machine_id_strs))
@@ -326,6 +341,8 @@ class DCASE2020Task2TestDataset(Dataset):
         top_db: float = 80.0,
         target_T: int | None = None,
         machine_id: str | None = None,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
     ):
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -339,6 +356,8 @@ class DCASE2020Task2TestDataset(Dataset):
         self.n_mels = n_mels
         self.sample_rate = sample_rate
         self.target_T = target_T
+        self.norm_mean = norm_mean
+        self.norm_std = norm_std
 
         base = Path(root) / machine_type / "test"
         if not base.exists():
@@ -378,15 +397,16 @@ class DCASE2020Task2TestDataset(Dataset):
         mel = self.mel_transform(wav)
         log_mel = self.to_db(mel).float()  # (1, n_mels, T)
 
-        # Convert to RGB three channels
-        log_mel_rgb = log_mel_to_rgb(log_mel)
+        if self.norm_mean is not None and self.norm_std is not None:
+            log_mel = (log_mel - self.norm_mean) / self.norm_std
+
         T = log_mel.shape[-1]
 
         # Pad with zeros up to target_T
         if T < self.target_T:
-            log_mel_rgb = torch.cat([log_mel_rgb, torch.zeros(3, log_mel_rgb.shape[1], self.target_T - T)], dim=-1)
+            log_mel = torch.cat([log_mel, torch.zeros(1, log_mel.shape[1], self.target_T - T)], dim=-1)
 
-        return log_mel_rgb, label, machine_id
+        return log_mel, label, machine_id
 
 
 def make_dataloader(dataset: DCASE2020Task2LogMelDataset | DCASE2020Task2TestDataset, batch_size: int = 256) -> DataLoader:
@@ -411,35 +431,34 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     DATA_ROOT = Path("/mnt/ssd/LaCie/dcase2020_task2/dcase2020-task2-dev-dataset")
-    MACHINE_TYPE = "fan"  # single type to keep smoke test light
+    MACHINE_TYPES = ["fan", "valve"]  # single type to keep smoke test light
+    MACHINE_TYPE_TEST = "valve"
     root_str = str(DATA_ROOT)
 
 
     print(f"Dataset root: {DATA_ROOT}")
 
-    dataset = DCASE2020Task2LogMelDataset(root=root_str, machine_type=MACHINE_TYPE)
+    dataset = DCASE2020Task2LogMelDataset(root=root_str, machine_types=MACHINE_TYPES, standardize=True)
     loader = make_dataloader(dataset, batch_size=min(32, len(dataset)))
 
     specs, labels, machine_ids = next(iter(loader))
-    print(f"Train batch shape: {tuple(specs.shape)}  (B, 3, n_mels, T) (R, G, B)")
+    print(f"Train batch shape: {tuple(specs.shape)}  (B, 1, n_mels, T)")
     print(f"Label shape: {tuple(labels.shape)}")
     print(f"Machine IDs (batch): {machine_ids[:3]}...")
-    for c, name in enumerate(["R", "G", "B"]):
-        mn = specs[:, c].min()
-        mx = specs[:, c].max()
-        print(f"{name} range: [{mn:.2f}, {mx:.2f}]")
+    mn = specs.min()
+    mx = specs.max()
+    print(f"Value range: [{mn:.2f}, {mx:.2f}]")
     
     test_dataset = DCASE2020Task2TestDataset(
         root=root_str,
-        machine_type=MACHINE_TYPE,
+        machine_type=MACHINE_TYPE_TEST,
         target_T=dataset.target_T,
     )
     test_loader = make_dataloader(test_dataset, batch_size=min(32, len(test_dataset)))
     specs, labels, machine_ids = next(iter(test_loader))
-    print(f"Test batch shape: {tuple(specs.shape)}  (B, 3, n_mels, T) (R, G, B)")
+    print(f"Test batch shape: {tuple(specs.shape)}  (B, 1, n_mels, T)")
     print(f"Label shape: {tuple(labels.shape)}")
-    for c, name in enumerate(["R", "G", "B"]):
-        mn = specs[:, c].min()
-        mx = specs[:, c].max()
-        print(f"{name} range: [{mn:.2f}, {mx:.2f}]")
+    mn = specs.min()
+    mx = specs.max()
+    print(f"Value range: [{mn:.2f}, {mx:.2f}]")
     print("Smoke test OK.")

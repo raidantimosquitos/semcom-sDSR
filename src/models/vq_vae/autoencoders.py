@@ -78,7 +78,7 @@ class VQ_VAE_2Layer(nn.Module):
 
         # Encoders (reference: first from image, rest from previous level output)
         self._encoder_fine = EncoderFine(
-            in_channels=3,
+            in_channels=1,
             num_hiddens=hidden_channels,
             num_residual_layers=num_residual_layers,
             num_residual_hiddens=hidden_channels // 2
@@ -86,19 +86,19 @@ class VQ_VAE_2Layer(nn.Module):
         self._encoder_coarse = EncoderCoarse(
             in_channels=hidden_channels,
             num_hiddens=hidden_channels,
-            num_residual_layers=num_residual_layers,
-            num_residual_hiddens=hidden_channels // 2
+            num_residual_layers=num_residual_layers * 2,
+            num_residual_hiddens=hidden_channels
         )
 
         # Codebook input channels: coarse = hidden_channels; fine = hidden_channels + embed_dim (conditioned on decoded coarse)
-        self._pre_vq_conv_coarse = nn.Conv2d(hidden_channels, embedding_dim, kernel_size=1, stride=1)
+        self._pre_vq_conv_coarse = nn.Conv2d(hidden_channels*2, embedding_dim*2, kernel_size=1, stride=1)
         self._pre_vq_conv_fine = nn.Conv2d(
-            2*hidden_channels, embedding_dim, kernel_size=1, stride=1
+            hidden_channels*2, embedding_dim, kernel_size=1, stride=1
         )
 
         # Vector quantizers
         self._vq_coarse = VectorQuantizerEMA(
-            num_embeddings_coarse, embedding_dim, commitment_cost, decay
+            num_embeddings_coarse, embedding_dim*2, commitment_cost, decay
         )
         self._vq_fine = VectorQuantizerEMA(
             num_embeddings_fine, embedding_dim, commitment_cost, decay
@@ -106,14 +106,14 @@ class VQ_VAE_2Layer(nn.Module):
 
         # Coarse decoder: quantized (embed_dim) at coarse res -> decoded at fine res (embed_dim). Upscale must match coarse downscale (scaling_rates[1]) so output matches f_fine grid.
         self._decoder_coarse = DecoderCoarse(
-            in_channels=embedding_dim,
+            in_channels=embedding_dim*2,
             num_hiddens=hidden_channels,
             num_residual_layers=num_residual_layers,
-            num_residual_hiddens=hidden_channels // 2
+            num_residual_hiddens=hidden_channels
         )
         # Fine decoder: concat(upscaled_coarse, quantized_fine) -> image
         self._decoder_fine = DecoderFine(
-            in_channels=embedding_dim * 2,
+            in_channels=embedding_dim*2 + embedding_dim, # 256 channels from q_coarse and 128 channels from q_fine
             num_hiddens=hidden_channels,
             num_residual_layers=num_residual_layers,
             num_residual_hiddens=hidden_channels // 2
@@ -263,18 +263,8 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
 
-    # Same codebook size for both (backward compatible)
-    model_same = VQ_VAE_2Layer(
-        hidden_channels=128,
-        num_residual_layers=2,
-        num_embeddings=4096,
-        embedding_dim=128,
-        commitment_cost=0.25,
-        decay=0.99,
-    ).to(device)
-
     # Different codebook sizes: coarse smaller, fine larger
-    model_diff = VQ_VAE_2Layer(
+    m = VQ_VAE_2Layer(
         hidden_channels=128,
         num_residual_layers=2,
         num_embeddings=(1024, 4096),
@@ -283,15 +273,15 @@ if __name__ == "__main__":
         decay=0.99,
     ).to(device)
 
-    x = torch.randn(1, 3, 128, 320, device=device)
+    x = torch.randn(1, 1, 128, 320, device=device)
 
-    for name, m in [("same", model_same), ("diff", model_diff)]:
-        loss_fine, loss_coarse, recon, q_coarse, q_fine, perp_coarse, perp_fine = m(x)
-        assert q_fine.shape[-2:] == (32, 80), f"q_fine shape {q_fine.shape}"
-        assert q_coarse.shape[-2:] == (16, 40), f"q_coarse shape {q_coarse.shape}"
-        assert recon.shape == (1, 3, 128, 320), f"recon shape {recon.shape}"
-        n_params = sum(p.numel() for p in m.parameters() if p.requires_grad)
-        print(f"[{name}] params={n_params:,}  loss_fine={loss_fine.item():.4f}  loss_coarse={loss_coarse.item():.4f}  recon={recon.shape}")
-        print(f"Quantized coarse: {q_coarse.shape}")
-        print(f"Quantized fine: {q_fine.shape}")
+    loss_fine, loss_coarse, recon, q_coarse, q_fine, perp_coarse, perp_fine = m(x)
+    assert q_fine.shape[-2:] == (32, 80), f"q_fine shape {q_fine.shape}"
+    assert q_coarse.shape[-2:] == (16, 40), f"q_coarse shape {q_coarse.shape}"
+    assert recon.shape == (1, 1, 128, 320), f"recon shape {recon.shape}"
+    n_params = sum(p.numel() for p in m.parameters() if p.requires_grad)
+    print(f"[VQ-VAE-2Layer] params={n_params:,}  loss_fine={loss_fine.item():.4f}  loss_coarse={loss_coarse.item():.4f}  recon={recon.shape}")
+    print(f"Quantized coarse: {q_coarse.shape}")
+    print(f"Quantized fine: {q_fine.shape}")
+
     print("Smoke test passed: fine 32x80, coarse 16x40, recon 128x320.")
