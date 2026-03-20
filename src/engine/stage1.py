@@ -149,8 +149,10 @@ class Stage1Trainer(BaseTrainer):
             "n_mels": int(self.dataset.data.shape[2]),
             "num_embeddings_fine": int(self.model.num_embeddings_fine),
             "num_embeddings_coarse": int(self.model.num_embeddings_coarse),
-            "embedding_dim": int(self.model.embedding_dim),
-            "hidden_channels": int(self.model.hidden_channels),
+            "embedding_dim_fine": int(self.model.embedding_dim_fine),
+            "embedding_dim_coarse": int(self.model.embedding_dim_coarse),
+            "hidden_channels_fine": int(self.model.hidden_channels_fine),
+            "hidden_channels_coarse": int(self.model.hidden_channels_coarse),
             "num_residual_layers": int(self.model.num_residual_layers),
         }
         norm_stats = getattr(self.dataset, "norm_stats", None)
