@@ -136,7 +136,6 @@ def run_stage1(args: argparse.Namespace) -> None:
         dataset = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=machine_types[0],
-            standardize=True
         )
         run_name = machine_types[0]
     else:
@@ -145,7 +144,6 @@ def run_stage1(args: argparse.Namespace) -> None:
             root=args.data_path,
             machine_types=machine_types,
             include_test=include_test,
-            standardize=True
         )
         run_name = "+".join(sorted(machine_types))
     _, _, n_mels, T = dataset.data.shape
@@ -176,19 +174,10 @@ def run_stage1(args: argparse.Namespace) -> None:
 
 def run_stage2(args: argparse.Namespace) -> None:
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    norm_mean, norm_std = load_norm_from_stage1_ckpt(ckpt)
-    if norm_mean is None:
-        print(
-            "Warning: stage1 checkpoint has no norm_mean/norm_std; "
-            "fitting standardization on this machine_type train set only (may mismatch multi-type stage1)."
-        )
 
     ds_common = dict(
         root=args.data_path,
         machine_type=args.machine_type,
-        norm_mean=norm_mean,
-        norm_std=norm_std,
-        standardize=norm_mean is None,
     )
     q_vae_dataset = DCASE2020Task2LogMelDataset(
         **ds_common,
