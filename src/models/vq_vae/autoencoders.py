@@ -26,7 +26,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Union
+from typing import Tuple
 
 from .quantizer import VectorQuantizerEMA
 from .encoders import EncoderFine, EncoderCoarse
@@ -51,10 +51,10 @@ class VQ_VAE_2Layer(nn.Module):
 
     def __init__(
         self,
-        hidden_channels: Union[int, tuple[int, int]],
+        hidden_channels: Tuple[int, int],
         num_residual_layers: int,
-        num_embeddings: Union[int, tuple[int, int]],
-        embedding_dim: Union[int, tuple[int, int]],
+        num_embeddings: Tuple[int, int],
+        embedding_dim: Tuple[int, int],
         commitment_cost: float,
         decay: float = 0.99,
         test: bool = False,
@@ -62,39 +62,22 @@ class VQ_VAE_2Layer(nn.Module):
         super().__init__()
         self.test = test
 
-        if isinstance(hidden_channels, int):
-            hidden_channels_coarse = hidden_channels_fine = hidden_channels
-            self.hidden_channels_coarse = hidden_channels_coarse
-            self.hidden_channels_fine = hidden_channels_fine
-            self.res_channels_coarse = hidden_channels // 2
-            self.res_channels_fine = hidden_channels // 2
-        else:
-            hidden_channels_coarse, hidden_channels_fine = hidden_channels
-            self.hidden_channels_coarse = hidden_channels_coarse
-            self.hidden_channels_fine = hidden_channels_fine
-            self.res_channels_coarse = hidden_channels_coarse // 2
-            self.res_channels_fine = hidden_channels_fine // 2
+        hidden_channels_coarse, hidden_channels_fine = hidden_channels
+        self.hidden_channels_coarse = hidden_channels_coarse
+        self.hidden_channels_fine = hidden_channels_fine
+        self.res_channels_coarse = hidden_channels_coarse // 2
+        self.res_channels_fine = hidden_channels_fine // 2
 
-        if isinstance(embedding_dim, int):
-            embedding_dim_coarse = embedding_dim_fine = embedding_dim
-            self.embedding_dim_coarse = embedding_dim_coarse
-            self.embedding_dim_fine = embedding_dim_fine
-        else:
-            embedding_dim_coarse, embedding_dim_fine = embedding_dim
-            self.embedding_dim_coarse = embedding_dim_coarse
-            self.embedding_dim_fine = embedding_dim_fine
+
+        embedding_dim_coarse, embedding_dim_fine = embedding_dim
+        self.embedding_dim_coarse = embedding_dim_coarse
+        self.embedding_dim_fine = embedding_dim_fine
 
         self.num_residual_layers = num_residual_layers
 
-        # Resolve codebook sizes: int -> (coarse, fine) same; tuple -> (coarse, fine) explicit
-        if isinstance(num_embeddings, int):
-            num_embeddings_coarse = num_embeddings_fine = num_embeddings
-            self.num_embeddings_fine = num_embeddings_fine
-            self.num_embeddings_coarse = num_embeddings_coarse
-        else:
-            num_embeddings_coarse, num_embeddings_fine = num_embeddings
-            self.num_embeddings_fine = num_embeddings_fine
-            self.num_embeddings_coarse = num_embeddings_coarse
+        num_embeddings_coarse, num_embeddings_fine = num_embeddings
+        self.num_embeddings_fine = num_embeddings_fine
+        self.num_embeddings_coarse = num_embeddings_coarse
 
         # Encoders (reference: first from image, rest from previous level output)
         self._encoder_fine = EncoderFine(

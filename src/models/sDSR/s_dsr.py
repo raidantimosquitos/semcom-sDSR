@@ -25,8 +25,8 @@ from .anomaly_detection import AnomalyDetectionModule
 class sDSRConfig:
     """Configuration for sDSR model."""
 
-    embedding_dim: Tuple[int, int] = (256, 64)
-    hidden_channels: Tuple[int, int] = (256, 64)
+    embedding_dim: Tuple[int, int] = (64, 64)
+    hidden_channels: Tuple[int, int] = (256, 128)
     num_residual_layers: int = 2
     n_mels: int = 128
     T: int = 320
