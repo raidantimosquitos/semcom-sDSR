@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Tuple
 
 import torch
 from torch.utils.data import Subset
@@ -88,21 +89,18 @@ def parse_args() -> argparse.Namespace:
 def build_vq_vae(
     n_mels: int,
     T: int,
-    num_embeddings_coarse: int,
-    num_embeddings_fine: int,
-    embedding_dim_fine: int,
-    embedding_dim_coarse: int,
-    hidden_channels_fine: int,
-    hidden_channels_coarse: int,
+    num_embeddings: Tuple[int, int],
+    embedding_dim: Tuple[int, int],
+    hidden_channels: Tuple[int, int],
     num_residual_layers: int = 2,
     commitment_cost: float = 0.25,
     decay: float = 0.99,
 ) -> VQ_VAE_2Layer:
     return VQ_VAE_2Layer(
-        hidden_channels = (hidden_channels_coarse, hidden_channels_fine),
+        hidden_channels = hidden_channels,
         num_residual_layers=num_residual_layers,
-        num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
-        embedding_dim=(embedding_dim_coarse, embedding_dim_fine),
+        num_embeddings=num_embeddings,
+        embedding_dim=embedding_dim,
         commitment_cost=commitment_cost,
         decay=decay,
     )
@@ -112,15 +110,13 @@ def build_s_dsr(
     vq_vae: VQ_VAE_2Layer,
     n_mels: int,
     T: int,
-    hidden_channels_fine: int,
-    hidden_channels_coarse: int,
-    embedding_dim_fine: int,
-    embedding_dim_coarse: int,
+    hidden_channels: Tuple[int, int],
+    embedding_dim: Tuple[int, int],
     fine_only_prob: float = 0.65,
 ) -> sDSR:
     cfg = sDSRConfig(
-        embedding_dim=(embedding_dim_coarse, embedding_dim_fine),
-        hidden_channels=(hidden_channels_coarse, hidden_channels_fine),
+        embedding_dim=embedding_dim,
+        hidden_channels=hidden_channels,
         num_residual_layers=2,
         n_mels=n_mels,
         T=T,
@@ -149,9 +145,10 @@ def run_stage1(args: argparse.Namespace) -> None:
     _, _, n_mels, T = dataset.data.shape
 
     model = build_vq_vae(
-        n_mels, T, args.hidden_channels_fine, args.hidden_channels_coarse,
-        args.num_embeddings_coarse, args.num_embeddings_fine,
-        args.embedding_dim_fine, args.embedding_dim_coarse,
+        n_mels, T, 
+        hidden_channels=(args.hidden_channels_coarse, args.hidden_channels_fine),
+        embedding_dim=(args.embedding_dim_coarse, args.embedding_dim_fine),
+        num_embeddings=(args.num_embeddings_coarse, args.num_embeddings_fine),
         num_residual_layers=2,
         commitment_cost=args.commitment_cost,
         decay=args.decay,
@@ -213,9 +210,10 @@ def run_stage2(args: argparse.Namespace) -> None:
     hidden_channels_coarse = ckpt["hidden_channels_coarse"]
     num_residual_layers = ckpt["num_residual_layers"]
     vq_vae = build_vq_vae(
-        n_mels, T, hidden_channels_fine, hidden_channels_coarse,
-        num_embeddings_coarse, num_embeddings_fine,
-        embedding_dim_fine, embedding_dim_coarse,
+        n_mels, T, 
+        num_embeddings=(num_embeddings_coarse, num_embeddings_fine),
+        embedding_dim=(embedding_dim_coarse, embedding_dim_fine),
+        hidden_channels=(hidden_channels_coarse, hidden_channels_fine),
         num_residual_layers=num_residual_layers,
     )
     state = dict(ckpt["model_state_dict"])
@@ -223,7 +221,9 @@ def run_stage2(args: argparse.Namespace) -> None:
     vq_vae.load_state_dict(state)
 
     model = build_s_dsr(
-        vq_vae, n_mels, T, hidden_channels_fine, hidden_channels_coarse, embedding_dim_fine, embedding_dim_coarse,
+        vq_vae, n_mels, T, 
+        hidden_channels=(hidden_channels_coarse, hidden_channels_fine),
+        embedding_dim=(embedding_dim_coarse, embedding_dim_fine),
         fine_only_prob=getattr(args, "fine_only_prob", 0.65),
     )
     trainer = Stage2Trainer(

@@ -93,6 +93,7 @@ class VectorQuantizerEMA(nn.Module):
                 self._embedding.weight.data.copy_(
                     self._ema_w / self._ema_cluster_size.unsqueeze(1).clamp(min=1e-5)
                 )
+                
 
             e_latent_loss = F.mse_loss(quantized.detach(), inputs)
             loss = self._commitment_cost * e_latent_loss

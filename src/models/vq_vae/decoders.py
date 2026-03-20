@@ -85,7 +85,7 @@ class DecoderCoarse(nn.Module):
         self._conv_trans_1 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
             nn.Conv2d(in_channels=num_hiddens, 
-                      out_channels=num_hiddens//2,
+                      out_channels=out_channels,
                       kernel_size=3,
                       stride=1, padding=1)
         )
