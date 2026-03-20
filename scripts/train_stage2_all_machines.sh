@@ -72,36 +72,39 @@ for machine_type in "${MACHINE_TYPES[@]}"; do
       --anomaly_sampling "uniform" \
       --anomaly_strategy "$anomaly_strategy"
 
-    stage2_ckpt="${stage2_dir}/stage2_${machine_type}_best.pt"
+    # Stage2Trainer saves checkpoints under:
+    #   ${ckpt_dir}/stage2/${machine_type}/stage2_${machine_type}_best.pt
+    stage2_machine_dir="${stage2_dir}/stage2/${machine_type}"
+    stage2_ckpt="${stage2_machine_dir}/stage2_${machine_type}_best.pt"
     python scripts/evaluate.py \
       --data_path "$DATA_PATH" \
       --machine_type "$machine_type" \
       --stage1_ckpt "$STAGE1_BEST" \
       --stage2_ckpt "$stage2_ckpt" \
-      --output "${stage2_dir}/results/results.csv" \
+      --output "${stage2_machine_dir}/results/results.csv" \
       --no_score_norm
 
-    if [[ -d "$stage2_dir" ]]; then
+    if [[ -d "$stage2_machine_dir" ]]; then
       # Upload only training logs + evaluation results (not model weights).
-      # - Training log:   ${stage2_dir}/train.log
-      # - Eval results:  ${stage2_dir}/results/
+      # - Training log:   ${stage2_machine_dir}/train.log
+      # - Eval results:  ${stage2_machine_dir}/results/
       dest="${GCS_CHECKPOINTS}/${STAMP}/${machine_type}/${anomaly_strategy}"
 
-      if [[ -f "$stage2_dir/train.log" ]]; then
-        echo "Uploading $stage2_dir/train.log -> ${dest}/train.log"
-        gsutil -m cp "$stage2_dir/train.log" "${dest}/train.log"
+      if [[ -f "$stage2_machine_dir/train.log" ]]; then
+        echo "Uploading $stage2_machine_dir/train.log -> ${dest}/train.log"
+        gsutil -m cp "$stage2_machine_dir/train.log" "${dest}/train.log"
       else
-        echo "Warning: train.log not found at $stage2_dir/train.log, skipping"
+        echo "Warning: train.log not found at $stage2_machine_dir/train.log, skipping"
       fi
 
-      if [[ -d "$stage2_dir/results" ]]; then
-        echo "Uploading $stage2_dir/results -> ${dest}/results"
-        gsutil -m cp -r "$stage2_dir/results" "${dest}/results"
+      if [[ -d "$stage2_machine_dir/results" ]]; then
+        echo "Uploading $stage2_machine_dir/results -> ${dest}/results"
+        gsutil -m cp -r "$stage2_machine_dir/results" "${dest}/results"
       else
-        echo "Warning: results dir not found at $stage2_dir/results, skipping"
+        echo "Warning: results dir not found at $stage2_machine_dir/results, skipping"
       fi
     else
-      echo "Warning: stage2 dir not found at $stage2_dir, skipping upload"
+      echo "Warning: stage2 dir not found at $stage2_machine_dir, skipping upload"
     fi
   done
 done
