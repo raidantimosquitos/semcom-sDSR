@@ -25,6 +25,7 @@ from src.engine.stage1 import Stage1Trainer
 from src.engine.stage2 import Stage2Trainer
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
+from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,7 +129,8 @@ def run_stage1(args: argparse.Namespace) -> None:
     if len(machine_types) == 1:
         dataset = DCASE2020Task2LogMelDataset(
             root=args.data_path,
-            machine_type=machine_types[0]
+            machine_type=machine_types[0],
+            standardize=True
         )
         run_name = machine_types[0]
     else:
@@ -136,7 +138,8 @@ def run_stage1(args: argparse.Namespace) -> None:
         dataset = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_types=machine_types,
-            include_test=include_test
+            include_test=include_test,
+            standardize=True
         )
         run_name = "+".join(sorted(machine_types))
     _, _, n_mels, T = dataset.data.shape
@@ -167,33 +170,30 @@ def run_stage1(args: argparse.Namespace) -> None:
 
 def run_stage2(args: argparse.Namespace) -> None:
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    if "target_T" in ckpt:
-        q_vae_dataset = DCASE2020Task2LogMelDataset(
-            root=args.data_path,
-            machine_type=args.machine_type,
-            machine_id=args.machine_id,
+    norm_mean, norm_std = load_norm_from_stage1_ckpt(ckpt)
+    if norm_mean is None:
+        print(
+            "Warning: stage1 checkpoint has no norm_mean/norm_std; "
+            "fitting standardization on this machine_type train set only (may mismatch multi-type stage1)."
         )
-    else:
-        q_vae_dataset = DCASE2020Task2LogMelDataset(
-            root=args.data_path,
-            machine_type=args.machine_type,
-            machine_id=args.machine_id,
-        )
+
+    ds_common = dict(
+        root=args.data_path,
+        machine_type=args.machine_type,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        standardize=norm_mean is None,
+    )
+    q_vae_dataset = DCASE2020Task2LogMelDataset(
+        **ds_common,
+        machine_id=args.machine_id,
+    )
     _, _, n_mels, T = q_vae_dataset.data.shape
 
     adversarial_dataset = None
     if args.machine_id is not None:
         # Full machine_type dataset (no machine_id filter) for adversarial samples
-        if "target_T" in ckpt:
-            q_vae_full = DCASE2020Task2LogMelDataset(
-                root=args.data_path,
-                machine_type=args.machine_type,
-            )
-        else:
-            q_vae_full = DCASE2020Task2LogMelDataset(
-                root=args.data_path,
-                machine_type=args.machine_type,
-            )
+        q_vae_full = DCASE2020Task2LogMelDataset(**ds_common)
         adversarial_indices = [
             i for i in range(len(q_vae_full._machine_id_strs))
             if q_vae_full._machine_id_strs[i] != args.machine_id

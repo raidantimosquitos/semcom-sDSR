@@ -26,6 +26,7 @@ from src.data.dataset import (
 from src.engine.evaluator import _partial_auc
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
+from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 from src.utils.bitstream import (
     frame_size_bytes,
     read_bitstream_file,
@@ -56,22 +57,21 @@ def main() -> None:
 
     # Load Stage 1 checkpoint for norm stats and model weights
     ckpt1 = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    if "target_T" in ckpt1:
-        train_ds = DCASE2020Task2LogMelDataset(
-            root=args.data_path,
-            machine_type=args.machine_type,
-            target_T_override=ckpt1["target_T"],
-        )
-    else:
-        train_ds = DCASE2020Task2LogMelDataset(
-            root=args.data_path,
-            machine_type=args.machine_type,
-        )
+    norm_mean, norm_std = load_norm_from_stage1_ckpt(ckpt1)
+    train_ds = DCASE2020Task2LogMelDataset(
+        root=args.data_path,
+        machine_type=args.machine_type,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        standardize=norm_mean is None,
+    )
     _, _, n_mels, T = train_ds.data.shape
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         target_T=train_ds.target_T,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
     )
 
     # Load Stage 1 + Stage 2 (full sDSR); arch params from checkpoint

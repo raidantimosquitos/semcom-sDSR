@@ -14,6 +14,10 @@ from torch.utils.data import DataLoader, Dataset
 from ..utils.anomalies import AnomalyMapGenerator
 from ..utils.audio import load_mel_for_dir
 
+# Log-mel time crop before standardization (DCASE Task 2 shortest-clip alignment).
+MEL_TIME_CROP = 313
+
+
 class DCASE2020Task2LogMelDataset(Dataset):
     """
     Training dataset: pre-computes log-mel spectrograms into RAM.
@@ -54,13 +58,43 @@ class DCASE2020Task2LogMelDataset(Dataset):
         machine_id: str | None = None,
         include_test: bool = True,
         standardize: bool = True,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
     ):
         if machine_types is not None:
             if machine_id is not None:
                 raise ValueError("machine_id filter only applies to single machine_type")
-            self._init_multi(root, machine_types, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, include_test, standardize)
+            self._init_multi(
+                root,
+                machine_types,
+                sample_rate,
+                n_fft,
+                hop_length,
+                n_mels,
+                f_min,
+                f_max,
+                top_db,
+                include_test,
+                standardize,
+                norm_mean=norm_mean,
+                norm_std=norm_std,
+            )
         elif machine_type is not None:
-            self._init_single(root, machine_type, sample_rate, n_fft, hop_length, n_mels, f_min, f_max, top_db, machine_id, standardize)
+            self._init_single(
+                root,
+                machine_type,
+                sample_rate,
+                n_fft,
+                hop_length,
+                n_mels,
+                f_min,
+                f_max,
+                top_db,
+                machine_id,
+                standardize,
+                norm_mean=norm_mean,
+                norm_std=norm_std,
+            )
         else:
             raise ValueError("Provide either machine_type or machine_types")
 
@@ -94,11 +128,11 @@ class DCASE2020Task2LogMelDataset(Dataset):
         audio_dir = Path(root) / machine_type / "train"
         spectrograms, machine_id_strs = load_mel_for_dir(audio_dir, sample_rate, self.mel_transform, self.to_db, self._FILENAME_RE)
 
-        # Truncate to 313 samples (length of the shortest spectrogram)
-        spectrograms = [s[..., :313] for s in spectrograms]
+        # Truncate to MEL_TIME_CROP (shortest spectrogram alignment)
+        spectrograms = [s[..., :MEL_TIME_CROP] for s in spectrograms]
         stacked = torch.stack(spectrograms)
 
-        target_T = ((313 + 15) // 16) * 16  # 320
+        target_T = ((MEL_TIME_CROP + 15) // 16) * 16  # 320
 
         eps = 1e-6
         if norm_mean is not None and norm_std is not None:
@@ -153,6 +187,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
         top_db: float,
         include_test: bool = True,
         standardize: bool = True,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -169,7 +205,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
         all_spectrograms: list[torch.Tensor] = []
         all_machine_id_strs: list[str] = []
 
-        target_T = ((313 + 15) // 16) * 16  # 320
+        target_T = ((MEL_TIME_CROP + 15) // 16) * 16  # 320
 
         # 1. Load each type; when include_test=True, also load test/ (normal + anomaly).
         for mt in sorted(machine_types):
@@ -186,8 +222,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
                     spectrograms = spectrograms + spec_test
                     machine_id_strs = machine_id_strs + mid_test
 
-            # Truncate to 313 samples (length of the shortest spectrogram)
-            spectrograms = [s[..., :313] for s in spectrograms]
+            spectrograms = [s[..., :MEL_TIME_CROP] for s in spectrograms]
             stacked_mt = torch.stack(spectrograms)
             all_spectrograms.append(stacked_mt)
             all_machine_id_strs.extend(machine_id_strs)
@@ -195,7 +230,11 @@ class DCASE2020Task2LogMelDataset(Dataset):
         self.data = torch.cat(all_spectrograms, dim=0)
 
         eps = 1e-6
-        if standardize:
+        if norm_mean is not None and norm_std is not None:
+            self.norm_mean = norm_mean.detach().clone()
+            self.norm_std = norm_std.detach().clone()
+            self.data = (self.data - self.norm_mean) / (self.norm_std + eps)
+        elif standardize:
             self.norm_mean = self.data.mean(dim=(0, 2, 3), keepdim=True)
             self.norm_std = self.data.std(dim=(0, 2, 3), keepdim=True).clamp_min(eps)
             self.data = (self.data - self.norm_mean) / self.norm_std
@@ -397,14 +436,15 @@ class DCASE2020Task2TestDataset(Dataset):
         mel = self.mel_transform(wav)
         log_mel = self.to_db(mel).float()  # (1, n_mels, T)
 
+        # Match training: crop time, then standardize, then pad (in standardized space).
+        log_mel = log_mel[..., :MEL_TIME_CROP]
         if self.norm_mean is not None and self.norm_std is not None:
-            log_mel = (log_mel - self.norm_mean) / self.norm_std
+            eps = 1e-6
+            log_mel = (log_mel - self.norm_mean) / (self.norm_std + eps)
 
         T = log_mel.shape[-1]
-
-        # Pad with zeros up to target_T
-        if T < self.target_T:
-            log_mel = torch.cat([log_mel, torch.zeros(1, log_mel.shape[1], self.target_T - T)], dim=-1)
+        if self.target_T is not None and T < self.target_T:
+            log_mel = F.pad(log_mel, (0, self.target_T - T), mode="constant", value=0.0)
 
         return log_mel, label, machine_id
 
@@ -453,6 +493,8 @@ if __name__ == "__main__":
         root=root_str,
         machine_type=MACHINE_TYPE_TEST,
         target_T=dataset.target_T,
+        norm_mean=getattr(dataset, "norm_mean", None),
+        norm_std=getattr(dataset, "norm_std", None),
     )
     test_loader = make_dataloader(test_dataset, batch_size=min(32, len(test_dataset)))
     specs, labels, machine_ids = next(iter(test_loader))

@@ -29,6 +29,7 @@ from src.data.dataset import (
 from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
+from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 
 
 def parse_args() -> argparse.Namespace:
@@ -136,18 +137,15 @@ def main() -> None:
 def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     """Run evaluation; all user-facing output via tee (terminal + log file)."""
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    if "target_T" in stage1_ckpt:
-        train_ds = DCASE2020Task2LogMelDataset(
-            root=args.data_path,
-            machine_type=args.machine_type,
-            machine_id=args.machine_id,
-        )
-    else:
-        train_ds = DCASE2020Task2LogMelDataset(
-            root=args.data_path,
-            machine_type=args.machine_type,
-            machine_id=args.machine_id,
-        )
+    norm_mean, norm_std = load_norm_from_stage1_ckpt(stage1_ckpt)
+    train_ds = DCASE2020Task2LogMelDataset(
+        root=args.data_path,
+        machine_type=args.machine_type,
+        machine_id=args.machine_id,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        standardize=norm_mean is None,
+    )
     _, _, n_mels, T = train_ds.data.shape
 
     test_ds = DCASE2020Task2TestDataset(
@@ -155,6 +153,8 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         machine_type=args.machine_type,
         target_T=train_ds.target_T,
         machine_id=args.machine_id,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
     )
 
     # Architecture from checkpoint (same as training); fallback for old checkpoints
