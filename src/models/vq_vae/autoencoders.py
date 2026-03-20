@@ -106,7 +106,7 @@ class VQ_VAE_2Layer(nn.Module):
         self._encoder_coarse = EncoderCoarse(
             in_channels=self.hidden_channels_fine,
             num_hiddens=self.hidden_channels_coarse,
-            num_residual_layers=num_residual_layers * 2,
+            num_residual_layers=num_residual_layers,
             num_residual_hiddens=self.res_channels_coarse
         )
 
