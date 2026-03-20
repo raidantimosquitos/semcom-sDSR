@@ -32,16 +32,16 @@ def load_mel_for_dir(
             wav = wav.mean(0, keepdim=True)
         mel = mel_transform(wav)
         log_mel_db = to_db(mel).float()  # (1, n_mels, T)
-        normalized_mel = normalize_spectrogram(log_mel_db)
+        normalized_mel = standardize_spectrogram(log_mel_db)
         spectrograms.append(normalized_mel)
         
     return spectrograms, machine_id_strs
 
-def normalize_spectrogram(mel_db):
+def standardize_spectrogram(mel_db):
     # mel_db: (1, n_mels, T) in dB, already floor-clipped
-    clip_range = mel_db.max() - mel_db.min()
-    mel = (mel_db - mel_db.min()) / (clip_range + 1e-8)  # → [0, 1]
-    return (mel - 0.5) / 0.5  # → [-1, 1]
+    mean = mel_db.mean(dim=(1, 2), keepdim=True)
+    std = mel_db.std(dim=(1, 2), keepdim=True)
+    return (mel_db - mean) / (std + 1e-8)
 
 def log_mel_to_rgb(log_mel: torch.Tensor, cmap: colors.Colormap | None = None) -> torch.Tensor:
     """Convert log-mel spectrogram (1 or 2D) to RGB tensor (3, n_mels, T) in [0, 1]."""

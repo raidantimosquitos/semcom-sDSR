@@ -12,7 +12,7 @@ import torchaudio.transforms as T
 from torch.utils.data import DataLoader, Dataset
 
 from ..utils.anomalies import AnomalyMapGenerator
-from ..utils.audio import load_mel_for_dir, normalize_spectrogram
+from ..utils.audio import load_mel_for_dir, standardize_spectrogram
 
 # Log-mel time crop before standardization (DCASE Task 2 shortest-clip alignment).
 MEL_TIME_CROP = 313
@@ -390,16 +390,16 @@ class DCASE2020Task2TestDataset(Dataset):
             wav = wav.mean(0, keepdim=True)
         mel = self.mel_transform(wav)
         log_mel = self.to_db(mel).float()  # (1, n_mels, T)
-        normalized_mel = normalize_spectrogram(log_mel)
+        standardized_mel = standardize_spectrogram(log_mel)
 
         # Match training: crop time, then standardize, then pad (in standardized space).
-        normalized_mel = normalized_mel[..., :MEL_TIME_CROP]
+        standardized_mel = standardized_mel[..., :MEL_TIME_CROP]
 
-        T = normalized_mel.shape[-1]
+        T = standardized_mel.shape[-1]
         if self.target_T is not None and T < self.target_T:
-            normalized_mel = F.pad(normalized_mel, (0, self.target_T - T), mode="constant", value=0.0)
+            standardized_mel = F.pad(standardized_mel, (0, self.target_T - T), mode="constant", value=0.0)
 
-        return normalized_mel, label, machine_id
+        return standardized_mel, label, machine_id
 
 
 def make_dataloader(dataset: DCASE2020Task2LogMelDataset | DCASE2020Task2TestDataset, batch_size: int = 256) -> DataLoader:
