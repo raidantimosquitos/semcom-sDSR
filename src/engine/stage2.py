@@ -127,6 +127,13 @@ class Stage2Trainer(BaseTrainer):
             x_specific = out["x_specific"]
             M = out["M"]
 
+            
+            if step % 100 == 0:
+                abs_diff = torch.abs(out["x_specific"] - out["x_general"].detach())
+                mean_abs_diff_pos = abs_diff[M_gt > 0.5].mean()
+                mean_abs_diff_neg = abs_diff[M_gt <= 0.5].mean()
+                print(f"Mean bs diff pos: {mean_abs_diff_pos:.4f} vs neg: {mean_abs_diff_neg:.4f}(pos must be notably higher)")
+
             # Reconstruction: L2(x, x_specific) on full batch (normal + anomalous).
             # For normal samples: object decoder learns x_specific ≈ x. For anomalous:
             # decoder learns to reconstruct original normal x from corrected codes.
