@@ -20,8 +20,8 @@ from scipy.ndimage import rotate as ndimage_rotate
 from .perlin import rand_perlin_2d_np
 
 # Minimum mask extent so regions survive max-pool to coarse latent (8×8 cells)
-MIN_FREQ_BINS = 8
-MIN_TIME_FRAMES = 8
+MIN_FREQ_BINS = 4
+MIN_TIME_FRAMES = 4
 
 
 class PerlinNoiseStrategy:
@@ -94,15 +94,11 @@ def _draw_fan(n_mels: int, T: int) -> np.ndarray:
     Horizontal stripes at harmonic-like intervals; freq-specific, not broadband."""
     M = np.zeros((n_mels, T), dtype=np.float32)
     n_stripes = random.randint(1, 2)
-    stripe_height_wide = random.randint(12, 17)
-    stripe_height_wide = max(MIN_FREQ_BINS, min(stripe_height_wide, n_mels))
-    stripe_height_narrow = random.randint(4, 7)
+    stripe_height_narrow = random.randint(4, 9)
     stripe_height_narrow = max(MIN_FREQ_BINS, min(stripe_height_narrow, n_mels))
     for _ in range(n_stripes):
-        use_wide = random.random() < 0.5
-        h = stripe_height_wide if use_wide else stripe_height_narrow
-        f_low = random.randint(0, max(0, n_mels - h))
-        f_high = min(f_low + h, n_mels)
+        f_low = random.randint(0, max(0, n_mels - stripe_height_narrow))
+        f_high = min(f_low + stripe_height_narrow, n_mels)
         M[f_low:f_high, :] = 1.0
     return M
 
@@ -110,19 +106,18 @@ def _draw_fan(n_mels: int, T: int) -> np.ndarray:
 def _draw_pump(n_mels: int, T: int) -> np.ndarray:
     """Periodic vertical bands in lower-mid freq (~30–90); preserve period."""
     M = np.zeros((n_mels, T), dtype=np.float32)
-    f_low = max(0, min(30, n_mels - MIN_FREQ_BINS))
-    f_high = min(91, n_mels)
-    band_freq = max(MIN_FREQ_BINS, f_high - f_low)
-    period = random.randint(40, 51)
-    band_width = random.randint(MIN_TIME_FRAMES, max(MIN_TIME_FRAMES, period // 2))
-    n_bands = random.randint(2, 5)
-    for i in range(n_bands):
-        t_center = (i * period) + random.randint(-5, 5)
-        t_start = max(0, t_center - band_width // 2)
-        t_end = min(T, t_start + band_width)
-        t_end = max(t_start + MIN_TIME_FRAMES, t_end)
-        if t_end <= T:
-            M[f_low:f_low + band_freq, t_start:t_end] = 1.0
+    n_stripes = random.randint(3, 6)
+    stripe_width = random.randint(MIN_TIME_FRAMES, max(MIN_TIME_FRAMES, 20))
+    max_start = max(0, T - stripe_width)
+    if max_start <= 0:
+        M[:, : min(stripe_width, T)] = 1.0
+        return M
+    pool = list(range(max_start))
+    k = min(n_stripes, len(pool))
+    positions = sorted(random.sample(pool, k))
+    for t_start in positions:
+        t_end = min(t_start + stripe_width, T)
+        M[:, t_start:t_end] = 1.0
     return M
 
 
@@ -147,8 +142,8 @@ def _draw_slider(n_mels: int, T: int) -> np.ndarray:
 def _draw_valve(n_mels: int, T: int) -> np.ndarray:
     """Small rectangular patches at periodic time, variable freq; tonally specific."""
     M = np.zeros((n_mels, T), dtype=np.float32)
-    patch_h = random.randint(10, 21)
-    patch_w = random.randint(10, 21)
+    patch_h = random.randint(4, 9)
+    patch_w = random.randint(4, 9)
     patch_h = max(MIN_FREQ_BINS, min(patch_h, n_mels))
     patch_w = max(MIN_TIME_FRAMES, min(patch_w, T))
     n_patches = random.randint(2, 5)
@@ -171,15 +166,13 @@ def _draw_toycar(n_mels: int, T: int) -> np.ndarray:
     f_high = min(91, n_mels)
     n_blobs = random.randint(1, 4)
     for _ in range(n_blobs):
-        bh = random.randint(12, 35)
-        bw = random.randint(20, 60)
+        bh = random.randint(4, 9)
+        bw = random.randint(8, 13)
         bh = max(MIN_FREQ_BINS, min(bh, f_high - f_low))
         bw = max(MIN_TIME_FRAMES, min(bw, T))
         t_start = random.randint(0, max(0, T - bw))
         t_end = min(t_start + bw, T)
-        fl = f_low + random.randint(0, max(0, (f_high - f_low) - bh))
-        fh = min(fl + bh, n_mels)
-        M[fl:fh, t_start:t_end] = 1.0
+        M[f_low:f_high, t_start:t_end] = 1.0
     return M
 
 
