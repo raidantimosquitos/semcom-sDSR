@@ -142,7 +142,7 @@ def _draw_slider(n_mels: int, T: int) -> np.ndarray:
 def _draw_valve(n_mels: int, T: int) -> np.ndarray:
     """Small rectangular patches at periodic time, variable freq; tonally specific."""
     M = np.zeros((n_mels, T), dtype=np.float32)
-    patch_h = random.randint(4, 9)
+    patch_h = random.randint(12, 40)
     patch_w = random.randint(4, 9)
     patch_h = max(MIN_FREQ_BINS, min(patch_h, n_mels))
     patch_w = max(MIN_TIME_FRAMES, min(patch_w, T))
