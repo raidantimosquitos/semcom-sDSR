@@ -260,11 +260,6 @@ class AudDSRAnomTrainDataset(Dataset):
     ``base.machine_type`` is the joined name when multi-type; ``machine_id`` in
     batches may be composite ``{type}__{id_XX}`` when multiple types are loaded.
 
-    For ``machine_specific`` / ``both``, if the base exposes ``_machine_type_strs``
-    aligned with indices (always true for :class:`DCASE2020Task2LogMelDataset`),
-    synthetic masks use the drawer for the **sample's** machine type instead of
-    a random type among all loaded types.
-
     Each __getitem__ returns a dict: image (spectrogram), anomaly_mask,
     has_anomaly, label, machine_id. With probability zero_mask_prob the mask
     is zero (normal); otherwise a mask is generated with the chosen strategy
@@ -284,17 +279,12 @@ class AudDSRAnomTrainDataset(Dataset):
     def __init__(
         self,
         base_dataset: DCASE2020Task2LogMelDataset,
-        strategy: Literal["perlin", "audio_specific", "both", "machine_specific"] = "both",
+        strategy: Literal["perlin", "audio_specific", "both"] = "both",
         zero_mask_prob: float = 0.5,
         adversarial_dataset: Dataset | None = None,
     ) -> None:
         self.base = base_dataset
         self.machine_type = getattr(base_dataset, "machine_type", None)
-        if strategy == "machine_specific" and not self.machine_type:
-            logging.warning(
-                "AudDSRAnomTrainDataset: strategy is 'machine_specific' but base_dataset has no machine_type; falling back to 'both'"
-            )
-            strategy = "both"
         self.strategy = strategy
         self.zero_mask_prob = zero_mask_prob
         self.adversarial_dataset = (
@@ -313,14 +303,7 @@ class AudDSRAnomTrainDataset(Dataset):
             n_mels=n_mels,
             T=T,
             zero_mask_prob=0.0,
-            machine_type=self.machine_type,
         )
-
-    def _preferred_machine_type_for_idx(self, idx: int) -> str | None:
-        mts = getattr(self.base, "_machine_type_strs", None)
-        if mts is None or len(mts) != len(self.base):
-            return None
-        return mts[idx]
 
     def __len__(self) -> int:
         return len(self.base)
@@ -345,17 +328,10 @@ class AudDSRAnomTrainDataset(Dataset):
                 has_anomaly = 1.0
             else:
                 spectrogram, label, machine_id = self.base[idx]
-                pref = self._preferred_machine_type_for_idx(idx)
-                if pref is not None and self.strategy in ("machine_specific", "both"):
-                    mask = self._mask_generator.generate_for_training_sample(
-                        device="cpu",
-                        force_anomaly=True,
-                        preferred_machine_type=pref,
-                    )
-                else:
-                    mask = self._mask_generator.generate(
-                        1, device="cpu", force_anomaly=True
-                    )
+                mask = self._mask_generator.generate_for_training_sample(
+                    device="cpu",
+                    force_anomaly=True,
+                )
                 has_anomaly = 1.0
         return {
             "image": spectrogram,

@@ -19,13 +19,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Tuple
+from typing import Any, Callable, Tuple
 
 import torch
 from torch.utils.data import DataLoader
 
 from src.data.dataset import (
+    COMPOSITE_ID_SEP,
     DCASE2020Task2LogMelDataset,
     DCASE2020Task2TestDataset,
 )
@@ -117,6 +119,34 @@ def _compute_train_score_stats(
         fallback = (0.0, 1.0)
 
     return train_score_stats, fallback
+
+
+def _aggregate_per_machine_type(
+    ids: dict[str, Any],
+) -> dict[str, dict[str, float]] | None:
+    """
+    When machine_ids are composite ``{machine_type}__{id_XX}``, return mean AUC/pAUC
+    per DCASE machine_type (mean over that type's ids). Returns None if no composite ids.
+    """
+    by_type: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    saw_composite = False
+    for k, v in ids.items():
+        if k == "average" or not isinstance(v, dict):
+            continue
+        if COMPOSITE_ID_SEP not in k:
+            continue
+        saw_composite = True
+        base, _rest = k.split(COMPOSITE_ID_SEP, 1)
+        by_type[base].append((float(v["auc"]), float(v["pauc"])))
+    if not saw_composite or not by_type:
+        return None
+    out: dict[str, dict[str, float]] = {}
+    for mt in sorted(by_type.keys()):
+        pairs = by_type[mt]
+        auc_m = sum(p[0] for p in pairs) / len(pairs)
+        pauc_m = sum(p[1] for p in pairs) / len(pairs)
+        out[mt] = {"auc": auc_m, "pauc": pauc_m}
+    return out
 
 
 def main() -> None:
@@ -233,11 +263,24 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
     )
     results = evaluator.evaluate()
 
-    for mt, ids in results.items():
-        tee(f"\n{mt}:")
+    for run_name, ids in results.items():
+        tee(f"\n{run_name}:")
         for k, v in ids.items():
             if isinstance(v, dict):
                 tee(f"  {k}: AUC={v['auc']:.4f} pAUC={v['pauc']:.4f}")
+
+        per_type = _aggregate_per_machine_type(ids)
+        if per_type is not None:
+            tee("\n  Per machine_type (mean over machine_ids):")
+            for mt in sorted(per_type.keys()):
+                pt = per_type[mt]
+                tee(f"    {mt}: AUC={pt['auc']:.4f} pAUC={pt['pauc']:.4f}")
+            macro_auc = sum(per_type[mt]["auc"] for mt in per_type) / len(per_type)
+            macro_pauc = sum(per_type[mt]["pauc"] for mt in per_type) / len(per_type)
+            tee(
+                f"\n  Macro over machine_types (mean of per-type averages): "
+                f"AUC={macro_auc:.4f} pAUC={macro_pauc:.4f}"
+            )
 
     if args.output:
         out_path = Path(args.output)
@@ -245,10 +288,32 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         with open(out_path, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["machine_type", "machine_id", "AUC", "pAUC"])
-            for mt, ids in results.items():
+            for run_name, ids in results.items():
                 for k, v in ids.items():
                     if isinstance(v, dict):
-                        w.writerow([mt, k, f"{v['auc']:.4f}", f"{v['pauc']:.4f}"])
+                        w.writerow([run_name, k, f"{v['auc']:.4f}", f"{v['pauc']:.4f}"])
+                per_type = _aggregate_per_machine_type(ids)
+                if per_type is not None:
+                    for mt in sorted(per_type.keys()):
+                        pt = per_type[mt]
+                        w.writerow(
+                            [
+                                run_name,
+                                f"__type_avg__{mt}",
+                                f"{pt['auc']:.4f}",
+                                f"{pt['pauc']:.4f}",
+                            ]
+                        )
+                    macro_auc = sum(per_type[mt]["auc"] for mt in per_type) / len(per_type)
+                    macro_pauc = sum(per_type[mt]["pauc"] for mt in per_type) / len(per_type)
+                    w.writerow(
+                        [
+                            run_name,
+                            "__macro_type_avg__",
+                            f"{macro_auc:.4f}",
+                            f"{macro_pauc:.4f}",
+                        ]
+                    )
         tee(f"\nResults saved to {out_path}")
 
     if args.plot and results:
@@ -258,7 +323,7 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
 def _plot_comparison(
     results: dict, save_path: Path, log: Callable[[str], None] | None = None
 ) -> None:
-    """Bar chart for AUC and pAUC (mean anomaly score)."""
+    """Bar chart for AUC and pAUC: overall average and (if composite IDs) per machine_type."""
     if log is None:
         log = print
     try:
@@ -268,7 +333,30 @@ def _plot_comparison(
         log("Skipping plot: matplotlib required (pip install matplotlib)")
         return
 
-    for mt, ids in results.items():
+    for run_name, ids in results.items():
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        per_type = _aggregate_per_machine_type(ids)
+        if per_type is not None:
+            types = sorted(per_type.keys())
+            x = np.arange(len(types))
+            width = 0.35
+            aucs = [per_type[t]["auc"] for t in types]
+            paucs = [per_type[t]["pauc"] for t in types]
+            fig, ax = plt.subplots(figsize=(max(0.6 + len(types) * 2.0, 5), 4))
+            ax.bar(x - width / 2, aucs, width, label="AUC", color="C0")
+            ax.bar(x + width / 2, paucs, width, label="pAUC", color="C1")
+            ax.set_xticks(x)
+            ax.set_xticklabels(types, rotation=25, ha="right")
+            ax.set_ylabel("Score")
+            ax.set_title(f"Per machine_type average: {run_name}")
+            ax.legend()
+            plt.tight_layout()
+            per_type_path = save_path.parent / f"{save_path.stem}_per_type{save_path.suffix}"
+            plt.savefig(per_type_path, dpi=150)
+            plt.close()
+            log(f"Per-type plot saved to {per_type_path}")
+
         if "average" not in ids:
             continue
         v = ids["average"]
@@ -280,9 +368,9 @@ def _plot_comparison(
         ax.set_ylabel("Score")
         ax.set_xticks(x)
         ax.set_xticklabels(labels)
-        ax.set_title(f"Anomaly detection: {mt} (average)")
+        title = f"Anomaly detection: {run_name} (average over machine_ids)"
+        ax.set_title(title)
         plt.tight_layout()
-        save_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=150)
         plt.close()
         log(f"Plot saved to {save_path}")

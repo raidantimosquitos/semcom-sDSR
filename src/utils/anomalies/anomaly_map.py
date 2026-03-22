@@ -3,14 +3,13 @@ Anomaly map generation for sDSR training.
 
 Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 1. PerlinNoiseStrategy: threshold/binarize Perlin noise (DSR-style)
-2. AudioSpecificStrategy: choose frequency band + time segments
-3. MachineSpecificStrategy: machine-type-specific shapes (fan, pump, slider, valve, ToyCar, ToyConveyor)
+2. AudioSpecificStrategy: random frequency band + 3–7 time segments within that band
 """
 
 from __future__ import annotations
 
 import random
-from typing import Callable, Literal
+from typing import Literal
 
 import numpy as np
 import torch
@@ -89,127 +88,10 @@ class PerlinNoiseStrategy:
         return M
 
 
-def _draw_fan(n_mels: int, T: int) -> np.ndarray:
+class AudioSpecificStrategy:
     """
-    Horizontal stripes at harmonic-like intervals; freq-specific, not broadband."""
-    M = np.zeros((n_mels, T), dtype=np.float32)
-    n_stripes = random.randint(1, 2)
-    stripe_height_narrow = random.randint(4, 9)
-    stripe_height_narrow = max(MIN_FREQ_BINS, min(stripe_height_narrow, n_mels))
-    for _ in range(n_stripes):
-        f_low = random.randint(0, max(0, n_mels - stripe_height_narrow))
-        f_high = min(f_low + stripe_height_narrow, n_mels)
-        M[f_low:f_high, :] = 1.0
-    return M
-
-
-def _draw_pump(n_mels: int, T: int) -> np.ndarray:
-    """Periodic vertical bands in lower-mid freq (~30–90); preserve period."""
-    M = np.zeros((n_mels, T), dtype=np.float32)
-    n_stripes = random.randint(3, 6)
-    stripe_width = random.randint(MIN_TIME_FRAMES, max(MIN_TIME_FRAMES, 20))
-    max_start = max(0, T - stripe_width)
-    if max_start <= 0:
-        M[:, : min(stripe_width, T)] = 1.0
-        return M
-    pool = list(range(max_start))
-    k = min(n_stripes, len(pool))
-    positions = sorted(random.sample(pool, k))
-    for t_start in positions:
-        t_end = min(t_start + stripe_width, T)
-        M[:, t_start:t_end] = 1.0
-    return M
-
-
-def _draw_slider(n_mels: int, T: int) -> np.ndarray:
-    """Narrow full-height vertical stripes at 3–5 positions; broadband."""
-    M = np.zeros((n_mels, T), dtype=np.float32)
-    n_stripes = random.randint(3, 6)
-    stripe_width = random.randint(MIN_TIME_FRAMES, max(MIN_TIME_FRAMES, 20))
-    max_start = max(0, T - stripe_width)
-    if max_start <= 0:
-        M[:, : min(stripe_width, T)] = 1.0
-        return M
-    pool = list(range(max_start))
-    k = min(n_stripes, len(pool))
-    positions = sorted(random.sample(pool, k))
-    for t_start in positions:
-        t_end = min(t_start + stripe_width, T)
-        M[:, t_start:t_end] = 1.0
-    return M
-
-
-def _draw_valve(n_mels: int, T: int) -> np.ndarray:
-    """Small rectangular patches at periodic time, variable freq; tonally specific."""
-    M = np.zeros((n_mels, T), dtype=np.float32)
-    patch_h = random.randint(12, 40)
-    patch_w = random.randint(4, 9)
-    patch_h = max(MIN_FREQ_BINS, min(patch_h, n_mels))
-    patch_w = max(MIN_TIME_FRAMES, min(patch_w, T))
-    n_patches = random.randint(2, 5)
-    period = max(patch_w + 10, T // (n_patches + 1))
-    for i in range(n_patches):
-        t_start = min((i * period) + random.randint(0, 20), T - patch_w)
-        t_start = max(0, t_start)
-        t_end = min(t_start + patch_w, T)
-        f_low = random.randint(0, max(0, n_mels - patch_h))
-        f_high = min(f_low + patch_h, n_mels)
-        if t_end - t_start >= MIN_TIME_FRAMES and f_high - f_low >= MIN_FREQ_BINS:
-            M[f_low:f_high, t_start:t_end] = 1.0
-    return M
-
-
-def _draw_toycar(n_mels: int, T: int) -> np.ndarray:
-    """Medium blobs in mid-freq (30–90); slightly irregular."""
-    M = np.zeros((n_mels, T), dtype=np.float32)
-    f_low = max(0, min(30, n_mels - MIN_FREQ_BINS))
-    f_high = min(91, n_mels)
-    n_blobs = random.randint(1, 4)
-    for _ in range(n_blobs):
-        bh = random.randint(4, 9)
-        bw = random.randint(8, 13)
-        bh = max(MIN_FREQ_BINS, min(bh, f_high - f_low))
-        bw = max(MIN_TIME_FRAMES, min(bw, T))
-        t_start = random.randint(0, max(0, T - bw))
-        t_end = min(t_start + bw, T)
-        M[f_low:f_high, t_start:t_end] = 1.0
-    return M
-
-
-def _draw_toyconveyor(n_mels: int, T: int) -> np.ndarray:
-    """Low-freq horizontal band (bottom ~20–30 bins) + periodic patches at belt period."""
-    M = np.zeros((n_mels, T), dtype=np.float32)
-    band_height = random.randint(20, 31)
-    band_height = min(band_height, n_mels)
-    M[:band_height, :] = 1.0
-    period = random.randint(45, 55)
-    patch_w = random.randint(MIN_TIME_FRAMES, 25)
-    patch_h = random.randint(MIN_FREQ_BINS, 25)
-    for i in range(2):
-        t_center = (i + 1) * period + random.randint(-8, 8)
-        t_start = max(0, t_center - patch_w // 2)
-        t_end = min(T, t_start + patch_w)
-        f_low = random.randint(0, max(0, n_mels - patch_h))
-        f_high = min(f_low + patch_h, n_mels)
-        if t_end - t_start >= MIN_TIME_FRAMES:
-            M[f_low:f_high, t_start:t_end] = 1.0
-    return M
-
-
-_MACHINE_DRAWERS: dict[str, Callable[[int, int], np.ndarray]] = {
-    "fan": _draw_fan,
-    "pump": _draw_pump,
-    "slider": _draw_slider,
-    "valve": _draw_valve,
-    "ToyCar": _draw_toycar,
-    "ToyConveyor": _draw_toyconveyor,
-}
-
-
-class MachineSpecificStrategy:
-    """
-    Generate anomaly masks with machine-type-specific shapes (spectrogram space).
-    Coarse/fine latent masks are derived from this single mask via max-pool elsewhere.
+    General spectrogram-space mask: pick a random frequency band (random bandwidth),
+    then set mask to 1 on several (3–7) disjoint time segments within that band.
     """
 
     def __init__(
@@ -217,46 +99,47 @@ class MachineSpecificStrategy:
         spectrogram_shape: tuple[int, int],
         n_mels: int,
         T: int,
-        machine_type: str,
+        min_segments: int = 3,
+        max_segments: int = 7,
     ) -> None:
         self.spectrogram_shape = spectrogram_shape
         self.n_mels = n_mels
         self.T = T
-        self._types = [t.strip() for t in machine_type.split("+") if t.strip()]
+        self.min_segments = min_segments
+        self.max_segments = max_segments
 
-    def single_mask(
-        self,
-        machine_type: str,
-        device: torch.device | str,
-    ) -> torch.Tensor:
-        """One (1, 1, n_mels, T) mask using the drawer for ``machine_type``."""
+    def _single_mask_numpy(self) -> np.ndarray:
         n_mels, T = self.n_mels, self.T
-        drawer = _MACHINE_DRAWERS.get(machine_type)
-        if drawer is not None:
-            M = drawer(n_mels, T)
-            mask = torch.from_numpy(M.astype(np.float32)).unsqueeze(0).unsqueeze(0)
-        else:
-            mask = torch.zeros(1, 1, n_mels, T, dtype=torch.float32)
-        return mask.to(device)
+        M = np.zeros((n_mels, T), dtype=np.float32)
+        bandwidth = random.randint(MIN_FREQ_BINS, n_mels)
+        f_low = random.randint(0, max(0, n_mels - bandwidth))
+        f_high = f_low + bandwidth
+        n_seg = random.randint(self.min_segments, self.max_segments)
+        for _ in range(n_seg):
+            if T <= MIN_TIME_FRAMES:
+                t_start, t_end = 0, T
+            else:
+                seg_len = random.randint(MIN_TIME_FRAMES, T)
+                max_start = max(0, T - seg_len)
+                t_start = random.randint(0, max_start)
+                t_end = t_start + seg_len
+            M[f_low:f_high, t_start:t_end] = 1.0
+        return M
+
+    def single_mask(self, device: torch.device | str) -> torch.Tensor:
+        """One (1, 1, n_mels, T) mask."""
+        arr = self._single_mask_numpy()
+        return torch.from_numpy(arr.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
 
     def __call__(
         self,
         batch_size: int,
         device: torch.device | str,
     ) -> torch.Tensor:
-        n_mels, T = self.n_mels, self.T
         masks = []
         for _ in range(batch_size):
-            if self._types:
-                chosen = random.choice(self._types)
-                drawer = _MACHINE_DRAWERS.get(chosen)
-                if drawer is not None:
-                    M = drawer(n_mels, T)
-                    mask = torch.from_numpy(M.astype(np.float32)).unsqueeze(0).unsqueeze(0)
-                else:
-                    mask = torch.zeros(1, 1, n_mels, T, device=device, dtype=torch.float32)
-            else:
-                mask = torch.zeros(1, 1, n_mels, T, device=device, dtype=torch.float32)
+            arr = self._single_mask_numpy()
+            mask = torch.from_numpy(arr.astype(np.float32)).unsqueeze(0).unsqueeze(0)
             masks.append(mask)
         return torch.cat(masks, dim=0).to(device)
 
@@ -270,20 +153,18 @@ class AnomalyMapGenerator:
 
     def __init__(
         self,
-        strategy: Literal["perlin", "audio_specific", "both", "machine_specific"],
+        strategy: Literal["perlin", "audio_specific", "both"],
         spectrogram_shape: tuple[int, int],
         n_mels: int | None = None,
         T: int | None = None,
         zero_mask_prob: float = 0.5,
-        machine_type: str | None = None,
     ) -> None:
         """
         Args:
-            strategy: 'perlin', 'audio_specific', 'both', or 'machine_specific'
+            strategy: 'perlin', 'audio_specific', or 'both' (Perlin vs audio 50/50)
             spectrogram_shape: (n_mels, T)
-            n_mels, T: required for audio_specific and machine_specific
+            n_mels, T: required for audio_specific and both
             zero_mask_prob: per-sample probability of returning a zero mask (no anomaly)
-            machine_type: required when strategy == 'machine_specific' (e.g. 'fan' or 'ToyCar+ToyConveyor+fan+...')
         """
         self.strategy_name = strategy
         self.spectrogram_shape = spectrogram_shape
@@ -293,9 +174,9 @@ class AnomalyMapGenerator:
             if strategy in ("perlin", "both")
             else None
         )
-        self.machine_specific = (
-            MachineSpecificStrategy(spectrogram_shape, n_mels, T, machine_type=machine_type or "")
-            if strategy in ("both", "machine_specific") and n_mels is not None and T is not None
+        self.audio_specific = (
+            AudioSpecificStrategy(spectrogram_shape, n_mels, T)
+            if strategy in ("audio_specific", "both") and n_mels is not None and T is not None
             else None
         )
 
@@ -304,46 +185,37 @@ class AnomalyMapGenerator:
         if self.strategy_name == "perlin":
             assert self.perlin is not None
             return self.perlin(1, device)
-        if self.strategy_name == "machine_specific":
-            assert self.machine_specific is not None
-            return self.machine_specific(1, device)
-        if random.random() < 0.2:
-            assert self.perlin is not None
-            return self.perlin(1, device)
-        assert self.machine_specific is not None
-        return self.machine_specific(1, device)
+        if self.strategy_name == "audio_specific":
+            assert self.audio_specific is not None
+            return self.audio_specific(1, device)
+        if self.strategy_name == "both":
+            if random.random() < 0.5:
+                assert self.perlin is not None
+                return self.perlin(1, device)
+            assert self.audio_specific is not None
+            return self.audio_specific(1, device)
+        raise RuntimeError(f"Unknown strategy: {self.strategy_name}")
 
     def generate_for_training_sample(
         self,
         device: torch.device | str,
         force_anomaly: bool = True,
-        preferred_machine_type: str | None = None,
     ) -> torch.Tensor:
-        """
-        Generate one mask for a single training sample, optionally aligning
-        ``machine_specific`` / ``both`` with the sample's DCASE machine type.
-
-        When ``preferred_machine_type`` is None, behavior matches ``generate(1, ...,
-        force_anomaly=force_anomaly)``.
-        """
+        """Generate one mask for a single training sample."""
         if force_anomaly:
-            if preferred_machine_type is None:
-                return self.generate(1, device, force_anomaly=True)
             if self.strategy_name == "perlin":
                 assert self.perlin is not None
                 return self.perlin(1, device)
-            if self.strategy_name == "machine_specific":
-                assert self.machine_specific is not None
-                return self.machine_specific.single_mask(preferred_machine_type, device)
+            if self.strategy_name == "audio_specific":
+                assert self.audio_specific is not None
+                return self.audio_specific.single_mask(device)
             if self.strategy_name == "both":
                 if random.random() < 0.5:
                     assert self.perlin is not None
                     return self.perlin(1, device)
-                assert self.machine_specific is not None
-                return self.machine_specific.single_mask(preferred_machine_type, device)
-            if self.strategy_name == "audio_specific":
-                return self.generate(1, device, force_anomaly=True)
-            return self.generate(1, device, force_anomaly=True)
+                assert self.audio_specific is not None
+                return self.audio_specific.single_mask(device)
+            raise RuntimeError(f"Unknown strategy: {self.strategy_name}")
         return self.generate(1, device, force_anomaly=False)
 
     def generate(
@@ -371,14 +243,16 @@ class AnomalyMapGenerator:
             if self.strategy_name == "perlin":
                 assert self.perlin is not None
                 return self.perlin(batch_size, device)
-            if self.strategy_name == "machine_specific":
-                assert self.machine_specific is not None
-                return self.machine_specific(batch_size, device)
-            if random.random() < 0.5:
-                assert self.perlin is not None
-                return self.perlin(batch_size, device)
-            assert self.machine_specific is not None
-            return self.machine_specific(batch_size, device)
+            if self.strategy_name == "audio_specific":
+                assert self.audio_specific is not None
+                return self.audio_specific(batch_size, device)
+            if self.strategy_name == "both":
+                if random.random() < 0.5:
+                    assert self.perlin is not None
+                    return self.perlin(batch_size, device)
+                assert self.audio_specific is not None
+                return self.audio_specific(batch_size, device)
+            raise RuntimeError(f"Unknown strategy: {self.strategy_name}")
 
         masks = []
         for _ in range(batch_size):

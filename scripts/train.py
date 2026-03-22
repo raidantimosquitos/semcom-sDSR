@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     s2.add_argument("--lambda_recon", type=float, default=10.0)
     s2.add_argument("--lambda_focal", type=float, default=1.0)
     s2.add_argument("--lambda_sub", type=float, default=1.0, help="Weight for subspace restriction loss L2(F̃, Q)")
-    s2.add_argument("--anomaly_strategy", type=str, default="both", choices=["perlin", "machine_specific", "both"], help="Synthetic anomaly mask strategy, perlin noise, machine-specific masks or both")
+    s2.add_argument("--anomaly_strategy", type=str, default="both", choices=["perlin", "audio_specific", "both"], help="Synthetic anomaly mask: perlin, random band + time segments (audio_specific), or both")
     s2.add_argument("--fine_only_prob", type=float, default=0.65, help="Fraction of anomaly samples that inject at fine level only; rest inject at both levels (default 0.65 = 65%% fine-only, 35%% both)")
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
     s2.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
