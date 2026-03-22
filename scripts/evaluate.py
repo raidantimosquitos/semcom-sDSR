@@ -10,6 +10,9 @@ Usage:
   python scripts/evaluate.py --stage1_ckpt checkpoints/stage1/fan/best.pt \\
     --stage2_ckpt checkpoints/stage2/fan/stage2_fan_final.pt \\
     --data_path /path/to/dcase --machine_type fan [--output results_fan.csv]
+
+  Joint multi-type (same composite IDs as training):
+  python scripts/evaluate.py ... --machine_types fan pump slider
 """
 
 from __future__ import annotations
@@ -37,8 +40,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stage1_ckpt", type=str, required=True, help="Stage 1 checkpoint (encoder, codebook, general decoder)")
     p.add_argument("--stage2_ckpt", type=str, required=True, help="Stage 2 checkpoint (object-specific decoder, anomaly detector)")
     p.add_argument("--data_path", type=str, required=True, help="Path to DCASE root")
-    p.add_argument("--machine_type", type=str, default="fan")
-    p.add_argument("--machine_id", type=str, default=None, help="If set, evaluate only on this machine_id (train calibration and test)")
+    p.add_argument("--machine_type", type=str, default="fan", help="Single machine type (ignored if --machine_types is set)")
+    p.add_argument(
+        "--machine_types",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Multiple machine types: joint calibration (train normal) and test with composite machine IDs",
+    )
+    p.add_argument("--machine_id", type=str, default=None, help="If set, evaluate only on this machine_id (single-type only)")
     p.add_argument("--output", type=str, default=None, help="CSV output path (default: <stage2_ckpt_parent>/results/results.csv)")
     p.add_argument("--plot", type=str, default=None, help="Path to save comparison plot (default: <stage2_ckpt_parent>/results/comparison.png)")
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
@@ -138,19 +148,33 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
     """Run evaluation; all user-facing output via tee (terminal + log file)."""
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
     norm_mean, norm_std = load_norm_from_stage1_ckpt(stage1_ckpt)
-    train_ds = DCASE2020Task2LogMelDataset(
-        root=args.data_path,
-        machine_type=args.machine_type,
-        machine_id=args.machine_id,
-    )
-    _, _, n_mels, T = train_ds.data.shape
 
-    test_ds = DCASE2020Task2TestDataset(
-        root=args.data_path,
-        machine_type=args.machine_type,
-        target_T=train_ds.target_T,
-        machine_id=args.machine_id,
-    )
+    if args.machine_types is not None:
+        if args.machine_id is not None:
+            raise ValueError("--machine_id cannot be used with --machine_types")
+        train_ds = DCASE2020Task2LogMelDataset(
+            root=args.data_path,
+            machine_types=list(args.machine_types),
+            include_test=False,
+        )
+        test_ds = DCASE2020Task2TestDataset(
+            root=args.data_path,
+            machine_types=list(args.machine_types),
+            target_T=train_ds.target_T,
+        )
+    else:
+        train_ds = DCASE2020Task2LogMelDataset(
+            root=args.data_path,
+            machine_type=args.machine_type,
+            machine_id=args.machine_id,
+        )
+        test_ds = DCASE2020Task2TestDataset(
+            root=args.data_path,
+            machine_type=args.machine_type,
+            target_T=train_ds.target_T,
+            machine_id=args.machine_id,
+        )
+    _, _, n_mels, T = train_ds.data.shape
 
     # Architecture from checkpoint (same as training); fallback for old checkpoints
     num_embeddings_coarse = stage1_ckpt["num_embeddings_coarse"]

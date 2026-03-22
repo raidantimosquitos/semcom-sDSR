@@ -63,7 +63,7 @@ class Stage2Trainer(BaseTrainer):
         self.lr_min = lr_min
         self.total_steps = total_steps
 
-        # Dataset is already for a single machine_type; no filtering needed
+        # Dataset run name must match base.machine_type (single type or joined multi-type)
         if getattr(dataset, "machine_type", None) not in (None, machine_type):
             raise ValueError(f"Dataset machine_type '{getattr(dataset, 'machine_type')}' != trainer machine_type '{machine_type}'")
 

@@ -6,6 +6,7 @@ Usage:
   python scripts/train.py stage1 --data_path /path --machine_type fan --n_iter 20000
   python scripts/train.py stage1 --data_path /path --machine_type fan pump slider --n_iter 20000
   python scripts/train.py stage2 --data_path /path --machine_type fan --stage1_ckpt ./checkpoints/stage1/fan/best.pt --n_iter 10000
+  python scripts/train.py stage2 --data_path /path --machine_type fan pump slider --stage1_ckpt ./checkpoints/stage1/fan+pump+slider/best.pt --n_iter 10000
   python scripts/train.py full --data_path /path --machine_type fan
 """
 
@@ -60,10 +61,21 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     s1.add_argument("--include_test", action="store_true", help="Include test data in stage1 training")
 
-    # Stage 2
+    # Stage 2: one or more machine types (joint Stage 2 if multiple; default single fan)
     s2 = sub.choices["stage2"]
-    s2.add_argument("--machine_type", type=str, default="fan", help="Machine type (e.g. fan, pump)")
-    s2.add_argument("--machine_id", type=str, default=None, help="If set, train on this machine_id only; other IDs (same type) used as adversarial samples (mask all 1s)")
+    s2.add_argument(
+        "--machine_type",
+        type=str,
+        nargs="+",
+        default=["fan"],
+        help="One or more machine types (e.g. fan or fan pump slider for joint Stage 2)",
+    )
+    s2.add_argument(
+        "--machine_id",
+        type=str,
+        default=None,
+        help="If set, train on this machine_id only (single-type only); other IDs of the same type used as adversarial samples (mask all 1s). Not used for joint multi-type training.",
+    )
     s2.add_argument("--batch_size", type=int, default=16, help="Batch size (default: 16)")
     s2.add_argument("--n_iter", type=int, default=10000)
     s2.add_argument("--stage1_ckpt", type=str, required=True, help="Path to Stage 1 checkpoint")
@@ -78,7 +90,13 @@ def parse_args() -> argparse.Namespace:
 
     # Full
     full = sub.choices["full"]
-    full.add_argument("--machine_type", type=str, default="fan", help="Machine type (e.g. fan, pump)")
+    full.add_argument(
+        "--machine_type",
+        type=str,
+        nargs="+",
+        default=["fan"],
+        help="One or more machine types (e.g. fan or fan pump for joint training)",
+    )
     full.add_argument("--batch_size_s1", type=int, default=128, help="Stage 1 batch size")
     full.add_argument("--batch_size_s2", type=int, default=16, help="Stage 2 batch size")
     full.add_argument("--stage1_iter", type=int, default=20000)
@@ -174,20 +192,37 @@ def run_stage1(args: argparse.Namespace) -> None:
 def run_stage2(args: argparse.Namespace) -> None:
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
 
-    ds_common = dict(
-        root=args.data_path,
-        machine_type=args.machine_type,
-    )
-    q_vae_dataset = DCASE2020Task2LogMelDataset(
-        **ds_common,
-        machine_id=args.machine_id,
-    )
+    machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
+    if len(machine_types) > 1 and args.machine_id is not None:
+        raise ValueError(
+            "machine_id / adversarial training is only supported for a single machine_type; "
+            "pass one type or omit --machine_id for joint multi-type Stage 2."
+        )
+
+    if len(machine_types) == 1:
+        ds_common: dict = dict(root=args.data_path, machine_type=machine_types[0])
+        q_vae_dataset = DCASE2020Task2LogMelDataset(
+            **ds_common,
+            machine_id=args.machine_id,
+        )
+        run_name = machine_types[0]
+    else:
+        q_vae_dataset = DCASE2020Task2LogMelDataset(
+            root=args.data_path,
+            machine_types=machine_types,
+            include_test=False,
+        )
+        run_name = "+".join(sorted(machine_types))
+
     _, _, n_mels, T = q_vae_dataset.data.shape
 
     adversarial_dataset = None
     if args.machine_id is not None:
-        # Full machine_type dataset (no machine_id filter) for adversarial samples
-        q_vae_full = DCASE2020Task2LogMelDataset(**ds_common)
+        # Full single-type dataset (no machine_id filter) for adversarial samples
+        q_vae_full = DCASE2020Task2LogMelDataset(
+            root=args.data_path,
+            machine_type=machine_types[0],
+        )
         adversarial_indices = [
             i for i in range(len(q_vae_full._machine_id_strs))
             if q_vae_full._machine_id_strs[i] != args.machine_id
@@ -232,7 +267,7 @@ def run_stage2(args: argparse.Namespace) -> None:
     trainer = Stage2Trainer(
         model=model,
         dataset=train_dataset,
-        machine_type=args.machine_type,
+        machine_type=run_name,
         machine_id=args.machine_id,
         lambda_recon=args.lambda_recon,
         lambda_focal=args.lambda_focal,
@@ -249,6 +284,10 @@ def run_stage2(args: argparse.Namespace) -> None:
 
 
 def run_full(args: argparse.Namespace) -> None:
+    machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
+    stage1_run = (
+        machine_types[0] if len(machine_types) == 1 else "+".join(sorted(machine_types))
+    )
     stage1_args = argparse.Namespace(
         data_path=args.data_path,
         machine_type=args.machine_type,
@@ -265,7 +304,7 @@ def run_full(args: argparse.Namespace) -> None:
     )
     run_stage1(stage1_args)
 
-    ckpt_path = Path(args.ckpt_dir) / "stage1" / args.machine_type
+    ckpt_path = Path(args.ckpt_dir) / "stage1" / stage1_run
     ckpt_files = sorted(ckpt_path.glob("stage1_*.pt"))
     if not ckpt_files:
         raise FileNotFoundError(f"No stage1 checkpoint found in {ckpt_path}")
@@ -273,7 +312,7 @@ def run_full(args: argparse.Namespace) -> None:
 
     stage2_args = argparse.Namespace(
         data_path=args.data_path,
-        machine_type=args.machine_type,
+        machine_type=machine_types,
         ckpt_dir=args.ckpt_dir,
         device=args.device,
         batch_size=args.batch_size_s2,
@@ -287,6 +326,9 @@ def run_full(args: argparse.Namespace) -> None:
         lambda_focal=1.0,
         lambda_sub=1.0,
         anomaly_strategy="both",
+        anomaly_sampling="distant",
+        fine_only_prob=0.65,
+        machine_id=None,
         resume=None,
     )
     run_stage2(stage2_args)

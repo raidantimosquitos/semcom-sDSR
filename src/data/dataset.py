@@ -17,6 +17,14 @@ from ..utils.audio import load_mel_for_dir, standardize_spectrogram
 # Log-mel time crop before standardization (DCASE Task 2 shortest-clip alignment).
 MEL_TIME_CROP = 313
 
+# Globally unique machine key when multiple machine_types are loaded (train + eval calibration).
+COMPOSITE_ID_SEP = "__"
+
+
+def composite_machine_id(machine_type: str, machine_id: str) -> str:
+    """Join DCASE machine_type and id (e.g. fan + id_00 -> fan__id_00)."""
+    return f"{machine_type}{COMPOSITE_ID_SEP}{machine_id}"
+
 
 class DCASE2020Task2LogMelDataset(Dataset):
     """
@@ -29,6 +37,9 @@ class DCASE2020Task2LogMelDataset(Dataset):
     (3) then zero-pad to the next multiple of 16 (320). Same order for a single type.
 
     __getitem__ returns (spectrogram, label, machine_id) with label 0 = normal.
+    When ``machine_types`` has more than one entry, ``machine_id`` is composite:
+    ``{machine_type}__{id_XX}`` (see :func:`composite_machine_id`) so IDs do not collide
+    across types. ``self._machine_type_strs[i]`` is the DCASE machine type string for row ``i``.
 
     Stage1 training uses this dataset with machine_types (all types) as the general dataset.
 
@@ -130,6 +141,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
         self.target_T = target_T
         self.machine_ids = sorted(set(machine_id_strs))
         self._machine_id_strs = machine_id_strs
+        self._machine_type_strs = [machine_type] * len(machine_id_strs)
+        self._use_composite_ids = False
 
         if machine_id is not None:
             indices = [i for i, mid in enumerate(self._machine_id_strs) if mid == machine_id]
@@ -137,6 +150,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
                 raise ValueError(f"No samples found for machine_id={machine_id} in {machine_type}")
             self.data = self.data[indices]
             self._machine_id_strs = [self._machine_id_strs[i] for i in indices]
+            self._machine_type_strs = [self._machine_type_strs[i] for i in indices]
             self.machine_ids = [machine_id]
             print(
                 f"DCASE2020Task2LogMelDataset: filtered to machine_id={machine_id} | "
@@ -176,8 +190,10 @@ class DCASE2020Task2LogMelDataset(Dataset):
         root_path = Path(root)
         all_spectrograms: list[torch.Tensor] = []
         all_machine_id_strs: list[str] = []
+        all_machine_type_strs: list[str] = []
 
         target_T = ((MEL_TIME_CROP + 15) // 16) * 16  # 320
+        self._use_composite_ids = len(machine_types) > 1
 
         # 1. Load each type; when include_test=True, also load test/ (normal + anomaly).
         for mt in sorted(machine_types):
@@ -198,6 +214,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
             stacked_mt = torch.stack(spectrograms)
             all_spectrograms.append(stacked_mt)
             all_machine_id_strs.extend(machine_id_strs)
+            all_machine_type_strs.extend([mt] * len(machine_id_strs))
 
         self.data = torch.cat(all_spectrograms, dim=0)
 
@@ -207,7 +224,16 @@ class DCASE2020Task2LogMelDataset(Dataset):
 
         self.target_T = target_T
         self._machine_id_strs = all_machine_id_strs
-        self.machine_ids = sorted(set(self._machine_id_strs))
+        self._machine_type_strs = all_machine_type_strs
+        if self._use_composite_ids:
+            self.machine_ids = sorted(
+                {
+                    composite_machine_id(mt, mid)
+                    for mt, mid in zip(self._machine_type_strs, self._machine_id_strs)
+                }
+            )
+        else:
+            self.machine_ids = sorted(set(self._machine_id_strs))
 
         print(f"DCASE2020Task2LogMelDataset: {self.machine_type} | {len(self.data)} spectrograms (T→{target_T}), shape {tuple(self.data.shape)} | IDs: {self.machine_ids} | {self.data.nbytes / 1e9:.2f} GB in RAM")
 
@@ -218,7 +244,10 @@ class DCASE2020Task2LogMelDataset(Dataset):
         # label 0 = normal (all training samples are normal)
         # self.data stores raw log-mel (N, 3, n_mels, T)
         x_logmel = self.data[idx]  # (1, 3, n_mels, T)
-        return x_logmel, 0, self._machine_id_strs[idx]
+        mid = self._machine_id_strs[idx]
+        if getattr(self, "_use_composite_ids", False):
+            mid = composite_machine_id(self._machine_type_strs[idx], mid)
+        return x_logmel, 0, mid
 
 
 class AudDSRAnomTrainDataset(Dataset):
@@ -226,15 +255,29 @@ class AudDSRAnomTrainDataset(Dataset):
     Stage-2 training dataset: wraps a normal spectrogram dataset and adds
     synthetic anomaly masks at dataset level (DSR-style).
 
+    The base dataset is typically :class:`DCASE2020Task2LogMelDataset` with either
+    a single ``machine_type`` or multiple ``machine_types`` (joint Stage-2).
+    ``base.machine_type`` is the joined name when multi-type; ``machine_id`` in
+    batches may be composite ``{type}__{id_XX}`` when multiple types are loaded.
+
+    For ``machine_specific`` / ``both``, if the base exposes ``_machine_type_strs``
+    aligned with indices (always true for :class:`DCASE2020Task2LogMelDataset`),
+    synthetic masks use the drawer for the **sample's** machine type instead of
+    a random type among all loaded types.
+
     Each __getitem__ returns a dict: image (spectrogram), anomaly_mask,
     has_anomaly, label, machine_id. With probability zero_mask_prob the mask
     is zero (normal); otherwise a mask is generated with the chosen strategy
     (perlin, audio_specific, or both). The model uses the mask for codebook
     replacement in feature space.
 
-    When adversarial_dataset is provided (e.g. other machine_ids same type),
-    the anomaly half is split 50-50: 50% synthetic masks, 50% adversarial
-    samples with mask of all 1s. Overall: zero_mask_prob normal,
+    When adversarial_dataset is provided (e.g. other machine_ids of the same
+    single machine type), the anomaly half is split 50-50: 50% synthetic masks,
+    50% adversarial samples with mask of all 1s. This path is intended for
+    single-type bases only; joint multi-type training should use
+    ``adversarial_dataset=None`` unless extended separately.
+
+    Overall: zero_mask_prob normal,
     (1-zero_mask_prob)*0.5 synthetic, (1-zero_mask_prob)*0.5 adversarial.
     """
 
@@ -273,6 +316,12 @@ class AudDSRAnomTrainDataset(Dataset):
             machine_type=self.machine_type,
         )
 
+    def _preferred_machine_type_for_idx(self, idx: int) -> str | None:
+        mts = getattr(self.base, "_machine_type_strs", None)
+        if mts is None or len(mts) != len(self.base):
+            return None
+        return mts[idx]
+
     def __len__(self) -> int:
         return len(self.base)
 
@@ -296,9 +345,17 @@ class AudDSRAnomTrainDataset(Dataset):
                 has_anomaly = 1.0
             else:
                 spectrogram, label, machine_id = self.base[idx]
-                mask = self._mask_generator.generate(
-                    1, device="cpu", force_anomaly=True
-                )
+                pref = self._preferred_machine_type_for_idx(idx)
+                if pref is not None and self.strategy in ("machine_specific", "both"):
+                    mask = self._mask_generator.generate_for_training_sample(
+                        device="cpu",
+                        force_anomaly=True,
+                        preferred_machine_type=pref,
+                    )
+                else:
+                    mask = self._mask_generator.generate(
+                        1, device="cpu", force_anomaly=True
+                    )
                 has_anomaly = 1.0
         return {
             "image": spectrogram,
@@ -317,6 +374,11 @@ class DCASE2020Task2TestDataset(Dataset):
     __getitem__ returns (spectrogram, label, machine_id):
         label 0 = normal, 1 = anomalous (from filename).
 
+    Provide exactly one of ``machine_type`` or ``machine_types``. When multiple types are
+    loaded, ``machine_id`` in each tuple is composite ``{type}__{id_XX}`` (same as
+    :class:`DCASE2020Task2LogMelDataset` with multiple types). ``machine_id`` filter
+    applies only to single-type construction.
+
     Expected layout: root/{machine_type}/test/
         normal_id_01_00000000.wav   -> label 0, machine_id id_01
         anomaly_id_01_00000000.wav  -> label 1, machine_id id_01
@@ -329,7 +391,8 @@ class DCASE2020Task2TestDataset(Dataset):
     def __init__(
         self,
         root: str,
-        machine_type: str,
+        machine_type: str | None = None,
+        machine_types: list[str] | None = None,
         sample_rate: int = 16_000,
         n_fft: int = 1024,
         hop_length: int = 512,
@@ -340,6 +403,53 @@ class DCASE2020Task2TestDataset(Dataset):
         target_T: int | None = None,
         machine_id: str | None = None,
     ):
+        if (machine_type is None) == (machine_types is None):
+            raise ValueError("Provide exactly one of machine_type or machine_types")
+        if machine_types is not None:
+            if machine_id is not None:
+                raise ValueError("machine_id filter only applies to single machine_type")
+            self._init_multi(
+                root,
+                machine_types,
+                sample_rate,
+                n_fft,
+                hop_length,
+                n_mels,
+                f_min,
+                f_max,
+                top_db,
+                target_T,
+            )
+        else:
+            assert machine_type is not None
+            self._init_single(
+                root,
+                machine_type,
+                sample_rate,
+                n_fft,
+                hop_length,
+                n_mels,
+                f_min,
+                f_max,
+                top_db,
+                target_T,
+                machine_id,
+            )
+
+    def _init_single(
+        self,
+        root: str,
+        machine_type: str,
+        sample_rate: int,
+        n_fft: int,
+        hop_length: int,
+        n_mels: int,
+        f_min: float,
+        f_max: float,
+        top_db: float,
+        target_T: int | None,
+        machine_id: str | None,
+    ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
             n_fft=n_fft,
@@ -376,6 +486,59 @@ class DCASE2020Task2TestDataset(Dataset):
         print(
             f"DCASE2020Task2TestDataset: {machine_type} | {len(self.samples)} clips | "
             f"IDs: {self.machine_ids}"
+        )
+
+    def _init_multi(
+        self,
+        root: str,
+        machine_types: list[str],
+        sample_rate: int,
+        n_fft: int,
+        hop_length: int,
+        n_mels: int,
+        f_min: float,
+        f_max: float,
+        top_db: float,
+        target_T: int | None,
+    ) -> None:
+        self.mel_transform = T.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            f_min=f_min,
+            f_max=f_max,
+        )
+        self.to_db = T.AmplitudeToDB(top_db=top_db)
+        self.n_mels = n_mels
+        self.sample_rate = sample_rate
+        self.target_T = target_T
+
+        self.machine_type = "+".join(sorted(machine_types))
+        self._use_composite_ids = len(machine_types) > 1
+        root_path = Path(root)
+
+        self.samples = []
+        machine_ids: set[str] = set()
+
+        for mt in sorted(machine_types):
+            base = root_path / mt / "test"
+            if not base.exists():
+                raise FileNotFoundError(f"Test directory not found: {base}")
+            for wav_path in sorted(base.glob("*.wav")):
+                m = self._FILENAME_RE.match(wav_path.name)
+                if m:
+                    label = 0 if m.group(1).lower() == "normal" else 1
+                    mid = m.group(2)
+                    out_id = composite_machine_id(mt, mid) if self._use_composite_ids else mid
+                    machine_ids.add(out_id)
+                    self.samples.append((str(wav_path), label, out_id))
+
+        self.machine_ids = sorted(machine_ids)
+
+        print(
+            f"DCASE2020Task2TestDataset: {self.machine_type} | {len(self.samples)} clips | "
+            f"IDs: {len(self.machine_ids)} unique"
         )
 
     def __len__(self) -> int:
@@ -432,6 +595,9 @@ if __name__ == "__main__":
     print(f"Dataset root: {DATA_ROOT}")
 
     dataset = DCASE2020Task2LogMelDataset(root=root_str, machine_types=MACHINE_TYPES)
+    if len(MACHINE_TYPES) > 1:
+        _, _, mid0 = dataset[0]
+        assert COMPOSITE_ID_SEP in mid0, f"expected composite machine_id, got {mid0}"
     loader = make_dataloader(dataset, batch_size=min(32, len(dataset)))
 
     specs, labels, machine_ids = next(iter(loader))
@@ -447,6 +613,16 @@ if __name__ == "__main__":
         machine_type=MACHINE_TYPE_TEST,
         target_T=dataset.target_T,
     )
+    test_joint = DCASE2020Task2TestDataset(
+        root=root_str,
+        machine_types=MACHINE_TYPES,
+        target_T=dataset.target_T,
+    )
+    if len(MACHINE_TYPES) > 1:
+        assert len(test_joint) > 0
+        _, _, tmid = test_joint[0]
+        assert COMPOSITE_ID_SEP in tmid, f"expected composite test id, got {tmid}"
+
     test_loader = make_dataloader(test_dataset, batch_size=min(32, len(test_dataset)))
     specs, labels, machine_ids = next(iter(test_loader))
     print(f"Test batch shape: {tuple(specs.shape)}  (B, 1, n_mels, T)")

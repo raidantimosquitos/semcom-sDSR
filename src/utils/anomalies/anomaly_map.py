@@ -224,6 +224,21 @@ class MachineSpecificStrategy:
         self.T = T
         self._types = [t.strip() for t in machine_type.split("+") if t.strip()]
 
+    def single_mask(
+        self,
+        machine_type: str,
+        device: torch.device | str,
+    ) -> torch.Tensor:
+        """One (1, 1, n_mels, T) mask using the drawer for ``machine_type``."""
+        n_mels, T = self.n_mels, self.T
+        drawer = _MACHINE_DRAWERS.get(machine_type)
+        if drawer is not None:
+            M = drawer(n_mels, T)
+            mask = torch.from_numpy(M.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+        else:
+            mask = torch.zeros(1, 1, n_mels, T, dtype=torch.float32)
+        return mask.to(device)
+
     def __call__(
         self,
         batch_size: int,
@@ -298,6 +313,39 @@ class AnomalyMapGenerator:
         assert self.machine_specific is not None
         return self.machine_specific(1, device)
 
+    def generate_for_training_sample(
+        self,
+        device: torch.device | str,
+        force_anomaly: bool = True,
+        preferred_machine_type: str | None = None,
+    ) -> torch.Tensor:
+        """
+        Generate one mask for a single training sample, optionally aligning
+        ``machine_specific`` / ``both`` with the sample's DCASE machine type.
+
+        When ``preferred_machine_type`` is None, behavior matches ``generate(1, ...,
+        force_anomaly=force_anomaly)``.
+        """
+        if force_anomaly:
+            if preferred_machine_type is None:
+                return self.generate(1, device, force_anomaly=True)
+            if self.strategy_name == "perlin":
+                assert self.perlin is not None
+                return self.perlin(1, device)
+            if self.strategy_name == "machine_specific":
+                assert self.machine_specific is not None
+                return self.machine_specific.single_mask(preferred_machine_type, device)
+            if self.strategy_name == "both":
+                if random.random() < 0.5:
+                    assert self.perlin is not None
+                    return self.perlin(1, device)
+                assert self.machine_specific is not None
+                return self.machine_specific.single_mask(preferred_machine_type, device)
+            if self.strategy_name == "audio_specific":
+                return self.generate(1, device, force_anomaly=True)
+            return self.generate(1, device, force_anomaly=True)
+        return self.generate(1, device, force_anomaly=False)
+
     def generate(
         self,
         batch_size: int,
@@ -326,7 +374,7 @@ class AnomalyMapGenerator:
             if self.strategy_name == "machine_specific":
                 assert self.machine_specific is not None
                 return self.machine_specific(batch_size, device)
-            if random.random() < 0.2:
+            if random.random() < 0.5:
                 assert self.perlin is not None
                 return self.perlin(batch_size, device)
             assert self.machine_specific is not None
