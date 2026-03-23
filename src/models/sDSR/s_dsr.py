@@ -213,7 +213,7 @@ class sDSR(nn.Module):
             strength_fine=strength_fine, strength_coarse=strength_coarse,
         )
 
-        # 65% fine-only, 35% both levels (same mask at both; no coarse-only)
+        
         has_anomaly = (M_gt.sum(dim=(1, 2, 3)) > 0).view(batch_size, 1, 1, 1).float()
         use_fine = has_anomaly  # always use augmented fine when anomaly
         use_coarse = has_anomaly * (

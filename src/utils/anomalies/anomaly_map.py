@@ -111,7 +111,7 @@ class AudioSpecificStrategy:
     def _single_mask_numpy(self) -> np.ndarray:
         n_mels, T = self.n_mels, self.T
         M = np.zeros((n_mels, T), dtype=np.float32)
-        bandwidth = random.randint(MIN_FREQ_BINS, n_mels)
+        bandwidth = self._sample_bandwidth(n_mels)
         f_low = random.randint(0, max(0, n_mels - bandwidth))
         f_high = f_low + bandwidth
         n_seg = random.randint(self.min_segments, self.max_segments)
@@ -119,7 +119,7 @@ class AudioSpecificStrategy:
             if T <= MIN_TIME_FRAMES:
                 t_start, t_end = 0, T
             else:
-                seg_len = random.randint(MIN_TIME_FRAMES, T)
+                seg_len = self._sample_segment_len(T)
                 max_start = max(0, T - seg_len)
                 t_start = random.randint(0, max_start)
                 t_end = t_start + seg_len
@@ -130,6 +130,54 @@ class AudioSpecificStrategy:
         """One (1, 1, n_mels, T) mask."""
         arr = self._single_mask_numpy()
         return torch.from_numpy(arr.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
+
+    def _sample_bandwidth(self, n_mels: int) -> int:
+        u = random.random()
+        if n_mels <= MIN_FREQ_BINS:
+            return n_mels
+        
+        # Renormalize if upper tiers are empty
+        if n_mels <= 30:
+            return random.randint(MIN_FREQ_BINS, n_mels)
+        if n_mels <= 70:
+            # only narrow vs medium
+            if u < 0.7 / (0.7 + 0.2):
+                return random.randint(MIN_FREQ_BINS, min(30, n_mels))
+            return random.randint(31, n_mels)
+        if u < 0.7:
+            return random.randint(MIN_FREQ_BINS, 30)
+        if u < 0.9:
+            return random.randint(31, min(70, n_mels))
+        # wide
+        lo = max(71, MIN_FREQ_BINS)
+        hi = n_mels
+        if lo > hi:
+            return random.randint(31, min(70, n_mels))
+        return random.randint(lo, hi)
+        
+    def _sample_segment_len(self, T: int) -> int:
+        if T <= 1:
+            return T
+        if T < 10:
+            return random.randint(MIN_TIME_FRAMES, T)
+        u = random.random()
+        def clamp_len(x: int) -> int:
+            return max(MIN_TIME_FRAMES, min(x, T))
+        if T <= 40:
+            return clamp_len(random.randint(10, T))
+        if T <= 120:
+            # short vs medium only; split 60:30 within [0,1)
+            p_short = 0.6 / (0.6 + 0.3)
+            if u < p_short:
+                return clamp_len(random.randint(10, 40))
+            return clamp_len(random.randint(41, T))
+        # T >= 121
+        if u < 0.6:
+            return clamp_len(random.randint(10, 40))
+        if u < 0.9:
+            return clamp_len(random.randint(41, 120))
+        return clamp_len(random.randint(121, T))
+
 
     def __call__(
         self,

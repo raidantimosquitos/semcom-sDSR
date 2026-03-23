@@ -72,7 +72,7 @@ class ObjectSpecificDecoder(nn.Module):
             return_aux: if True, return (x_s, aux_dict) with recon_feat_coarse/fine for L_sub
 
         Returns:
-            x_s: (B, 3, n_mels, T)
+            x_s: (B, 1, n_mels, T)
             When return_aux=True: (x_s, {"recon_feat_coarse": ..., "recon_feat_fine": ...}) or (x_s, {})
         """
         use_sub = (

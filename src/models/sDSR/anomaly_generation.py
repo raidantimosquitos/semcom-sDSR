@@ -75,8 +75,8 @@ class AnomalyGeneration(nn.Module):
         H_coarse, W_coarse = q_coarse.shape[2], q_coarse.shape[3]
         stride_fine = (max(1, H_spec // H_fine), max(1, W_spec // W_fine))
         stride_coarse = (max(1, H_spec // H_coarse), max(1, W_spec // W_coarse))
-        M_fine = F.max_pool2d(M_float, kernel_size=stride_fine, stride=stride_fine)
-        M_coarse = F.max_pool2d(M_float, kernel_size=stride_coarse, stride=stride_coarse)
+        M_fine = F.avg_pool2d(M_float, kernel_size=stride_fine, stride=stride_fine)
+        M_coarse = F.avg_pool2d(M_float, kernel_size=stride_coarse, stride=stride_coarse)
         if M_fine.shape[2] != H_fine or M_fine.shape[3] != W_fine:
             M_fine = _match_mask_size(M_fine, (H_fine, W_fine))
         if M_coarse.shape[2] != H_coarse or M_coarse.shape[3] != W_coarse:
