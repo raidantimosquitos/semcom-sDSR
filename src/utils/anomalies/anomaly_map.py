@@ -137,20 +137,41 @@ class AudioSpecificStrategy:
         n_mels, T = self.n_mels, self.T
         M = np.zeros((n_mels, T), dtype=np.float32)
 
-        bandwidth = 128
-        f_low = 0
-        f_high = f_low + bandwidth
+        # 50/50: (A) almost full mel range, very short in time  vs  (B) thin band, long in time
+        wide_band_short_time = random.random() < 0.5
+
+        if wide_band_short_time:
+            # --- Type A: high bandwidth (most of the spectrogram), short time columns ---
+            bandwidth = random.randint(max(MIN_FREQ_BINS, n_mels * 2 // 3), n_mels)
+            f_low = random.randint(0, n_mels - bandwidth)
+            f_high = f_low + bandwidth
+            seg_len_hi = max(MIN_TIME_FRAMES, min(T, 24))  # cap "short" (tune 8–32)
+            seg_len_lo = MIN_TIME_FRAMES
+        else:
+            # --- Type B: low bandwidth (1–8 mel bins), longer segments along time ---
+            bw_max = min(8, n_mels)
+            bandwidth = random.randint(1, bw_max)
+            f_low = random.randint(0, n_mels - bandwidth)
+            f_high = f_low + bandwidth
+            seg_len_lo = max(MIN_TIME_FRAMES, T // 16)  # tune: fraction of T
+            seg_len_hi = T  # full clip possible; cap if you want milder:
+            # seg_len_hi = min(T, max(seg_len_lo + 1, T * 3 // 4))
 
         n_seg = random.randint(self.min_segments, self.max_segments)
         for _ in range(n_seg):
             if T <= MIN_TIME_FRAMES:
                 t_start, t_end = 0, T
             else:
-                seg_len = random.randint(MIN_TIME_FRAMES//2, 3*MIN_TIME_FRAMES)
+                lo = min(seg_len_lo, T)
+                hi = min(seg_len_hi, T)
+                if hi < lo:
+                    lo, hi = hi, lo  # safety
+                seg_len = random.randint(lo, hi)
                 max_start = max(0, T - seg_len)
                 t_start = random.randint(0, max_start)
                 t_end = t_start + seg_len
             M[f_low:f_high, t_start:t_end] = 1.0
+
         return M
 
     def single_mask(self, device: torch.device | str) -> torch.Tensor:
