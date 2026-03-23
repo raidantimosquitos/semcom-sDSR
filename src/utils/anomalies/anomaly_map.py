@@ -2,8 +2,15 @@
 Anomaly map generation for sDSR training.
 
 Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
-1. PerlinNoiseStrategy: threshold/binarize Perlin noise (DSR-style)
-2. AudioSpecificStrategy: random frequency band + 3–7 time segments within that band
+1. PerlinNoiseStrategy: binarized Perlin noise on the mel–time grid (ICASSP 2024
+   AudDSR Sec. 3.3), with axis-aligned variants that resemble band-like or
+   duration-spanning defects—without rotating noise as in vision DSR.
+2. AudioSpecificStrategy: one random frequency band + several disjoint time
+   segments within that band (same section).
+
+Machine-type / ID agnostic: all choices are uniform (or Perlin-scale–only)
+functions of (n_mels, T), suitable for unsupervised training on the full
+DCASE-style mixture.
 """
 
 from __future__ import annotations
@@ -13,21 +20,26 @@ from typing import Literal
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from scipy.ndimage import rotate as ndimage_rotate
 
 from .perlin import rand_perlin_2d_np
 
-# Minimum mask extent so regions survive max-pool to coarse latent (8×8 cells)
+# Minimum mask extent so regions survive pooling to coarse latent (8×8 from input)
 MIN_FREQ_BINS = 4
 MIN_TIME_FRAMES = 4
 
 
 class PerlinNoiseStrategy:
     """
-    Generate anomaly map by thresholding Perlin noise (sDSR / MVTec style).
-    Produces blob-like anomaly regions. Optionally rotates the noise before
-    thresholding (matching original DSR) for more varied blob orientations.
+    Binarized Perlin noise for diverse anomaly regions (AudDSR / DSR-style).
+
+    Pure 2D Perlin (optionally rotated in vision DSR) does not match typical
+    log-mel defects well: anomalies often cover **most time** in a narrow band
+    or **most mel bins** for a short interval (ICASSP 2024 Sec. 3.3). We keep
+    **axis-aligned** noise only and mix:
+
+    - **2d**: full (n_mels, T) Perlin;
+    - **time_ridge**: 1×T Perlin, broadcast across mel (duration-wide structure);
+    - **freq_ridge**: n_mels×1 Perlin, broadcast across time (band-like structure).
     """
 
     def __init__(
@@ -35,63 +47,76 @@ class PerlinNoiseStrategy:
         spectrogram_shape: tuple[int, int],
         threshold: float = 0.5,
         perlin_scale_range: tuple[int, int] = (1, 5),
-        rotate: bool = True,
-        rotation_range: tuple[float, float] = (-120.0, 120.0),
     ) -> None:
         """
         Args:
-            spectrogram_shape: (n_mels, T) spectrogram spatial dimensions
-            threshold: binarization threshold
-            perlin_scale_range: (min_exp, max_exp) for res = 2^randint(min_exp, max_exp)
-            rotate: if True, apply random 2D rotation to noise before thresholding
-            rotation_range: (min_deg, max_deg) for rotation angle in degrees
+            spectrogram_shape: (n_mels, T)
+            threshold: binarization threshold (noise roughly in [-1, 1])
+            perlin_scale_range: inclusive exponent range; grid scale is 2**k per axis
         """
         self.spectrogram_shape = spectrogram_shape
         self.threshold = threshold
         n_mels, T = spectrogram_shape
-        # Cap max exponent so Perlin wavelength >= MIN_* (blobs survive max-pool)
         max_exp_freq = int(np.log2(max(1, n_mels // MIN_FREQ_BINS)))
         max_exp_time = int(np.log2(max(1, T // MIN_TIME_FRAMES)))
         effective_max = min(max_exp_freq, max_exp_time, perlin_scale_range[1])
         effective_min = min(perlin_scale_range[0], effective_max)
         self.perlin_scale_range = (effective_min, effective_max)
-        self.rotate = rotate
-        self.rotation_range = rotation_range
+
+    def _rand_res_1d(self) -> int:
+        return 2 ** random.randint(*self.perlin_scale_range)
+
+    def _noise_2d(self) -> np.ndarray:
+        n_mels, T = self.spectrogram_shape
+        ry = self._rand_res_1d()
+        rx = self._rand_res_1d()
+        return rand_perlin_2d_np((n_mels, T), (ry, rx))
+
+    def _noise_time_ridge(self) -> np.ndarray:
+        """Correlated across all mel bins (single temporal Perlin profile)."""
+        n_mels, T = self.spectrogram_shape
+        rt = min(self._rand_res_1d(), max(1, T))
+        noise = rand_perlin_2d_np((1, T), (1, rt))
+        return np.repeat(noise, n_mels, axis=0)
+
+    def _noise_freq_ridge(self) -> np.ndarray:
+        """Correlated across all frames (single spectral Perlin profile)."""
+        n_mels, T = self.spectrogram_shape
+        rf = min(self._rand_res_1d(), max(1, n_mels))
+        noise = rand_perlin_2d_np((n_mels, 1), (rf, 1))
+        return np.repeat(noise, T, axis=1)
+
+    def _one_mask_numpy(self) -> np.ndarray:
+        # Equal mix: no hyperparameters tied to a specific machine type
+        choice = random.randrange(3)
+        if choice == 0:
+            noise = self._noise_2d()
+        elif choice == 1:
+            noise = self._noise_time_ridge()
+        else:
+            noise = self._noise_freq_ridge()
+        return (noise > self.threshold).astype(np.float32)
 
     def __call__(
         self,
         batch_size: int,
         device: torch.device | str,
     ) -> torch.Tensor:
-        """
-        Generate anomaly map M. Each mask uses Perlin noise (optionally rotated)
-        then binarized at spectrogram shape.
-
-        Returns:
-            M: (B, 1, n_mels, T) binary mask
-        """
         masks = []
         for _ in range(batch_size):
-            res_y = 2 ** random.randint(*self.perlin_scale_range)
-            res_x = 2 ** random.randint(*self.perlin_scale_range)
-            res = (res_y, res_x)
-            noise = rand_perlin_2d_np(self.spectrogram_shape, res)
-            if self.rotate:
-                angle = random.uniform(*self.rotation_range)
-                noise = ndimage_rotate(
-                    noise, angle, reshape=False, order=1, mode="constant", cval=0
-                )
-            binary = (noise > self.threshold).astype(np.float32)
-            mask = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)
-            masks.append(mask)
-        M = torch.cat(masks, dim=0).to(device)
-        return M
+            binary = self._one_mask_numpy()
+            masks.append(torch.from_numpy(binary).unsqueeze(0).unsqueeze(0))
+        return torch.cat(masks, dim=0).to(device)
 
 
 class AudioSpecificStrategy:
     """
-    General spectrogram-space mask: pick a random frequency band (random bandwidth),
-    then set mask to 1 on several (3–7) disjoint time segments within that band.
+    One random frequency band, then several disjoint time segments inside it.
+
+    Matches the AudDSR description (ICASSP 2024 Sec. 3.3): choose where in
+    frequency the defect lives, then mark a few contiguous time intervals.
+    Sampling is uniform over valid bandwidths and segment lengths so it
+    generalizes across all mel lengths and time horizons used in training.
     """
 
     def __init__(
@@ -105,21 +130,23 @@ class AudioSpecificStrategy:
         self.spectrogram_shape = spectrogram_shape
         self.n_mels = n_mels
         self.T = T
-        self.min_segments = min_segments
-        self.max_segments = max_segments
+        self.min_segments = max(1, min_segments)
+        self.max_segments = max(self.min_segments, max_segments)
 
     def _single_mask_numpy(self) -> np.ndarray:
         n_mels, T = self.n_mels, self.T
         M = np.zeros((n_mels, T), dtype=np.float32)
-        bandwidth = self._sample_bandwidth(n_mels)
-        f_low = random.randint(0, max(0, n_mels - bandwidth))
+
+        bandwidth = 128
+        f_low = 0
         f_high = f_low + bandwidth
+
         n_seg = random.randint(self.min_segments, self.max_segments)
         for _ in range(n_seg):
             if T <= MIN_TIME_FRAMES:
                 t_start, t_end = 0, T
             else:
-                seg_len = self._sample_segment_len(T)
+                seg_len = random.randint(MIN_TIME_FRAMES//2, 3*MIN_TIME_FRAMES)
                 max_start = max(0, T - seg_len)
                 t_start = random.randint(0, max_start)
                 t_end = t_start + seg_len
@@ -130,54 +157,6 @@ class AudioSpecificStrategy:
         """One (1, 1, n_mels, T) mask."""
         arr = self._single_mask_numpy()
         return torch.from_numpy(arr.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
-
-    def _sample_bandwidth(self, n_mels: int) -> int:
-        u = random.random()
-        if n_mels <= MIN_FREQ_BINS:
-            return n_mels
-        
-        # Renormalize if upper tiers are empty
-        if n_mels <= 30:
-            return random.randint(MIN_FREQ_BINS, n_mels)
-        if n_mels <= 70:
-            # only narrow vs medium
-            if u < 0.7 / (0.7 + 0.2):
-                return random.randint(MIN_FREQ_BINS, min(30, n_mels))
-            return random.randint(31, n_mels)
-        if u < 0.7:
-            return random.randint(MIN_FREQ_BINS, 30)
-        if u < 0.9:
-            return random.randint(31, min(70, n_mels))
-        # wide
-        lo = max(71, MIN_FREQ_BINS)
-        hi = n_mels
-        if lo > hi:
-            return random.randint(31, min(70, n_mels))
-        return random.randint(lo, hi)
-        
-    def _sample_segment_len(self, T: int) -> int:
-        if T <= 1:
-            return T
-        if T < 10:
-            return random.randint(MIN_TIME_FRAMES, T)
-        u = random.random()
-        def clamp_len(x: int) -> int:
-            return max(MIN_TIME_FRAMES, min(x, T))
-        if T <= 40:
-            return clamp_len(random.randint(10, T))
-        if T <= 120:
-            # short vs medium only; split 60:30 within [0,1)
-            p_short = 0.6 / (0.6 + 0.3)
-            if u < p_short:
-                return clamp_len(random.randint(10, 40))
-            return clamp_len(random.randint(41, T))
-        # T >= 121
-        if u < 0.6:
-            return clamp_len(random.randint(10, 40))
-        if u < 0.9:
-            return clamp_len(random.randint(41, 120))
-        return clamp_len(random.randint(121, T))
-
 
     def __call__(
         self,

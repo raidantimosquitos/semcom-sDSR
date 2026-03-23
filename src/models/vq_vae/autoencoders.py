@@ -253,7 +253,7 @@ class VQ_VAE_2Layer(nn.Module):
             q_coarse: (B, emb_dim, H_q_coarse, W_q_coarse)
 
         Returns:
-            X_G: (B, 3, n_mels, T) reconstructed spectrogram
+            X_G: (B, 1, n_mels, T) reconstructed spectrogram
         """
         quantized_coarse_up = F.interpolate(q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False)
         quant_joined = torch.cat([quantized_coarse_up, q_fine], dim=1)
