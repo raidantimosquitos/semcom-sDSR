@@ -141,7 +141,7 @@ class SubspaceRestrictionModule(nn.Module):
         self._unet = SubspaceRestrictionNetwork(
             in_channels=embedding_size,
             out_channels=embedding_size,
-            base_width=embedding_size // 2,  # half the width to reduce parameters
+            base_width=embedding_size,
         )
 
     def forward(
