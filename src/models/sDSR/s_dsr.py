@@ -30,12 +30,10 @@ class sDSRConfig:
     num_residual_layers: int = 2
     n_mels: int = 128
     T: int = 320
-    anomaly_sampling: Literal["distant", "uniform"] = "uniform"
+    anomaly_sampling: Literal["distant", "uniform"] = "distant"
     anomaly_strength_min: float = 0.2
     anomaly_strength_max: float = 1.0
-    use_subspace_restriction: bool = False
-    # Stage 2 injection: fine_only_prob = fraction of anomaly samples that corrupt fine only; rest corrupt both (same mask).
-    fine_only_prob: float = 0.65
+    use_subspace_restriction: bool = True
 
 
 class sDSR(nn.Module):
@@ -48,9 +46,9 @@ class sDSR(nn.Module):
       q_fine, q_coarse -> ObjectSpecificDecoder -> X_specific
       [X_specific, X_general] -> AnomalyDetectionModule -> M_out
 
-    Training path (stage 2): uses AnomalyMapGenerator and AnomalyGeneration
-    to augment q_fine, q_coarse -> q_fine_a, q_coarse_a (both levels always);
-    then X_specific is reconstructed from augmented features.
+    Training path (stage 2): AnomalyGeneration builds augmented codes from the
+    spectrogram mask projected to fine and coarse; per anomaly sample we then
+    randomly inject at fine only, coarse only, or both levels.
     """
 
     def __init__(
@@ -174,7 +172,9 @@ class sDSR(nn.Module):
         Training forward pass (stage 2).
 
         Uses the dataset-provided anomaly map M_gt to augment q with synthetic
-        anomalies (codebook replacement), then returns outputs for loss computation.
+        anomalies (codebook replacement). For each sample with a non-zero mask,
+        injection mode is sampled uniformly: fine latent only, coarse latent only,
+        or both. Normal samples (empty mask) use clean (q_fine, q_coarse).
 
         Args:
             x: (B, 3, n_mels, T) Mel spectrogram (normal)
@@ -213,15 +213,17 @@ class sDSR(nn.Module):
             strength_fine=strength_fine, strength_coarse=strength_coarse,
         )
 
-        
         has_anomaly = (M_gt.sum(dim=(1, 2, 3)) > 0).view(batch_size, 1, 1, 1).float()
-        use_fine = has_anomaly  # always use augmented fine when anomaly
-        use_coarse = has_anomaly * (
-            (torch.rand(batch_size, device=device) >= self.config.fine_only_prob)
-            .float().view(batch_size, 1, 1, 1)
+        # Per anomaly sample: 0 = inject at fine latent only, 1 = coarse only, 2 = both.
+        inj_mode = torch.randint(0, 3, (batch_size,), device=device)
+        use_fine_a = has_anomaly * (
+            ((inj_mode == 0) | (inj_mode == 2)).float().view(batch_size, 1, 1, 1)
         )
-        q_fine_used = has_anomaly * q_fine_a + (1 - has_anomaly) * q_fine
-        q_coarse_used = has_anomaly * (use_coarse * q_coarse_a + (1 - use_coarse) * q_coarse) + (1 - has_anomaly) * q_coarse
+        use_coarse_a = has_anomaly * (
+            ((inj_mode == 1) | (inj_mode == 2)).float().view(batch_size, 1, 1, 1)
+        )
+        q_fine_used = use_fine_a * q_fine_a + (1.0 - use_fine_a) * q_fine
+        q_coarse_used = use_coarse_a * q_coarse_a + (1.0 - use_coarse_a) * q_coarse
         
         with torch.no_grad():
             x_general = self._vq_vae.decode_general(q_fine_used, q_coarse_used)
@@ -246,6 +248,7 @@ class sDSR(nn.Module):
         if "recon_feat_coarse" in aux and "recon_feat_fine" in aux:
             result["recon_feat_coarse"] = aux["recon_feat_coarse"]
             result["recon_feat_fine"] = aux["recon_feat_fine"]
+            # L_sub targets clean quantized codes from encode (not augmented).
             result["q_coarse"] = q_coarse
             result["q_fine"] = q_fine
         return result

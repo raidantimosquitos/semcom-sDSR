@@ -84,7 +84,6 @@ def parse_args() -> argparse.Namespace:
     s2.add_argument("--lambda_focal", type=float, default=1.0)
     s2.add_argument("--lambda_sub", type=float, default=1.0, help="Weight for subspace restriction loss L2(F̃, Q)")
     s2.add_argument("--anomaly_strategy", type=str, default="both", choices=["perlin", "audio_specific", "both"], help="Synthetic anomaly mask: perlin, random band + time segments (audio_specific), or both")
-    s2.add_argument("--fine_only_prob", type=float, default=0.65, help="Fraction of anomaly samples that inject at fine level only; rest inject at both levels (default 0.65 = 65%% fine-only, 35%% both)")
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
     s2.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
@@ -132,7 +131,6 @@ def build_s_dsr(
     hidden_channels: Tuple[int, int],
     embedding_dim: Tuple[int, int],
     anomaly_sampling: Literal["distant", "uniform"] = "distant",
-    fine_only_prob: float = 0.65,
 ) -> sDSR:
     cfg = sDSRConfig(
         embedding_dim=embedding_dim,
@@ -141,7 +139,6 @@ def build_s_dsr(
         n_mels=n_mels,
         T=T,
         anomaly_sampling=anomaly_sampling,
-        fine_only_prob=fine_only_prob,
     )
     return sDSR(vq_vae, cfg)
 
@@ -261,7 +258,6 @@ def run_stage2(args: argparse.Namespace) -> None:
         vq_vae, n_mels, T, 
         hidden_channels=(hidden_channels_coarse, hidden_channels_fine),
         embedding_dim=(embedding_dim_coarse, embedding_dim_fine),
-        fine_only_prob=getattr(args, "fine_only_prob", 0.65),
         anomaly_sampling=args.anomaly_sampling,
     )
     trainer = Stage2Trainer(
@@ -327,7 +323,6 @@ def run_full(args: argparse.Namespace) -> None:
         lambda_sub=1.0,
         anomaly_strategy="both",
         anomaly_sampling="distant",
-        fine_only_prob=0.65,
         machine_id=None,
         resume=None,
     )

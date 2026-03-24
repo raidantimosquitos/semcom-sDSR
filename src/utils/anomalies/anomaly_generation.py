@@ -57,7 +57,7 @@ def generate_fake_anomalies_distant(
         )
         pct = strength[k].item()
         topk = max(1, min(int(pct * N) + 1, N - 1))
-        _, topk_indices = torch.topk(distances, topk, dim=1, largest=True)
+        _, topk_indices = torch.topk(distances, topk, dim=1, largest=False) # Smallest distance
         skip = int(N * 0.05)
         topk_indices = topk_indices[:, skip:]
         topk_n = topk_indices.shape[1]

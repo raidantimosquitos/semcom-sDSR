@@ -32,6 +32,10 @@ class AnomalyGeneration(nn.Module):
     """
     Augment (q_fine, q_coarse) with synthetic anomalies using VQ codebook sampling.
 
+    Always returns both augmented tensors (mask projected to fine and coarse grids).
+    :class:`sDSR.forward_train` then applies fine-only, coarse-only, or both,
+    per anomaly sample.
+
     sampling: "distant" = similarity-ordered subset (skip closest 5%, strength
     controls distance); "uniform" = draw uniformly from full codebook (no z/strength).
     """

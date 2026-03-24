@@ -68,8 +68,7 @@ for machine_type in "${MACHINE_TYPES[@]}"; do
       --stage1_ckpt "$STAGE1_BEST" \
       --n_iter "$N_ITER" \
       --batch_size "$BATCH_SIZE" \
-      --fine_only_prob 0.0 \
-      --anomaly_sampling "uniform" \
+      --anomaly_sampling "distant" \
       --anomaly_strategy "$anomaly_strategy"
 
     # Stage2Trainer saves checkpoints under:

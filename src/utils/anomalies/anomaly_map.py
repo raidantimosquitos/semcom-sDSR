@@ -2,9 +2,9 @@
 Anomaly map generation for sDSR training.
 
 Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
-1. PerlinNoiseStrategy: binarized Perlin noise on the mel–time grid (ICASSP 2024
-   AudDSR Sec. 3.3), with axis-aligned variants that resemble band-like or
-   duration-spanning defects—without rotating noise as in vision DSR.
+1. PerlinNoiseStrategy: binarized true 2D Perlin noise on the mel–time grid
+   (ICASSP 2024 AudDSR-style), then reduced to a small number of connected
+   blobs so anomalies stay sparse and spectrogram-shaped.
 2. AudioSpecificStrategy: one random frequency band + several disjoint time
    segments within that band (same section).
 
@@ -20,6 +20,7 @@ from typing import Literal
 
 import numpy as np
 import torch
+from scipy import ndimage
 
 from .perlin import rand_perlin_2d_np
 
@@ -31,15 +32,9 @@ MIN_TIME_FRAMES = 4
 class PerlinNoiseStrategy:
     """
     Binarized Perlin noise for diverse anomaly regions (AudDSR / DSR-style).
-
-    Pure 2D Perlin (optionally rotated in vision DSR) does not match typical
-    log-mel defects well: anomalies often cover **most time** in a narrow band
-    or **most mel bins** for a short interval (ICASSP 2024 Sec. 3.3). We keep
-    **axis-aligned** noise only and mix:
-
-    - **2d**: full (n_mels, T) Perlin;
-    - **time_ridge**: 1×T Perlin, broadcast across mel (duration-wide structure);
-    - **freq_ridge**: n_mels×1 Perlin, broadcast across time (band-like structure).
+    This strategy generates a single true 2D Perlin field on the (n_mels, T)
+    grid, binarizes it, then keeps only a few connected blobs so anomalies
+    remain sparse and spectrogram-shaped.
     """
 
     def __init__(
@@ -47,6 +42,8 @@ class PerlinNoiseStrategy:
         spectrogram_shape: tuple[int, int],
         threshold: float = 0.5,
         perlin_scale_range: tuple[int, int] = (1, 5),
+        min_blobs: int = 2,
+        max_blobs: int = 10,
     ) -> None:
         """
         Args:
@@ -62,6 +59,8 @@ class PerlinNoiseStrategy:
         effective_max = min(max_exp_freq, max_exp_time, perlin_scale_range[1])
         effective_min = min(perlin_scale_range[0], effective_max)
         self.perlin_scale_range = (effective_min, effective_max)
+        self.min_blobs = max(1, min_blobs)
+        self.max_blobs = max(self.min_blobs, max_blobs)
 
     def _rand_res_1d(self) -> int:
         return 2 ** random.randint(*self.perlin_scale_range)
@@ -72,30 +71,46 @@ class PerlinNoiseStrategy:
         rx = self._rand_res_1d()
         return rand_perlin_2d_np((n_mels, T), (ry, rx))
 
-    def _noise_time_ridge(self) -> np.ndarray:
-        """Correlated across all mel bins (single temporal Perlin profile)."""
-        n_mels, T = self.spectrogram_shape
-        rt = min(self._rand_res_1d(), max(1, T))
-        noise = rand_perlin_2d_np((1, T), (1, rt))
-        return np.repeat(noise, n_mels, axis=0)
+    def _keep_random_blobs(self, binary_mask: np.ndarray) -> np.ndarray:
+        """
+        Keep only a random subset of connected components ("blobs").
 
-    def _noise_freq_ridge(self) -> np.ndarray:
-        """Correlated across all frames (single spectral Perlin profile)."""
-        n_mels, T = self.spectrogram_shape
-        rf = min(self._rand_res_1d(), max(1, n_mels))
-        noise = rand_perlin_2d_np((n_mels, 1), (rf, 1))
-        return np.repeat(noise, T, axis=1)
+        Args:
+            binary_mask: (n_mels, T) float32/boolean mask, values>0 indicate anomaly.
+        Returns:
+            (n_mels, T) float32 mask with only the selected blobs.
+        """
+        binary = binary_mask.astype(bool, copy=False)
+        if not np.any(binary):
+            return binary_mask.astype(np.float32, copy=False)
+
+        # 8-connectivity matches typical 2D "blob" intuition for log-mel structure.
+        structure = np.ones((3, 3), dtype=np.int32)
+        labeled, n = ndimage.label(binary, structure=structure)  # type: ignore[call-arg]
+        if n <= 1:
+            return binary_mask.astype(np.float32, copy=False)
+
+        # Component sizes for sampling (prefer larger blobs over single pixels).
+        sizes = np.bincount(labeled.ravel())
+        # sizes[0] is background.
+        comp_sizes = sizes[1:]
+        total = float(comp_sizes.sum())
+        if total <= 0:
+            chosen_ids = np.arange(1, 1 + min(n, self.max_blobs))
+        else:
+            k = random.randint(self.min_blobs, self.max_blobs)
+            k = min(k, n)
+            probs = comp_sizes.astype(np.float64) / total
+            chosen = np.random.choice(np.arange(1, n + 1), size=k, replace=False, p=probs)
+            chosen_ids = chosen
+
+        keep = np.isin(labeled, chosen_ids)
+        return keep.astype(np.float32, copy=False)
 
     def _one_mask_numpy(self) -> np.ndarray:
-        # Equal mix: no hyperparameters tied to a specific machine type
-        choice = random.randrange(3)
-        if choice == 0:
-            noise = self._noise_2d()
-        elif choice == 1:
-            noise = self._noise_time_ridge()
-        else:
-            noise = self._noise_freq_ridge()
-        return (noise > self.threshold).astype(np.float32)
+        noise = self._noise_2d()
+        binary = (noise > self.threshold)
+        return self._keep_random_blobs(binary)
 
     def __call__(
         self,
@@ -149,7 +164,7 @@ class AudioSpecificStrategy:
             seg_len_lo = MIN_TIME_FRAMES
         else:
             # --- Type B: low bandwidth (1–8 mel bins), longer segments along time ---
-            bw_max = min(8, n_mels)
+            bw_max = min(16, n_mels)
             bandwidth = random.randint(1, bw_max)
             f_low = random.randint(0, n_mels - bandwidth)
             f_high = f_low + bandwidth

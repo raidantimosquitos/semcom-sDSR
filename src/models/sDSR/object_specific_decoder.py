@@ -17,9 +17,6 @@ import torch.nn.functional as F
 from ..vq_vae.res_blocks_2d import ResidualStack
 from .subspace_restriction import SubspaceRestrictionModule
 
-
-
-
 class ObjectSpecificDecoder(nn.Module):
     """
     Object Specific Decoder: Q or Q_A -> (optional) subspace restriction -> quantize -> spectrogram -> X_S.
