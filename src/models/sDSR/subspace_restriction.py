@@ -100,10 +100,13 @@ class FeatureDecoder(nn.Module):
         b3: torch.Tensor,
     ) -> torch.Tensor:
         up2 = self.up2(b3)
-        db2 = self.db2(torch.cat([up2, b2], dim=1))  # skip from b2
-        up3 = self.up3(db2)  # skip from b2
-        db3 = self.db3(torch.cat([up3, b1], dim=1))  # skip from b1
-        return self.fin_out(db3)
+        db2 = self.db2(up2)
+
+        up3 = self.up3(db2)
+        db3 = self.db3(up3)
+
+        out = self.fin_out(db3)
+        return out
 
 
 class SubspaceRestrictionNetwork(nn.Module):
