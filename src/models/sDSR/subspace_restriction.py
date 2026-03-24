@@ -70,7 +70,7 @@ class FeatureDecoder(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.db2 = nn.Sequential(
-            nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, padding=1),
+            nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
@@ -84,7 +84,7 @@ class FeatureDecoder(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.db3 = nn.Sequential(
-            nn.Conv2d(base_width * 2, base_width, kernel_size=3, padding=1),
+            nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
             norm(base_width),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
