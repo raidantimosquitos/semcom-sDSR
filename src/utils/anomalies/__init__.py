@@ -16,6 +16,8 @@ from .anomaly_map import (
     PlaceholderMachineSpecificStrategy,
     SliderSpecificStrategy,
     ToyCarSpecificStrategy,
+    ToyConveyorSpecificStrategy,
+    PumpSpecificStrategy,
 )
 from .anomaly_generation import (
     generate_fake_anomalies_distant,
@@ -30,6 +32,8 @@ __all__ = [
     "PlaceholderMachineSpecificStrategy",
     "SliderSpecificStrategy",
     "ToyCarSpecificStrategy",
+    "ToyConveyorSpecificStrategy",
+    "PumpSpecificStrategy",
     "generate_fake_anomalies_distant",
     "generate_fake_anomalies_uniform",
 ]
