@@ -73,7 +73,7 @@ class sDSR(nn.Module):
             use_subspace_restriction=cfg.use_subspace_restriction,
         )
         self._anomaly_detection = AnomalyDetectionModule(
-            in_channels=3,
+            in_channels=2,
             out_channels=2,
             base_width=128,
         )
@@ -127,8 +127,7 @@ class sDSR(nn.Module):
             self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
-        abs_diff = torch.abs(x_specific - x_general.detach())
-        m_out = self._anomaly_detection(x_specific, x_general.detach(), abs_diff)
+        m_out = self._anomaly_detection(x_specific, x_general.detach())
         if return_intermediates:
             return m_out, x_general, x_specific
         return m_out
@@ -157,8 +156,7 @@ class sDSR(nn.Module):
             self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
-        abs_diff = torch.abs(x_specific - x_general.detach())
-        m_out = self._anomaly_detection(x_specific, x_general.detach(), abs_diff)
+        m_out = self._anomaly_detection(x_specific, x_general.detach())
         if return_intermediates:
             return m_out, x_general, x_specific
         return m_out
@@ -234,8 +232,7 @@ class sDSR(nn.Module):
             return_aux=True,
         )
         x_specific, aux = out_dec
-        abs_diff = torch.abs(x_specific - x_general.detach())
-        m_out = self._anomaly_detection(x_specific, x_general.detach(), abs_diff)
+        m_out = self._anomaly_detection(x_specific, x_general.detach())
 
         # GT mask for focal loss: M_gt at spectrogram shape (same as m_out spatial dims)
         result = {
@@ -294,10 +291,9 @@ if __name__ == "__main__":
         model._vq_vae._vq_coarse, model._vq_vae._vq_fine,
         return_aux=False,
     )
-    abs_diff = torch.abs(x_specific - x_general.detach())
     _print_shape("x_specific (object-specific reconstruction)", x_specific)
 
-    m_out = model._anomaly_detection(x_specific, x_general.detach(), abs_diff)
+    m_out = model._anomaly_detection(x_specific, x_general.detach())
     _print_shape("m_out (segmentation logits)", m_out)
     print("-" * 50)
 

@@ -28,6 +28,59 @@ from .perlin import rand_perlin_2d_np
 MIN_FREQ_BINS = 4
 MIN_TIME_FRAMES = 4
 
+# Helper functions
+def _intervals_overlap(a0: int, a1: int, b0: int, b1: int) -> bool:
+    """True if [a0,a1) and [b0,b1) intersect (half-open)."""
+    return not (a1 <= b0 or b1 <= a0)
+
+
+def _sample_disjoint_time_segments(
+    n_seg: int,
+    T: int,
+    seg_len_lo: int,
+    seg_len_hi: int,
+    max_tries_per_seg: int = 400,
+) -> list[tuple[int, int]]:
+    """
+    Sample up to n_seg non-overlapping half-open intervals [t_start, t_end) in [0, T).
+    Stops early if a segment cannot be placed after max_tries_per_seg attempts.
+    """
+    if T <= MIN_TIME_FRAMES:
+        return [(0, T)]
+    lo = max(1, min(seg_len_lo, T))
+    hi = min(seg_len_hi, T)
+    if hi < lo:
+        lo, hi = hi, lo
+    if lo > T:
+        lo = min(MIN_TIME_FRAMES, T)
+    if hi < lo:
+        return [(0, T)]
+
+    intervals: list[tuple[int, int]] = []
+    for _ in range(n_seg):
+        placed = False
+        for _ in range(max_tries_per_seg):
+            seg_len = random.randint(lo, hi)
+            if seg_len > T:
+                continue
+            max_start = T - seg_len
+            t_start = random.randint(0, max_start)
+            t_end = t_start + seg_len
+            if any(
+                _intervals_overlap(t_start, t_end, s, e) for s, e in intervals
+            ):
+                continue
+            intervals.append((t_start, t_end))
+            placed = True
+            break
+        if not placed:
+            break
+
+    if not intervals:
+        seg_len = min(hi, T)
+        return [(0, max(seg_len, min(lo, T)))]
+    return intervals
+
 
 class PerlinNoiseStrategy:
     """
@@ -71,46 +124,11 @@ class PerlinNoiseStrategy:
         rx = self._rand_res_1d()
         return rand_perlin_2d_np((n_mels, T), (ry, rx))
 
-    def _keep_random_blobs(self, binary_mask: np.ndarray) -> np.ndarray:
-        """
-        Keep only a random subset of connected components ("blobs").
-
-        Args:
-            binary_mask: (n_mels, T) float32/boolean mask, values>0 indicate anomaly.
-        Returns:
-            (n_mels, T) float32 mask with only the selected blobs.
-        """
-        binary = binary_mask.astype(bool, copy=False)
-        if not np.any(binary):
-            return binary_mask.astype(np.float32, copy=False)
-
-        # 8-connectivity matches typical 2D "blob" intuition for log-mel structure.
-        structure = np.ones((3, 3), dtype=np.int32)
-        labeled, n = ndimage.label(binary, structure=structure)  # type: ignore[call-arg]
-        if n <= 1:
-            return binary_mask.astype(np.float32, copy=False)
-
-        # Component sizes for sampling (prefer larger blobs over single pixels).
-        sizes = np.bincount(labeled.ravel())
-        # sizes[0] is background.
-        comp_sizes = sizes[1:]
-        total = float(comp_sizes.sum())
-        if total <= 0:
-            chosen_ids = np.arange(1, 1 + min(n, self.max_blobs))
-        else:
-            k = random.randint(self.min_blobs, self.max_blobs)
-            k = min(k, n)
-            probs = comp_sizes.astype(np.float64) / total
-            chosen = np.random.choice(np.arange(1, n + 1), size=k, replace=False, p=probs)
-            chosen_ids = chosen
-
-        keep = np.isin(labeled, chosen_ids)
-        return keep.astype(np.float32, copy=False)
 
     def _one_mask_numpy(self) -> np.ndarray:
         noise = self._noise_2d()
         binary = (noise > self.threshold)
-        return self._keep_random_blobs(binary)
+        return binary
 
     def __call__(
         self,
@@ -126,12 +144,11 @@ class PerlinNoiseStrategy:
 
 class AudioSpecificStrategy:
     """
-    One random frequency band, then several disjoint time segments inside it.
-
-    Matches the AudDSR description (ICASSP 2024 Sec. 3.3): choose where in
-    frequency the defect lives, then mark a few contiguous time intervals.
-    Sampling is uniform over valid bandwidths and segment lengths so it
-    generalizes across all mel lengths and time horizons used in training.
+    One random frequency band, then several **pairwise disjoint** time segments
+    inside it (AudDSR-style). Three mixture modes:
+    - **A**: wide mel band, longer short-time support (raised masked area).
+    - **B**: narrow band, medium–long time, capped at 75% of T (no full-timeline stripe).
+    - **C**: medium bandwidth and medium duration (between A and B).
     """
 
     def __init__(
@@ -139,8 +156,8 @@ class AudioSpecificStrategy:
         spectrogram_shape: tuple[int, int],
         n_mels: int,
         T: int,
-        min_segments: int = 3,
-        max_segments: int = 7,
+        min_segments: int = 4,
+        max_segments: int = 8,
     ) -> None:
         self.spectrogram_shape = spectrogram_shape
         self.n_mels = n_mels
@@ -152,39 +169,43 @@ class AudioSpecificStrategy:
         n_mels, T = self.n_mels, self.T
         M = np.zeros((n_mels, T), dtype=np.float32)
 
-        # 50/50: (A) almost full mel range, very short in time  vs  (B) thin band, long in time
-        wide_band_short_time = random.random() < 0.5
+        mode = random.randrange(3)  # A, B, or C
 
-        if wide_band_short_time:
-            # --- Type A: high bandwidth (most of the spectrogram), short time columns ---
+        if mode == 0:
+            # --- Type A: high bandwidth, longer short-time columns (seg up to ~40–80) ---
             bandwidth = random.randint(max(MIN_FREQ_BINS, n_mels * 2 // 3), n_mels)
             f_low = random.randint(0, n_mels - bandwidth)
             f_high = f_low + bandwidth
-            seg_len_hi = max(MIN_TIME_FRAMES, min(T, 24))  # cap "short" (tune 8–32)
             seg_len_lo = MIN_TIME_FRAMES
-        else:
-            # --- Type B: low bandwidth (1–8 mel bins), longer segments along time ---
+            if T >= 40:
+                seg_len_hi = min(T, random.randint(MIN_TIME_FRAMES+1, min(40, T)))
+            else:
+                seg_len_hi = T
+        elif mode == 1:
+            # --- Type B: narrow band, capped timeline (no full-T stripe) ---
             bw_max = min(16, n_mels)
             bandwidth = random.randint(1, bw_max)
             f_low = random.randint(0, n_mels - bandwidth)
             f_high = f_low + bandwidth
-            seg_len_lo = max(MIN_TIME_FRAMES, T // 16)  # tune: fraction of T
-            seg_len_hi = T  # full clip possible; cap if you want milder:
-            # seg_len_hi = min(T, max(seg_len_lo + 1, T * 3 // 4))
+            seg_len_lo = max(MIN_TIME_FRAMES, T // 16)
+            seg_len_hi = min(T, (T * 3) // 4)
+        else:
+            # --- Type C: medium bandwidth + medium duration ---
+            lo_bw = max(MIN_FREQ_BINS, n_mels // 4)
+            hi_bw = max(lo_bw, (2 * n_mels) // 3)
+            bandwidth = random.randint(lo_bw, hi_bw)
+            f_low = random.randint(0, n_mels - bandwidth)
+            f_high = f_low + bandwidth
+            seg_len_lo = max(MIN_TIME_FRAMES, T // 20)
+            seg_len_hi = min(T, max(seg_len_lo, T // 5))
+
+        if seg_len_hi < seg_len_lo:
+            seg_len_lo, seg_len_hi = seg_len_hi, seg_len_lo
 
         n_seg = random.randint(self.min_segments, self.max_segments)
-        for _ in range(n_seg):
-            if T <= MIN_TIME_FRAMES:
-                t_start, t_end = 0, T
-            else:
-                lo = min(seg_len_lo, T)
-                hi = min(seg_len_hi, T)
-                if hi < lo:
-                    lo, hi = hi, lo  # safety
-                seg_len = random.randint(lo, hi)
-                max_start = max(0, T - seg_len)
-                t_start = random.randint(0, max_start)
-                t_end = t_start + seg_len
+        for t_start, t_end in _sample_disjoint_time_segments(
+            n_seg, T, seg_len_lo, seg_len_hi
+        ):
             M[f_low:f_high, t_start:t_end] = 1.0
 
         return M
