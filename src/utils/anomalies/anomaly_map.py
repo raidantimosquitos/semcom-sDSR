@@ -8,7 +8,7 @@ Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 2. SliderSpecificStrategy (alias AudioSpecificStrategy): one random frequency
    band + several disjoint time segments (tuned for slider-like defects).
 3. MachineSpecificStrategy: dispatches per DCASE machine_type (slider, ToyCar,
-   placeholders for fan/pump/valve/ToyConveyor).
+   ToyConveyor, placeholders for fan/pump/valve).
 
 When strategy is ``machine_specific`` or ``both``, masks can depend on the
 training sample's ``machine_type`` (passed from the dataset).
@@ -384,6 +384,161 @@ class ToyCarSpecificStrategy:
         return torch.cat(masks, dim=0).to(device)
 
 
+class ToyConveyorSpecificStrategy:
+    """
+    Mel-band mixture aligned with ToyConveyor pooled |anom−norm| maps (see
+    ``notebooks/ToyConveyor/ToyConveyor_anom_norm_comp``): strong mid-frequency
+    horizontal blobs, secondary low-mid rumble and high-mid scrape, with
+    occasional long-time stripes (conveyor-like) and small scattered patches.
+    Disjoint time segments inside a wide active window (default ~35–305 for
+    T=320); band centers, widths, and segment counts are randomized.
+    """
+
+    def __init__(
+        self,
+        spectrogram_shape: tuple[int, int],
+        n_mels: int,
+        T: int,
+        t_active_lo: int = 35,
+        t_active_hi: int = 305,
+        min_segments: int = 2,
+        max_segments: int = 7,
+    ) -> None:
+        self.spectrogram_shape = spectrogram_shape
+        self.n_mels = n_mels
+        self.T = T
+        self.t_active_lo = max(0, min(t_active_lo, T - 1))
+        self.t_active_hi = max(self.t_active_lo + 1, min(t_active_hi, T))
+        self.min_segments = max(1, min_segments)
+        self.max_segments = max(self.min_segments, max_segments)
+
+    def _pick_band(self) -> tuple[int, int]:
+        n_mels = self.n_mels
+        if n_mels <= MIN_FREQ_BINS + 2:
+            bw = max(MIN_FREQ_BINS, min(n_mels, 8))
+            f_low = random.randint(0, max(0, n_mels - bw))
+            return f_low, min(n_mels, f_low + bw)
+        u = random.random()
+
+        def _band(center_lo: int, center_hi: int, bw_lo: int, bw_hi: int) -> tuple[int, int]:
+            center_hi = min(center_hi, n_mels - 1)
+            center_lo = max(0, min(center_lo, center_hi))
+            if center_lo > center_hi:
+                bw = random.randint(MIN_FREQ_BINS, min(32, n_mels))
+                f0 = random.randint(0, max(0, n_mels - bw))
+                return f0, min(n_mels, f0 + bw)
+            c = random.randint(center_lo, center_hi)
+            hi_bw = min(bw_hi, n_mels)
+            lo_bw = max(MIN_FREQ_BINS, bw_lo)
+            if lo_bw > hi_bw:
+                bw = max(MIN_FREQ_BINS, min(n_mels, 8))
+                f_low = random.randint(0, max(0, n_mels - bw))
+                return f_low, min(n_mels, f_low + bw)
+            bw = random.randint(lo_bw, hi_bw)
+            bw = max(MIN_FREQ_BINS, min(bw, n_mels))
+            f_low = max(0, min(c - bw // 2, n_mels - bw))
+            f_high = min(n_mels, f_low + bw)
+            if f_high - f_low < MIN_FREQ_BINS:
+                f_high = min(n_mels, f_low + MIN_FREQ_BINS)
+            return f_low, f_high
+
+        # Priors: mid-frequency emphasis (pooled diff map), low-mid rumble, high scrape.
+        if u < 0.46:
+            return _band(50, 72, 10, 26)
+        if u < 0.74:
+            return _band(18, 42, 6, 18)
+        if u < 0.90:
+            return _band(84, 118, 8, 22)
+        bw = random.randint(MIN_FREQ_BINS, min(36, n_mels))
+        f_low = random.randint(0, max(0, n_mels - bw))
+        return f_low, min(n_mels, f_low + bw)
+
+    def _maybe_cloud_patches(self, M: np.ndarray) -> None:
+        if random.random() >= 0.38:
+            return
+        n_mels, T = self.n_mels, self.T
+        t_lo, t_hi = self.t_active_lo, self.t_active_hi
+        for _ in range(random.randint(1, 3)):
+            bw = random.randint(MIN_FREQ_BINS, min(28, n_mels))
+            f0 = random.randint(0, max(0, n_mels - bw))
+            f1 = min(n_mels, f0 + bw)
+            seg_lo = max(MIN_TIME_FRAMES, (t_hi - t_lo) // 20)
+            seg_hi = min(t_hi - t_lo, max(seg_lo, (t_hi - t_lo) // 4))
+            for t_start, t_end in _sample_disjoint_time_segments_in_window(
+                1, t_lo, t_hi, seg_lo, seg_hi
+            ):
+                M[f0:f1, t_start:t_end] = 1.0
+
+    def _single_mask_numpy(self) -> np.ndarray:
+        n_mels, T = self.n_mels, self.T
+        M = np.zeros((n_mels, T), dtype=np.float32)
+        t_lo, t_hi = self.t_active_lo, self.t_active_hi
+        T_sub = t_hi - t_lo
+
+        # Occasional single long-time band (horizontal stripe in the spectrogram).
+        if random.random() < 0.14:
+            f_low, f_high = self._pick_band()
+            span_lo = max(MIN_TIME_FRAMES, T_sub // 3)
+            span_hi = min(T_sub, max(span_lo + 1, (T_sub * 4) // 5))
+            for t_start, t_end in _sample_disjoint_time_segments_in_window(
+                1, t_lo, t_hi, span_lo, span_hi
+            ):
+                M[f_low:f_high, t_start:t_end] = 1.0
+            if random.random() < 0.35:
+                f2_low, f2_high = self._pick_band()
+                n2 = random.randint(1, 3)
+                seg_lo = max(MIN_TIME_FRAMES, T_sub // 25)
+                seg_hi = max(seg_lo, min(T_sub, T_sub // 4))
+                for t_start, t_end in _sample_disjoint_time_segments_in_window(
+                    n2, t_lo, t_hi, seg_lo, seg_hi
+                ):
+                    M[f2_low:f2_high, t_start:t_end] = 1.0
+            self._maybe_cloud_patches(M)
+            return M
+
+        seg_len_lo = max(MIN_TIME_FRAMES, T_sub // 28)
+        seg_len_hi = max(seg_len_lo, min(T_sub, T_sub // 2))
+
+        n_seg = random.randint(self.min_segments, self.max_segments)
+        f_low, f_high = self._pick_band()
+        for t_start, t_end in _sample_disjoint_time_segments_in_window(
+            n_seg, t_lo, t_hi, seg_len_lo, seg_len_hi
+        ):
+            M[f_low:f_high, t_start:t_end] = 1.0
+
+        if random.random() < 0.24:
+            f2_low, f2_high = self._pick_band()
+            n2 = random.randint(1, max(1, n_seg // 2))
+            for t_start, t_end in _sample_disjoint_time_segments_in_window(
+                n2, t_lo, t_hi, seg_len_lo, seg_len_hi
+            ):
+                M[f2_low:f2_high, t_start:t_end] = 1.0
+
+        self._maybe_cloud_patches(M)
+        return M
+
+    def single_mask(self, device: torch.device | str) -> torch.Tensor:
+        arr = self._single_mask_numpy()
+        return (
+            torch.from_numpy(arr.astype(np.float32))
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .to(device)
+        )
+
+    def __call__(
+        self,
+        batch_size: int,
+        device: torch.device | str,
+    ) -> torch.Tensor:
+        masks = []
+        for _ in range(batch_size):
+            arr = self._single_mask_numpy()
+            mask = torch.from_numpy(arr.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+            masks.append(mask)
+        return torch.cat(masks, dim=0).to(device)
+
+
 class PlaceholderMachineSpecificStrategy:
     """
     TODO: Replace with frequency/time priors from normal-vs-anomaly analysis
@@ -445,7 +600,8 @@ class PlaceholderMachineSpecificStrategy:
 class MachineSpecificStrategy:
     """
     Dispatches to per-machine mask strategies using exact DCASE ``machine_type``
-    strings (e.g. ``\"slider\"``, ``\"ToyCar\"``). ``None`` or unknown types use
+    strings (e.g. ``\"slider\"``, ``\"ToyCar\"``, ``\"ToyConveyor\"``). ``None`` or
+    unknown types use
     :class:`PlaceholderMachineSpecificStrategy` (not slider-shaped masks).
     """
 
@@ -460,16 +616,23 @@ class MachineSpecificStrategy:
         self.T = T
         self._slider = SliderSpecificStrategy(spectrogram_shape, n_mels, T)
         self._toycar = ToyCarSpecificStrategy(spectrogram_shape, n_mels, T)
+        self._toyconveyor = ToyConveyorSpecificStrategy(spectrogram_shape, n_mels, T)
         self._placeholder = PlaceholderMachineSpecificStrategy(
             spectrogram_shape, n_mels, T
         )
-        self._by_type: dict[str, SliderSpecificStrategy | ToyCarSpecificStrategy | PlaceholderMachineSpecificStrategy] = {
+        self._by_type: dict[
+            str,
+            SliderSpecificStrategy
+            | ToyCarSpecificStrategy
+            | ToyConveyorSpecificStrategy
+            | PlaceholderMachineSpecificStrategy,
+        ] = {
             "slider": self._slider,
             "ToyCar": self._toycar,
+            "ToyConveyor": self._toyconveyor,
             "fan": self._placeholder,
             "pump": self._placeholder,
             "valve": self._placeholder,
-            "ToyConveyor": self._placeholder,
         }
 
     def _strategy_for(self, machine_type: str | None):
