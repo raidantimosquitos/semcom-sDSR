@@ -541,18 +541,21 @@ class ToyConveyorSpecificStrategy:
 
 class PumpSpecificStrategy:
     """
-    Pump-like anomalies: mostly **vertical time stripes** on the mel-time grid.
+    Pump-specific masks generated *via inverse projection* from latent grids.
 
-    Rationale (from the repo's pump spectrogram demo):
-    the simplest pump mask prior used there sets `mask[:, t0:t1] = 1`
-    (full mel bandwidth over random time segments).
+    Goal: create a spectrogram-space binary mask M (n_mels × T) such that when
+    it is projected to the fine and coarse latent grids by pooling, it covers
+    (activates) many of the high-difference latent locations seen in the pump
+    notebook. We do this by sampling target cells on the **fine** and **coarse**
+    grids, then filling the corresponding spectrogram blocks (so pooled masks
+    are guaranteed to be non-zero at those cells).
 
-    We keep it sparse via a small number of disjoint time segments, and we add
-    randomization via:
-    - variable segment lengths (roughly 10–60 frames when T=320),
-    - mostly full-band stripes, but occasionally restricted to a random
-      frequency band,
-    - optional extra "cloud" patches.
+    For the common training shape (n_mels=128, T=320):
+    - fine grid is 64×80  (stride ≈ (2, 4))
+    - coarse grid is 16×20 (stride ≈ (8, 16))
+
+    Randomization is kept (counts, centers, widths, occasional stripes/clouds)
+    so the model does not overfit to a single fixed pattern.
     """
 
     def __init__(
@@ -562,56 +565,189 @@ class PumpSpecificStrategy:
         T: int,
         t_active_lo: int = 20,
         t_active_hi: int = 300,
-        min_segments: int = 2,
-        max_segments: int = 6,
+        # How many latent cells to activate (typical)
+        n_coarse_cells_lo: int = 6,
+        n_coarse_cells_hi: int = 14,
+        n_fine_cells_lo: int = 18,
+        n_fine_cells_hi: int = 46,
     ) -> None:
         self.spectrogram_shape = spectrogram_shape
         self.n_mels = n_mels
         self.T = T
         self.t_active_lo = max(0, min(t_active_lo, T - 1))
         self.t_active_hi = max(self.t_active_lo + 1, min(t_active_hi, T))
-        self.min_segments = max(1, min_segments)
-        self.max_segments = max(self.min_segments, max_segments)
+        self.n_coarse_cells_lo = max(1, n_coarse_cells_lo)
+        self.n_coarse_cells_hi = max(self.n_coarse_cells_lo, n_coarse_cells_hi)
+        self.n_fine_cells_lo = max(1, n_fine_cells_lo)
+        self.n_fine_cells_hi = max(self.n_fine_cells_lo, n_fine_cells_hi)
 
     def _single_mask_numpy(self) -> np.ndarray:
         n_mels, T = self.n_mels, self.T
         M = np.zeros((n_mels, T), dtype=np.float32)
 
+        # Compute latent grid shapes consistent with VQ-VAE downsampling.
+        # We keep it robust for non-128×320 shapes by using integer ratios.
+        H_spec, W_spec = n_mels, T
+        H_fine = max(1, H_spec // 2)
+        W_fine = max(1, W_spec // 4)
+        H_coarse = max(1, H_spec // 8)
+        W_coarse = max(1, W_spec // 16)
+
+        stride_f_h = max(1, H_spec // H_fine)
+        stride_f_w = max(1, W_spec // W_fine)
+        stride_c_h = max(1, H_spec // H_coarse)
+        stride_c_w = max(1, W_spec // W_coarse)
+
+        # Active window in both spectrogram and latent time axes
         t_lo, t_hi = self.t_active_lo, self.t_active_hi
-        T_sub = t_hi - t_lo
+        t_lo_f = max(0, min(W_fine - 1, t_lo // stride_f_w))
+        t_hi_f = max(t_lo_f + 1, min(W_fine, (t_hi + stride_f_w - 1) // stride_f_w))
+        t_lo_c = max(0, min(W_coarse - 1, t_lo // stride_c_w))
+        t_hi_c = max(t_lo_c + 1, min(W_coarse, (t_hi + stride_c_w - 1) // stride_c_w))
 
-        # Two modes: either fewer longer segments, or more short segments.
-        if random.random() < 0.5:
-            seg_len_lo = max(MIN_TIME_FRAMES, T_sub // 60)
-            seg_len_hi = min(T_sub, max(seg_len_lo + 1, T_sub // 6))
+        # --- 1) Build a structured *latent geometry* on the coarse grid ---
+        # We model the pump latent difference geometry as 1–3 rectangular blobs
+        # (sometimes elongated in time), plus occasional vertical streaks.
+        M_coarse = np.zeros((H_coarse, W_coarse), dtype=np.float32)
+
+        coarse_cols = list(range(t_lo_c, t_hi_c))
+        if coarse_cols:
+            mu_c = (t_lo_c + t_hi_c - 1) / 2.0
         else:
-            seg_len_lo = max(MIN_TIME_FRAMES, T_sub // 90)
-            seg_len_hi = min(T_sub, max(seg_len_lo + 1, T_sub // 10))
+            mu_c = (W_coarse - 1) / 2.0
 
-        n_seg = random.randint(self.min_segments, self.max_segments)
+        n_blobs = random.randint(1, 3)
+        for _ in range(n_blobs):
+            # Center biased to mid time / mid freq (matches typical pump structure),
+            # but with randomness.
+            cx = (
+                int(round(random.triangular(t_lo_c, t_hi_c - 1, mu_c)))
+                if (random.random() < 0.80 and coarse_cols)
+                else (random.choice(coarse_cols) if coarse_cols else random.randrange(W_coarse))
+            )
+            cy = int(round(random.triangular(0, H_coarse - 1, (H_coarse - 1) / 2)))
 
-        for t_start, t_end in _sample_disjoint_time_segments_in_window(
-            n_seg, t_lo, t_hi, seg_len_lo, seg_len_hi
-        ):
-            # Mostly full-band vertical stripes, sometimes restricted to a freq band.
-            if random.random() < 0.82:
-                M[:, t_start:t_end] = 1.0
+            # Blob sizes (in coarse cells): time-elongated more often than freq.
+            if random.random() < 0.65:
+                hw = random.randint(2, 6)  # half-width in time
+                hh = random.randint(1, 3)  # half-height in freq
+            else:
+                hw = random.randint(1, 4)
+                hh = random.randint(1, 4)
+
+            x0 = max(t_lo_c, cx - hw)
+            x1 = min(t_hi_c, cx + hw + 1)
+            y0 = max(0, cy - hh)
+            y1 = min(H_coarse, cy + hh + 1)
+            M_coarse[y0:y1, x0:x1] = 1.0
+
+        # Optional vertical streak(s) (column-like geometry in latent diffs).
+        if random.random() < 0.35 and coarse_cols:
+            n_streaks = random.randint(1, 2)
+            for _ in range(n_streaks):
+                cx = int(round(random.triangular(t_lo_c, t_hi_c - 1, mu_c)))
+                width = random.randint(1, 2)
+                x0 = max(t_lo_c, cx - width)
+                x1 = min(t_hi_c, cx + width + 1)
+                # Often full-height streak, sometimes mid-band only.
+                if random.random() < 0.7:
+                    M_coarse[:, x0:x1] = 1.0
+                else:
+                    y0 = random.randint(0, max(0, H_coarse - 3))
+                    y1 = min(H_coarse, y0 + random.randint(2, max(2, H_coarse // 2)))
+                    M_coarse[y0:y1, x0:x1] = 1.0
+
+        # --- 2) Build a fine-grid geometry correlated with the coarse blobs ---
+        M_fine = np.zeros((H_fine, W_fine), dtype=np.float32)
+        # Map active coarse area to a fine ROI and densify it with a few blobs.
+        active = np.argwhere(M_coarse > 0.0)
+        if active.size > 0:
+            y0c, x0c = active.min(axis=0)
+            y1c, x1c = active.max(axis=0)
+            # Coarse cell -> fine cell scale factors
+            s_h = max(1, H_fine // max(1, H_coarse))
+            s_w = max(1, W_fine // max(1, W_coarse))
+            # Expand ROI a bit for robustness
+            y0f = max(0, y0c * s_h - random.randint(0, 2 * s_h))
+            y1f = min(H_fine, (y1c + 1) * s_h + random.randint(0, 2 * s_h))
+            x0f = max(t_lo_f, x0c * s_w - random.randint(0, 2 * s_w))
+            x1f = min(t_hi_f, (x1c + 1) * s_w + random.randint(0, 2 * s_w))
+        else:
+            y0f, y1f = 0, H_fine
+            x0f, x1f = t_lo_f, t_hi_f
+
+        n_f_blobs = random.randint(2, 5)
+        for _ in range(n_f_blobs):
+            if x1f - x0f <= 1 or y1f - y0f <= 1:
+                break
+            cx = random.randint(x0f, x1f - 1)
+            cy = random.randint(y0f, y1f - 1)
+            # fine blobs are smaller and more detailed
+            hw = random.randint(2, 10)  # time half-width (fine cells)
+            hh = random.randint(1, 6)   # freq half-height (fine cells)
+            x0 = max(x0f, cx - hw)
+            x1 = min(x1f, cx + hw + 1)
+            y0 = max(0, cy - hh)
+            y1 = min(H_fine, cy + hh + 1)
+            M_fine[y0:y1, x0:x1] = 1.0
+
+        # Also sprinkle a small number of individual fine cells to hit more bins.
+        nF = random.randint(self.n_fine_cells_lo, self.n_fine_cells_hi)
+        for _ in range(nF):
+            if x1f - x0f <= 0:
+                j = random.randrange(W_fine)
+            else:
+                j = random.randint(x0f, x1f - 1)
+            i = random.randint(max(0, y0f), max(0, y1f - 1)) if (y1f - y0f) > 0 else random.randrange(H_fine)
+            M_fine[i, j] = 1.0
+
+        # --- 3) Lift latent geometries to spectrogram blocks (inverse projection) ---
+        # Coarse blocks first (broad coverage)
+        ys, xs = np.where(M_coarse > 0.0)
+        for i, j in zip(ys.tolist(), xs.tolist()):
+            f0 = i * stride_c_h
+            f1 = min(H_spec, (i + 1) * stride_c_h)
+            tt0 = j * stride_c_w
+            tt1 = min(W_spec, (j + 1) * stride_c_w)
+            M[f0:f1, tt0:tt1] = 1.0
+
+        # Fine blocks (detail coverage)
+        ys, xs = np.where(M_fine > 0.0)
+        for i, j in zip(ys.tolist(), xs.tolist()):
+            f0 = i * stride_f_h
+            f1 = min(H_spec, (i + 1) * stride_f_h)
+            tt0 = j * stride_f_w
+            tt1 = min(W_spec, (j + 1) * stride_f_w)
+            M[f0:f1, tt0:tt1] = 1.0
+
+        # --- 3) Optional structured additions to better cover latent “streaks” ---
+        # Vertical stripe: activates many fine/coarse columns simultaneously.
+        if random.random() < 0.22:
+            stripe_len = random.randint(
+                max(MIN_TIME_FRAMES, (t_hi - t_lo) // 25),
+                max(MIN_TIME_FRAMES + 1, (t_hi - t_lo) // 6),
+            )
+            t0 = random.randint(t_lo, max(t_lo, t_hi - stripe_len))
+            t1 = min(t_hi, t0 + stripe_len)
+            if random.random() < 0.80:
+                M[:, t0:t1] = 1.0
             else:
                 bw = random.randint(MIN_FREQ_BINS, max(MIN_FREQ_BINS + 1, n_mels // 2))
                 f_low = random.randint(0, max(0, n_mels - bw))
-                M[f_low : f_low + bw, t_start:t_end] = 1.0
+                M[f_low : f_low + bw, t0:t1] = 1.0
 
-        # Occasionally add a couple of small "cloud" patches (still time-local).
-        if random.random() < 0.30:
+        # Small cloud patches: increases robustness to minor shifts.
+        if random.random() < 0.25:
+            T_sub = max(1, t_hi - t_lo)
             for _ in range(random.randint(1, 3)):
                 bw = random.randint(MIN_FREQ_BINS, min(24, n_mels))
                 f0 = random.randint(0, max(0, n_mels - bw))
                 seg_lo = max(MIN_TIME_FRAMES, T_sub // 40)
                 seg_hi = min(T_sub, max(seg_lo + 1, T_sub // 8))
                 seg_len = random.randint(seg_lo, seg_hi)
-                t_start = random.randint(t_lo, max(t_lo, t_hi - seg_len))
-                t_end = t_start + seg_len
-                M[f0 : f0 + bw, t_start:t_end] = 1.0
+                tt0 = random.randint(t_lo, max(t_lo, t_hi - seg_len))
+                tt1 = tt0 + seg_len
+                M[f0 : f0 + bw, tt0:tt1] = 1.0
 
         return M
 
