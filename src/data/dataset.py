@@ -263,8 +263,7 @@ class AudDSRAnomTrainDataset(Dataset):
     Each __getitem__ returns a dict: image (spectrogram), anomaly_mask,
     has_anomaly, label, machine_id. With probability zero_mask_prob the mask
     is zero (normal); otherwise a mask is generated with the chosen strategy
-    (perlin, machine_specific, or both; ``audio_specific`` is a deprecated alias
-    for ``machine_specific``). The model uses the mask for codebook
+    (perlin, audio_specific, or both). The model uses the mask for codebook
     replacement in feature space.
 
     When adversarial_dataset is provided (e.g. other machine_ids of the same
@@ -280,7 +279,7 @@ class AudDSRAnomTrainDataset(Dataset):
     def __init__(
         self,
         base_dataset: DCASE2020Task2LogMelDataset,
-        strategy: Literal["perlin", "machine_specific", "audio_specific", "both"] = "both",
+        strategy: Literal["perlin", "audio_specific", "both"] = "both",
         zero_mask_prob: float = 0.5,
         adversarial_dataset: Dataset | None = None,
     ) -> None:
