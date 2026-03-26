@@ -12,5 +12,7 @@ source ~/.bashrc
 ```bash
 git clone https://github.com/raidantimosquitos/semcom-sDSR.git
 cd semcom-sDSR
-conda env create --file environment.yml
+conda env create -f environment.yml
+conda run -n sDSR pip install --no-build-isolation pyldpc
 ```
+(`pyldpc` is not on conda; its sdist build needs the env’s NumPy, so build isolation is disabled. Alternatively run `bash scripts/bootstrap_conda_env.sh`.)

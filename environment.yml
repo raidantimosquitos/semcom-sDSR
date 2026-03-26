@@ -1,3 +1,7 @@
+# LDPC scripts need pyldpc (PyPI sdist). Conda's env pip step cannot pass
+# --no-build-isolation, so install it after the env exists, e.g.:
+#   conda run -n sDSR pip install --no-build-isolation pyldpc
+# or: bash scripts/bootstrap_conda_env.sh
 name: sDSR
 channels:
   - pytorch
@@ -15,5 +19,4 @@ dependencies:
   - matplotlib
   - jupyter
   - notebook
-  - pip:
-    - -r pip-requirements.txt
+  - pysoundfile
