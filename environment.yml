@@ -11,10 +11,9 @@ dependencies:
   - numpy
   - scipy
   - scikit-learn
-  - pyldpc
   - pip
   - matplotlib
   - jupyter
   - notebook
   - pip:
-    - soundfile
+    - -r pip-requirements.txt
