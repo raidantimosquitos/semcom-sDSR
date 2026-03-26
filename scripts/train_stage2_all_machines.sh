@@ -14,7 +14,7 @@ export PYTHONPATH="$REPO_ROOT"
 DATA_PATH="${DATA_PATH:-./dataset/dcase2020_task2_dev_dataset}"
 CKPT_DIR="${CKPT_DIR:-./checkpoints}"
 GCS_CHECKPOINTS="${GCS_CHECKPOINTS:-gs://semcom-sdsr-training-data-1772509648/checkpoints_mar24}"
-N_ITER=2500
+N_ITER=10000
 BATCH_SIZE=16
 
 # Single shared stage1 trained on all machine types (same run_name as experiment_grid.sh)
