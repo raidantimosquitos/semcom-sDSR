@@ -2,15 +2,8 @@
 Pack/unpack VQ codebook indices to/from a binary bitstream for GNURadio.
 
 File format:
-  - 4-byte payload_len_bytes (little-endian, uint32)
-  - 4-byte crc32 (little-endian, uint32) computed over the payload bytes
-  - payload bytes:
-      - 4-byte num_clips (little-endian, uint32)
-      - num_clips frames (concatenated)
-
-Legacy format (supported for backward-compat):
-  - 4-byte num_clips (little-endian, uint32)
-  - num_clips frames (concatenated)
+  - Raw frame bytes only (no headers, no CRC).
+  - One `.bin` file corresponds to exactly one clip (one frame).
 
 Each frame: coarse indices (row-major), then fine indices (row-major).
 Bits packed LSB-first within each index, then byte-packed (first byte = bits 0-7 of stream).
@@ -18,9 +11,7 @@ Bits packed LSB-first within each index, then byte-packed (first byte = bits 0-7
 
 from __future__ import annotations
 
-import struct
 from typing import Tuple
-import zlib
 
 import torch
 
@@ -133,61 +124,35 @@ def unpack_frame_to_indices(
     return indices_coarse, indices_fine
 
 
-def write_bitstream_file(
-    path: str,
-    frames: list[bytes],
-) -> None:
-    """
-    Write bitstream file with 8-byte header:
-      payload_len_bytes (uint32 LE) + crc32(payload) (uint32 LE), then payload.
-    Payload layout remains: 4-byte num_clips (LE) then concatenated frames.
-    """
-    payload = struct.pack("<I", len(frames)) + b"".join(frames)
-    payload_len_bytes = len(payload)
-    crc32 = zlib.crc32(payload) & 0xFFFFFFFF
+def write_frame_file(path: str, frame: bytes) -> None:
+    """Write a single clip frame as raw bytes (no headers)."""
     with open(path, "wb") as f:
-        f.write(struct.pack("<II", payload_len_bytes, crc32))
-        f.write(payload)
+        f.write(frame)
 
 
-def read_bitstream_file(path: str, frame_size: int) -> Tuple[int, list[bytes]]:
+def read_frame_file(path: str, expected_frame_size: int | None = None) -> bytes:
     """
-    Read bitstream file. Returns (num_clips, list of frame bytes).
-    frame_size: bytes per frame (e.g. from frame_size_bytes(...)).
+    Read a single clip frame from a raw `.bin`.
+
+    If expected_frame_size is provided, raises ValueError when the file length differs.
     """
     with open(path, "rb") as f:
-        head = f.read(8)
-        rest = f.read()
+        b = f.read()
+    if expected_frame_size is not None and len(b) != expected_frame_size:
+        raise ValueError(f"{path}: expected {expected_frame_size} bytes, got {len(b)}")
+    return b
 
-    # New format: 8-byte header then payload (len + crc32)
-    if len(head) == 8:
-        payload_len_bytes, expected_crc32 = struct.unpack("<II", head)
-        payload = rest
-        if payload_len_bytes != len(payload):
-            raise ValueError(f"Header payload_len_bytes={payload_len_bytes} but file has {len(payload)} payload bytes")
-        actual_crc32 = zlib.crc32(payload) & 0xFFFFFFFF
-        if actual_crc32 != expected_crc32:
-            raise ValueError(f"CRC32 mismatch: expected=0x{expected_crc32:08x} actual=0x{actual_crc32:08x}")
-        if len(payload) < 4:
-            raise ValueError("Payload too short to contain num_clips")
-        num_clips = struct.unpack("<I", payload[:4])[0]
-        frames_blob = payload[4:]
-        if len(frames_blob) != num_clips * frame_size:
-            raise ValueError(
-                f"Payload has {len(frames_blob)} frame bytes, expected num_clips={num_clips} * frame_size={frame_size} = {num_clips * frame_size}"
-            )
-        frames = [frames_blob[i * frame_size : (i + 1) * frame_size] for i in range(num_clips)]
-        return num_clips, frames
 
-    # Legacy format fallback: 4-byte num_clips then frames
-    if len(head) >= 4:
-        num_clips = struct.unpack("<I", head[:4])[0]
-        payload = head[4:] + rest
-        if len(payload) != num_clips * frame_size:
-            raise ValueError(
-                f"File has {len(payload)} bytes, expected num_clips={num_clips} * frame_size={frame_size} = {num_clips * frame_size}"
-            )
-        frames = [payload[i * frame_size : (i + 1) * frame_size] for i in range(num_clips)]
-        return num_clips, frames
-
-    raise ValueError("File too short to contain a valid bitstream header")
+def read_frames_from_raw_stream(path: str, frame_size: int) -> list[bytes]:
+    """
+    Read a raw bitstream containing concatenated frames (no headers).
+    This is only for convenience; the recommended workflow is one `.bin` per clip.
+    """
+    with open(path, "rb") as f:
+        blob = f.read()
+    if frame_size <= 0:
+        raise ValueError(f"frame_size must be > 0, got {frame_size}")
+    if len(blob) % frame_size != 0:
+        raise ValueError(f"{path}: byte length {len(blob)} is not a multiple of frame_size={frame_size}")
+    n = len(blob) // frame_size
+    return [blob[i * frame_size : (i + 1) * frame_size] for i in range(n)]

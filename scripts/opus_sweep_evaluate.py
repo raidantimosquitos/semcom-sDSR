@@ -93,7 +93,17 @@ def opus_roundtrip_wav(
             "audio",
             str(opus_path),
         ]
-        subprocess.run(enc_cmd, check=True)
+        try:
+            subprocess.run(enc_cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip()
+            # Some ffmpeg builds do not support `-vbr` as an option at all (even for libopus).
+            # In that case, fall back to bitrate-only encoding (often VBR) rather than failing.
+            if "Unrecognized option 'vbr'" in stderr or "Option not found" in stderr:
+                enc_cmd_fallback = [x for x in enc_cmd if x not in ("-vbr", "off")]
+                subprocess.run(enc_cmd_fallback, check=True, capture_output=True, text=True)
+            else:
+                raise
 
         # Decode: Ogg Opus -> PCM wav
         dec_cmd = [
@@ -108,7 +118,7 @@ def opus_roundtrip_wav(
             "pcm_s16le",
             str(dec_path),
         ]
-        subprocess.run(dec_cmd, check=True)
+        subprocess.run(dec_cmd, check=True, capture_output=True, text=True)
 
         wav, sr = torchaudio.load(str(dec_path))
         return wav, int(sr)

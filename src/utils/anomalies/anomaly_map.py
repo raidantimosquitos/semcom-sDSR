@@ -115,10 +115,10 @@ class AudioSpecificStrategy:
         spectrogram_shape: tuple[int, int],
         n_mels: int,
         T: int,
-        min_segments: int = 4,
+        min_segments: int = 2,
         max_segments: int = 8,
         band_lo: int = 2,
-        band_hi: int = 16,
+        band_hi: int = 96,
     ) -> None:
         self.spectrogram_shape = spectrogram_shape
         self.n_mels = n_mels

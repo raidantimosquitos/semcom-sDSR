@@ -17,3 +17,4 @@ dependencies:
   - notebook
   - pip:
     - soundfile
+    - pyldpc

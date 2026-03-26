@@ -13,3 +13,14 @@ notebooks/.ipynb_checkpoints/
 
 # Python environments
 .micromamba/
+
+# Papers
+docs/2208.01521v2.pdf
+docs/task-oriented semantic communication towards industrial anomaly detection.pdf
+docs/197185539.pdf
+
+# Example bitstreams
+example_bitstreams/
+example_bitstreams_ldpc_qpsk_smoketest/
+example_bitstreams_ldpc_qpsk_highsnr/
+example_bitstreams_qpsk_highsnr/
