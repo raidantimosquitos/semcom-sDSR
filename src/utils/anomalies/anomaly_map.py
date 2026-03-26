@@ -16,6 +16,8 @@ from typing import Sequence
 import numpy as np
 import torch
 
+from .perlin import generate_perlin_noise_2d
+
 # Minimum mask extent so regions survive pooling to coarse latent (8×8 from input).
 # NOTE: For audio_specific we allow narrower (2–16) bands per paper.
 MIN_FREQ_BINS = 4
@@ -166,6 +168,67 @@ class AudioSpecificStrategy:
             masks.append(torch.from_numpy(arr.astype(np.float32)).unsqueeze(0).unsqueeze(0))
         return torch.cat(masks, dim=0).to(device)
 
+
+class PerlinNoiseStrategy:
+    """
+    Simple Perlin-noise anomaly masks.
+
+    Uses :func:`generate_perlin_noise_2d` to generate a (H, W) Perlin field,
+    then binarizes with a threshold.
+    """
+
+    def __init__(
+        self,
+        spectrogram_shape: tuple[int, int],
+        threshold: float = 0.5,
+        res_exponent_lo: int = 0,
+        res_exponent_hi: int = 4,
+    ) -> None:
+        self.spectrogram_shape = spectrogram_shape
+        self.threshold = threshold
+        self.res_exponent_lo = res_exponent_lo
+        self.res_exponent_hi = max(res_exponent_lo, res_exponent_hi)
+
+    def _rand_res(self) -> tuple[int, int]:
+        """
+        Pick a Perlin resolution (ry, rx) as powers of 2 that (best-effort)
+        divide the target shape, to avoid degenerate artifacts.
+        """
+        H, W = self.spectrogram_shape
+        exps = list(range(self.res_exponent_lo, self.res_exponent_hi + 1))
+        candidates: list[tuple[int, int]] = []
+        for ey in exps:
+            ry = 2**ey
+            if ry > H:
+                continue
+            for ex in exps:
+                rx = 2**ex
+                if rx > W:
+                    continue
+                if H % ry == 0 and W % rx == 0:
+                    candidates.append((ry, rx))
+        if candidates:
+            return random.choice(candidates)
+        # Fallback: any power-of-2 <= shape
+        ry = min(2 ** random.choice(exps), max(1, H))
+        rx = min(2 ** random.choice(exps), max(1, W))
+        return max(1, ry), max(1, rx)
+
+    def _single_mask_numpy(self) -> np.ndarray:
+        H, W = self.spectrogram_shape
+        ry, rx = self._rand_res()
+        noise = generate_perlin_noise_2d((H, W), (ry, rx))  # ~[-1, 1]
+        M = (noise > self.threshold).astype(np.float32)
+        return M
+
+    def __call__(self, batch_size: int, device: torch.device | str) -> torch.Tensor:
+        masks = []
+        for _ in range(batch_size):
+            arr = self._single_mask_numpy()
+            masks.append(torch.from_numpy(arr.astype(np.float32)).unsqueeze(0).unsqueeze(0))
+        return torch.cat(masks, dim=0).to(device)
+
+
 class AnomalyMapGenerator:
     """
     Generate anomaly map M for training.
@@ -196,6 +259,11 @@ class AnomalyMapGenerator:
         self.zero_mask_prob = zero_mask_prob
         if n_mels is None or T is None:
             n_mels, T = spectrogram_shape
+        self.perlin = (
+            PerlinNoiseStrategy(spectrogram_shape)
+            if self.strategy_name in ("perlin", "both")
+            else None
+        )
         self.audio_specific = AudioSpecificStrategy(spectrogram_shape, n_mels, T)
 
     def _generate_one(
@@ -205,6 +273,16 @@ class AnomalyMapGenerator:
     ) -> torch.Tensor:
         """Generate a single non-zero mask (1, 1, H, W)."""
         _ = machine_type  # unused; same generator for all types
+        if self.strategy_name == "perlin":
+            assert self.perlin is not None
+            return self.perlin(1, device)
+        if self.strategy_name == "both":
+            # Mix Perlin (20%) and audio_specific (80%) for now.
+            if random.random() < 0.2:
+                assert self.perlin is not None
+                return self.perlin(1, device)
+            return self.audio_specific(1, device)
+        # Default: audio_specific
         return self.audio_specific(1, device)
 
     def generate_for_training_sample(
@@ -215,8 +293,7 @@ class AnomalyMapGenerator:
     ) -> torch.Tensor:
         """Generate one mask for a single training sample."""
         if force_anomaly:
-            _ = machine_type  # unused
-            return self.audio_specific(1, device)
+            return self._generate_one(device, machine_type=machine_type)
         return self.generate(1, device, force_anomaly=False, machine_types=None)
 
     def generate(
@@ -250,6 +327,15 @@ class AnomalyMapGenerator:
         """
         if force_anomaly:
             _ = machine_types  # unused
+            if self.strategy_name == "perlin":
+                assert self.perlin is not None
+                return self.perlin(batch_size, device)
+            if self.strategy_name == "both":
+                # Batch-level mix (matches prior behavior of choosing one branch per call).
+                if random.random() < 0.2:
+                    assert self.perlin is not None
+                    return self.perlin(batch_size, device)
+                return self.audio_specific(batch_size, device)
             return self.audio_specific(batch_size, device)
 
         masks = []
