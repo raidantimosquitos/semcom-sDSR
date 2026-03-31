@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, Callable
 
@@ -35,6 +36,40 @@ from src.comm.ldpc_pyldpc import (
     ldpc_qpsk_awgn_roundtrip,
     make_ldpc_code,
 )
+
+def _bits_required(K: int) -> int:
+    if K <= 1:
+        return 1
+    return int(math.ceil(math.log2(float(K))))
+
+
+def _pack_symbols_fixed_lsb(symbols: np.ndarray, bits_per_symbol: int) -> tuple[np.ndarray, int]:
+    """
+    Pack integer symbols into bytes using LSB-first bit order per symbol.
+    Returns (payload_bytes uint8 array, n_bits valid).
+    """
+    symbols = np.asarray(symbols, dtype=np.int64).reshape(-1)
+    B = int(bits_per_symbol)
+    if B <= 0:
+        raise ValueError(f"bits_per_symbol must be > 0, got {B}")
+    # (N,B) bits, LSB-first along B
+    bitmat = ((symbols[:, None] >> np.arange(B, dtype=np.int64)[None, :]) & 1).astype(np.uint8)
+    bits = bitmat.reshape(-1)
+    n_bits = int(bits.size)
+    payload = np.packbits(bits, bitorder="little")
+    return payload.astype(np.uint8), n_bits
+
+
+def _unpack_symbols_fixed_lsb(payload_bytes: np.ndarray, n_bits: int, n_symbols: int, bits_per_symbol: int) -> np.ndarray:
+    payload_bytes = np.asarray(payload_bytes, dtype=np.uint8).reshape(-1)
+    B = int(bits_per_symbol)
+    if n_bits != n_symbols * B:
+        raise ValueError(f"n_bits mismatch: got {n_bits}, expected {n_symbols * B}")
+    bits = np.unpackbits(payload_bytes, bitorder="little")[:n_bits].astype(np.uint8)
+    bitmat = bits.reshape(int(n_symbols), B).astype(np.int64)
+    weights = (1 << np.arange(B, dtype=np.int64))[None, :]
+    syms = (bitmat * weights).sum(axis=1)
+    return syms.astype(np.int64)
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,6 +96,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ldpc_maxiter", type=int, default=100)
 
     p.add_argument("--output", type=str, default=None)
+    p.add_argument(
+        "--smoke_test",
+        action="store_true",
+        help="Run a quick fixed-length (entropy=none) LDPC+QPSK round-trip sanity check and exit.",
+    )
     return p.parse_args()
 
 
@@ -102,6 +142,8 @@ class AWGNIndexChannelWrapper(nn.Module):
         train_ds: DCASE2020Task2LogMelDataset,
         device: torch.device,
         entropy: str,
+        bits_coarse: int | None,
+        bits_fine: int | None,
         uep: UEPPoint,
         ldpc_cfg: LDPCConfig,
         seed: int,
@@ -112,6 +154,8 @@ class AWGNIndexChannelWrapper(nn.Module):
         self.vq_vae = vq_vae
         self.device = device
         self.entropy = entropy
+        self._bits_arg_c = bits_coarse
+        self._bits_arg_f = bits_fine
         self.uep = uep
         self.ldpc_cfg = ldpc_cfg
         self.seed = seed
@@ -127,6 +171,15 @@ class AWGNIndexChannelWrapper(nn.Module):
             self.huff_c = None
             self.huff_f = None
 
+        # Fixed-length symbol widths for entropy=none (computed from codebook sizes unless provided).
+        self._bits_c = None
+        self._bits_f = None
+        if entropy == "none":
+            Kc = int(self.vq_vae.num_embeddings_coarse)
+            Kf = int(self.vq_vae.num_embeddings_fine)
+            self._bits_c = int(self._bits_arg_c) if self._bits_arg_c is not None else int(_bits_required(Kc))
+            self._bits_f = int(self._bits_arg_f) if self._bits_arg_f is not None else int(_bits_required(Kf))
+
         # Two LDPC codes for UEP (coarse/fine) to realize (Rc, Rf) points.
         # Regular LDPC has approximate rate ~ 1 - d_v/d_c; we map the target points
         # to common (d_v, d_c) pairs and generate separate codes.
@@ -139,6 +192,8 @@ class AWGNIndexChannelWrapper(nn.Module):
         self._huff_fail_coarse = 0
         self._huff_fail_fine = 0
         self._huff_fail_any = 0
+        self._clip_oor_coarse = 0
+        self._clip_oor_fine = 0
 
     def avg_channel_uses_per_clip(self) -> tuple[float, float, float]:
         if self._n_samples_total <= 0:
@@ -150,6 +205,10 @@ class AWGNIndexChannelWrapper(nn.Module):
     def huffman_failure_counts(self) -> tuple[int, int, int]:
         """(coarse_failures, fine_failures, any_failures) across all processed samples."""
         return (int(self._huff_fail_coarse), int(self._huff_fail_fine), int(self._huff_fail_any))
+
+    def fixedlen_clip_counts(self) -> tuple[int, int]:
+        """(coarse_out_of_range, fine_out_of_range) counts before clipping (entropy=none)."""
+        return (int(self._clip_oor_coarse), int(self._clip_oor_fine))
 
     def _make_uep_codes(self, base: LDPCConfig, uep: UEPPoint) -> tuple[LDPCCode, LDPCCode]:
         # Map target rates to (d_v, d_c) pairs (rate ≈ 1 - d_v/d_c).
@@ -206,9 +265,31 @@ class AWGNIndexChannelWrapper(nn.Module):
             b_c, nbc = encode_symbols(self.huff_c, idx_c)
             b_f, nbf = encode_symbols(self.huff_f, idx_f)
             return b_c, nbc, b_f, nbf
-        raise ValueError("Only Huffman entropy coding is implemented in this script.")
+        if self.entropy == "none":
+            assert self._bits_c is not None and self._bits_f is not None
+            b_c, nbc = _pack_symbols_fixed_lsb(idx_c, self._bits_c)
+            b_f, nbf = _pack_symbols_fixed_lsb(idx_f, self._bits_f)
+            return b_c, nbc, b_f, nbf
+        raise ValueError(f"Unsupported entropy mode: {self.entropy}")
 
     def _decode_bits_to_indices(self, b_c: np.ndarray, nbc: int, b_f: np.ndarray, nbf: int, n_c: int, n_f: int) -> tuple[np.ndarray, np.ndarray]:
+        if self.entropy == "none":
+            assert self._bits_c is not None and self._bits_f is not None
+            idx_c = _unpack_symbols_fixed_lsb(b_c, nbc, n_c, self._bits_c)
+            idx_f = _unpack_symbols_fixed_lsb(b_f, nbf, n_f, self._bits_f)
+            # Clip to valid codebook range (important if bits_per_symbol > ceil(log2(K)) or errors occur).
+            Kc = int(self.vq_vae.num_embeddings_coarse)
+            Kf = int(self.vq_vae.num_embeddings_fine)
+            oor_c = int(np.count_nonzero((idx_c < 0) | (idx_c >= Kc)))
+            oor_f = int(np.count_nonzero((idx_f < 0) | (idx_f >= Kf)))
+            self._clip_oor_coarse += oor_c
+            self._clip_oor_fine += oor_f
+            if oor_c:
+                idx_c = np.clip(idx_c, 0, Kc - 1)
+            if oor_f:
+                idx_f = np.clip(idx_f, 0, Kf - 1)
+            return idx_c, idx_f
+
         assert self.huff_c is not None and self.huff_f is not None
         fail_any = False
         try:
@@ -301,6 +382,62 @@ class AWGNIndexChannelWrapper(nn.Module):
 def main() -> None:
     args = parse_args()
 
+    if args.smoke_test:
+        # Minimal sanity: fixed-length packing + LDPC round-trip at very high SNR should be lossless.
+        if args.entropy != "none":
+            raise ValueError("--smoke_test expects --entropy none")
+        rng = np.random.default_rng(0)
+        uep = UEP_POINTS[args.uep]
+        base = LDPCConfig(n=args.ldpc_n, d_v=args.ldpc_dv, d_c=args.ldpc_dc, maxiter=args.ldpc_maxiter, seed=0)
+
+        # Match the same UEP mapping logic used by the wrapper.
+        def round_up(n: int, m: int) -> int:
+            return ((n + m - 1) // m) * m
+
+        def cfg_for_rate(R: float) -> LDPCConfig:
+            if abs(R - 1 / 2) < 1e-6:
+                dc = 4
+                return LDPCConfig(n=round_up(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
+            if abs(R - 2 / 3) < 1e-6:
+                dc = 6
+                return LDPCConfig(n=round_up(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
+            if abs(R - 1 / 3) < 1e-6:
+                dc = 3
+                return LDPCConfig(n=round_up(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
+            if abs(R - 1 / 4) < 1e-6:
+                dc = 4
+                return LDPCConfig(n=round_up(base.n, dc), d_v=3, d_c=dc, maxiter=base.maxiter, seed=base.seed)
+            raise ValueError(f"Unsupported target LDPC rate: {R}")
+
+        code_c = make_ldpc_code(cfg_for_rate(uep.Rc))
+        code_f = make_ldpc_code(cfg_for_rate(uep.Rf))
+
+        Kc, Kf = 1024, 4096
+        bits_c = int(args.bits_coarse) if args.bits_coarse is not None else _bits_required(Kc)
+        bits_f = int(args.bits_fine) if args.bits_fine is not None else _bits_required(Kf)
+
+        idx_c = rng.integers(0, Kc, size=16 * 40, dtype=np.int64)
+        idx_f = rng.integers(0, Kf, size=32 * 80, dtype=np.int64)
+        b_c, nbc = _pack_symbols_fixed_lsb(idx_c, bits_c)
+        b_f, nbf = _pack_symbols_fixed_lsb(idx_f, bits_f)
+        bits_c_vec = np.unpackbits(b_c, bitorder="little")[:nbc].astype(np.uint8)
+        bits_f_vec = np.unpackbits(b_f, bitorder="little")[:nbf].astype(np.uint8)
+
+        # Very high SNR (effectively noiseless)
+        rx_bits_c = ldpc_qpsk_awgn_roundtrip(bits_c_vec, code=code_c, ldpc_maxiter=code_c.k, ebn0_db=60.0, rng=rng)
+        rx_bits_f = ldpc_qpsk_awgn_roundtrip(bits_f_vec, code=code_f, ldpc_maxiter=code_f.k, ebn0_db=60.0, rng=rng)
+        rx_b_c = np.packbits(rx_bits_c, bitorder="little")
+        rx_b_f = np.packbits(rx_bits_f, bitorder="little")
+        dec_c = _unpack_symbols_fixed_lsb(rx_b_c, nbc, idx_c.size, bits_c)
+        dec_f = _unpack_symbols_fixed_lsb(rx_b_f, nbf, idx_f.size, bits_f)
+
+        if not np.array_equal(idx_c, dec_c):
+            raise RuntimeError("Smoke test failed: coarse indices mismatch")
+        if not np.array_equal(idx_f, dec_f):
+            raise RuntimeError("Smoke test failed: fine indices mismatch")
+        print("Smoke test passed: fixed-length pack/unpack + LDPC round-trip is lossless at high SNR.")
+        return
+
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
@@ -365,6 +502,8 @@ def main() -> None:
                     train_ds=train_ds,
                     device=device,
                     entropy=args.entropy,
+                    bits_coarse=args.bits_coarse,
+                    bits_fine=args.bits_fine,
                     uep=uep,
                     ldpc_cfg=ldpc_cfg,
                     seed=seed,
@@ -382,6 +521,7 @@ def main() -> None:
                 res = evaluator.evaluate()
                 cu_c, cu_f, cu_t = wrapper.avg_channel_uses_per_clip()
                 hf_c, hf_f, hf_any = wrapper.huffman_failure_counts()
+                oor_c, oor_f = wrapper.fixedlen_clip_counts()
                 ids = res.get(args.machine_type, {})
                 for mid, v in ids.items():
                     if not isinstance(v, dict):
@@ -391,7 +531,7 @@ def main() -> None:
                 print(
                     f"[{args.machine_type}] method={args.method} entropy={args.entropy} uep={args.uep} "
                     f"snr={snr_db} seed={seed} cu_total={cu_t:.1f}/clip "
-                    f"huff_fail_any={hf_any} avg={ids.get('average')}"
+                    f"huff_fail_any={hf_any} clip_oor_c={oor_c} clip_oor_f={oor_f} avg={ids.get('average')}"
                 )
 
     print(f"Saved: {out_path}")

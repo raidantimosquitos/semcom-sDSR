@@ -230,14 +230,23 @@ class VQ_VAE_2Layer(nn.Module):
             q_fine: (B, emb_dim, H_fine, W_fine)
             q_coarse: (B, emb_dim, H_coarse, W_coarse)
         """
-        emb_dim = self._vq_coarse._embedding_dim
+        emb_dim_c = int(self._vq_coarse._embedding_dim)
+        emb_dim_f = int(self._vq_fine._embedding_dim)
+
         q_coarse = self._vq_coarse._embedding(indices_coarse.flatten())
         q_coarse = q_coarse.view(
-            indices_coarse.shape[0], indices_coarse.shape[1], indices_coarse.shape[2], emb_dim
+            indices_coarse.shape[0],
+            indices_coarse.shape[1],
+            indices_coarse.shape[2],
+            emb_dim_c,
         ).permute(0, 3, 1, 2)
+
         q_fine = self._vq_fine._embedding(indices_fine.flatten())
         q_fine = q_fine.view(
-            indices_fine.shape[0], indices_fine.shape[1], indices_fine.shape[2], emb_dim
+            indices_fine.shape[0],
+            indices_fine.shape[1],
+            indices_fine.shape[2],
+            emb_dim_f,
         ).permute(0, 3, 1, 2)
         return q_fine, q_coarse
 
