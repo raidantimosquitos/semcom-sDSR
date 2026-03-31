@@ -38,6 +38,7 @@ from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 from src.utils.audio import standardize_spectrogram
 
 from src.comm.bytes_bits import bytes_to_bits_lsb_first, bits_to_bytes_lsb_first
+from src.comm.framing_crc import packetize, depacketize, transmit_frames_over_channel
 from src.comm.ldpc_pyldpc import LDPCConfig, make_ldpc_code, ldpc_qpsk_awgn_roundtrip
 
 
@@ -54,6 +55,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--snr_db", type=float, nargs="+", default=[-5, 0, 5, 10, 15, 20])
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--use_channel", action="store_true")
+    p.add_argument("--frame_bytes", type=int, default=256, help="Payload bytes per CRC-protected frame (when --use_channel).")
+    p.add_argument("--conceal", type=str, choices=["zeros"], default="zeros", help="Concealment on CRC fail (currently only zeros).")
     p.add_argument("--ldpc_n", type=int, default=512)
     p.add_argument("--ldpc_dv", type=int, default=2)
     p.add_argument("--ldpc_dc", type=int, default=4)
@@ -190,7 +193,7 @@ class OpusTestDataset(torch.utils.data.Dataset):
     but with an OPUS encode/decode (and optional channel) applied to the waveform before feature extraction.
     """
 
-    def __init__(self, base: DCASE2020Task2TestDataset, *, kbps: int, use_channel: bool, snr_db: float, seed: int, ldpc: LDPCConfig, target_T: int) -> None:
+    def __init__(self, base: DCASE2020Task2TestDataset, *, kbps: int, use_channel: bool, snr_db: float, seed: int, ldpc: LDPCConfig, target_T: int, frame_bytes: int, conceal: str) -> None:
         self.base = base
         self.kbps = int(kbps)
         self.use_channel = bool(use_channel)
@@ -199,12 +202,21 @@ class OpusTestDataset(torch.utils.data.Dataset):
         self.ldpc_cfg = ldpc
         self.ldpc_code = make_ldpc_code(ldpc)
         self.target_T = int(target_T)
+        self.frame_bytes = int(frame_bytes)
+        self.conceal = str(conceal)
         self._rng = np.random.default_rng(self.seed)
         self._cu_total = 0
         self._n_total = 0
+        self._frames_total = 0
+        self._frames_failed = 0
 
     def avg_channel_uses_per_clip(self) -> float:
         return float(self._cu_total / self._n_total) if self._n_total else 0.0
+
+    def frame_failure_stats(self) -> tuple[int, int, float]:
+        n = int(self._frames_total)
+        f = int(self._frames_failed)
+        return n, f, (f / n) if n else 0.0
 
     def __len__(self) -> int:
         return len(self.base)
@@ -215,22 +227,36 @@ class OpusTestDataset(torch.utils.data.Dataset):
         opus_blob = opus_encode_bytes_ffmpeg(wav, sr, kbps=self.kbps)
 
         if self.use_channel:
-            bits = bytes_to_bits_lsb_first(opus_blob)
-            rx_bits = ldpc_qpsk_awgn_roundtrip(
-                bits,
-                code=self.ldpc_code,
-                ldpc_maxiter=self.ldpc_cfg.maxiter,
-                ebn0_db=self.snr_db,
-                rng=self._rng,
-            )
-            # channel uses (QPSK): blocks*n / 2
-            k, n = int(self.ldpc_code.k), int(self.ldpc_code.n)
-            blocks = (int(bits.size) + k - 1) // k
-            self._cu_total += (blocks * n + 1) // 2
-            self._n_total += 1
-            opus_blob = bits_to_bytes_lsb_first(rx_bits)
+            frames = packetize(opus_blob, self.frame_bytes)
 
-        wav_d, sr_d = opus_decode_bytes_ffmpeg(opus_blob)
+            def txrx(fr: bytes) -> bytes:
+                bits = bytes_to_bits_lsb_first(fr)
+                rx_bits = ldpc_qpsk_awgn_roundtrip(
+                    bits,
+                    code=self.ldpc_code,
+                    ldpc_maxiter=self.ldpc_cfg.maxiter,
+                    ebn0_db=self.snr_db,
+                    rng=self._rng,
+                )
+                # channel uses (QPSK): blocks*n / 2
+                k, n0 = int(self.ldpc_code.k), int(self.ldpc_code.n)
+                blocks = (int(bits.size) + k - 1) // k
+                self._cu_total += (blocks * n0 + 1) // 2
+                return bits_to_bytes_lsb_first(rx_bits)
+
+            rx_payloads, st = transmit_frames_over_channel(
+                frames, frame_payload_bytes=self.frame_bytes, channel_txrx=txrx, concealment=self.conceal
+            )
+            self._frames_total += int(st.n_frames)
+            self._frames_failed += int(st.n_failed)
+            self._n_total += 1
+            opus_blob = depacketize(rx_payloads, orig_len=len(opus_blob))
+
+        try:
+            wav_d, sr_d = opus_decode_bytes_ffmpeg(opus_blob)
+        except Exception:
+            # If decoding fails due to erasures, fall back to silence.
+            wav_d, sr_d = torch.zeros((1, int(sr)), dtype=torch.float32), int(sr)
         x = wav_to_logmel(wav_d, sr_d, target_T=self.target_T)
         return x, label, machine_id
 
@@ -290,6 +316,8 @@ def main() -> None:
                     seed=seed,
                     ldpc=ldpc_cfg,
                     target_T=train_ds.target_T,
+                    frame_bytes=args.frame_bytes,
+                    conceal=args.conceal,
                 )
                 evaluator = AnomalyEvaluator(
                     model=model,
@@ -301,6 +329,7 @@ def main() -> None:
                 res = evaluator.evaluate()
                 ids = res.get(args.machine_type, {})
                 cu = ds.avg_channel_uses_per_clip() if args.use_channel else 0.0
+                nfr, nff, fer = ds.frame_failure_stats() if args.use_channel else (0, 0, 0.0)
                 for mid, v in ids.items():
                     if not isinstance(v, dict):
                         continue
@@ -308,7 +337,7 @@ def main() -> None:
                 f.flush()
                 print(
                     f"[{args.machine_type}] opus {args.opus_kbps}kbps use_channel={args.use_channel} "
-                    f"snr={snr_db} seed={seed} cu_total={cu:.1f}/clip avg={ids.get('average')}"
+                    f"snr={snr_db} seed={seed} frames={nfr} failed={nff} fer={fer:.3f} cu_total={cu:.1f}/clip avg={ids.get('average')}"
                 )
 
     print(f"Saved: {out_path}")

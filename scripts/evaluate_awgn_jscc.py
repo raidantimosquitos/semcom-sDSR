@@ -118,6 +118,7 @@ def main() -> None:
     fine_cfg = JSCCMapConfig(**jscc_ckpt["fine_cfg"])
     jscc = JSCCDualMap(coarse=coarse_cfg, fine=fine_cfg).to(device)
     jscc.load_state_dict(jscc_ckpt["jscc_state_dict"])
+    print(f"[jscc] channel_uses_per_clip={int(jscc.channel_uses_per_clip)} (compare digital baselines at similar CU/clip)")
 
     out_path = Path(args.output) if args.output else (Path(args.stage2_ckpt).resolve().parent / "results" / "awgn_jscc_results.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)

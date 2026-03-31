@@ -15,6 +15,7 @@ import argparse
 import csv
 from dataclasses import dataclass
 import math
+import struct
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,6 +31,8 @@ from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
 
 from src.comm.huffman import build_huffman_from_counts, decode_symbols, encode_symbols
+from src.comm.bytes_bits import bytes_to_bits_lsb_first, bits_to_bytes_lsb_first
+from src.comm.framing_crc import packetize, depacketize, transmit_frames_over_channel
 from src.comm.ldpc_pyldpc import (
     LDPCCode,
     LDPCConfig,
@@ -94,6 +97,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ldpc_dv", type=int, default=2)
     p.add_argument("--ldpc_dc", type=int, default=4)
     p.add_argument("--ldpc_maxiter", type=int, default=100)
+    p.add_argument("--frame_bytes", type=int, default=256, help="Payload bytes per CRC-protected frame.")
+    p.add_argument("--conceal", type=str, choices=["zeros"], default="zeros", help="Concealment on CRC fail (currently only zeros).")
 
     p.add_argument("--output", type=str, default=None)
     p.add_argument(
@@ -148,6 +153,8 @@ class AWGNIndexChannelWrapper(nn.Module):
         ldpc_cfg: LDPCConfig,
         seed: int,
         snr_db: float,
+        frame_bytes: int,
+        conceal: str,
     ) -> None:
         super().__init__()
         self.model = model
@@ -160,6 +167,8 @@ class AWGNIndexChannelWrapper(nn.Module):
         self.ldpc_cfg = ldpc_cfg
         self.seed = seed
         self.snr_db = snr_db
+        self.frame_bytes = int(frame_bytes)
+        self.conceal = str(conceal)
 
         # Build Huffman codes from TRAIN distribution (per machine_type)
         # (Using encode_to_indices, so this is consistent with transmitted symbols.)
@@ -194,6 +203,8 @@ class AWGNIndexChannelWrapper(nn.Module):
         self._huff_fail_any = 0
         self._clip_oor_coarse = 0
         self._clip_oor_fine = 0
+        self._frames_total = 0
+        self._frames_failed = 0
 
     def avg_channel_uses_per_clip(self) -> tuple[float, float, float]:
         if self._n_samples_total <= 0:
@@ -209,6 +220,13 @@ class AWGNIndexChannelWrapper(nn.Module):
     def fixedlen_clip_counts(self) -> tuple[int, int]:
         """(coarse_out_of_range, fine_out_of_range) counts before clipping (entropy=none)."""
         return (int(self._clip_oor_coarse), int(self._clip_oor_fine))
+
+    def frame_failure_stats(self) -> tuple[int, int, float]:
+        """(n_frames_total, n_frames_failed, fer)."""
+        n = int(self._frames_total)
+        f = int(self._frames_failed)
+        fer = (f / n) if n else 0.0
+        return n, f, float(fer)
 
     def _make_uep_codes(self, base: LDPCConfig, uep: UEPPoint) -> tuple[LDPCCode, LDPCCode]:
         # Map target rates to (d_v, d_c) pairs (rate ≈ 1 - d_v/d_c).
@@ -319,6 +337,11 @@ class AWGNIndexChannelWrapper(nn.Module):
             rng=rng,
         )
 
+    def _frame_channel(self, frame: bytes, *, code: LDPCCode, ebn0_db: float, rng: np.random.Generator) -> bytes:
+        bits = bytes_to_bits_lsb_first(frame)
+        rx_bits = self._ldpc_channel(bits, code=code, ebn0_db=ebn0_db, rng=rng)
+        return bits_to_bytes_lsb_first(rx_bits)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.model.eval()
         self.vq_vae.eval()
@@ -337,25 +360,38 @@ class AWGNIndexChannelWrapper(nn.Module):
             for i in range(x.shape[0]):
                 b_c, nbc, b_f, nbf = self._encode_indices_to_bits(idx_c[i], idx_f[i])
 
-                bits_c = np.unpackbits(b_c, bitorder="little")[:nbc].astype(np.uint8)
-                bits_f = np.unpackbits(b_f, bitorder="little")[:nbf].astype(np.uint8)
+                # Build per-stream byte blobs with a small header carrying n_bits.
+                # This makes packetization safe even when the last byte is partially used.
+                blob_c = struct.pack("<I", int(nbc)) + bytes(np.asarray(b_c, dtype=np.uint8).tobytes())
+                blob_f = struct.pack("<I", int(nbf)) + bytes(np.asarray(b_f, dtype=np.uint8).tobytes())
 
-                rx_bits_c = self._ldpc_channel(bits_c, code=self.ldpc_code_c, ebn0_db=float(self.snr_db), rng=rng)
-                rx_bits_f = self._ldpc_channel(bits_f, code=self.ldpc_code_f, ebn0_db=float(self.snr_db), rng=rng)
+                frames_c = packetize(blob_c, self.frame_bytes)
+                frames_f = packetize(blob_f, self.frame_bytes)
 
-                # Channel uses for this sample under QPSK:
-                # coded_bits ≈ ceil(N/k)*n, then /2 for QPSK
-                k_c, n_c = int(self.ldpc_code_c.k), int(self.ldpc_code_c.n)
-                k_f, n_f = int(self.ldpc_code_f.k), int(self.ldpc_code_f.n)
-                blocks_c = (int(bits_c.size) + k_c - 1) // k_c
-                blocks_f = (int(bits_f.size) + k_f - 1) // k_f
-                cu_coarse += (blocks_c * n_c + 1) // 2
-                cu_fine += (blocks_f * n_f + 1) // 2
+                def txrx_c(fr: bytes) -> bytes:
+                    return self._frame_channel(fr, code=self.ldpc_code_c, ebn0_db=float(self.snr_db), rng=rng)
 
-                rx_b_c = np.packbits(rx_bits_c, bitorder="little")
-                rx_b_f = np.packbits(rx_bits_f, bitorder="little")
+                def txrx_f(fr: bytes) -> bytes:
+                    return self._frame_channel(fr, code=self.ldpc_code_f, ebn0_db=float(self.snr_db), rng=rng)
 
-                dec_c, dec_f = self._decode_bits_to_indices(rx_b_c, nbc, rx_b_f, nbf, idx_c.shape[1], idx_f.shape[1])
+                rx_payloads_c, st_c = transmit_frames_over_channel(
+                    frames_c, frame_payload_bytes=self.frame_bytes, channel_txrx=txrx_c, concealment=self.conceal
+                )
+                rx_payloads_f, st_f = transmit_frames_over_channel(
+                    frames_f, frame_payload_bytes=self.frame_bytes, channel_txrx=txrx_f, concealment=self.conceal
+                )
+                self._frames_total += int(st_c.n_frames + st_f.n_frames)
+                self._frames_failed += int(st_c.n_failed + st_f.n_failed)
+
+                rx_blob_c = depacketize(rx_payloads_c, orig_len=len(blob_c))
+                rx_blob_f = depacketize(rx_payloads_f, orig_len=len(blob_f))
+
+                nbc_rx = int(struct.unpack("<I", rx_blob_c[:4])[0]) if len(rx_blob_c) >= 4 else 0
+                nbf_rx = int(struct.unpack("<I", rx_blob_f[:4])[0]) if len(rx_blob_f) >= 4 else 0
+                rx_b_c = np.frombuffer(rx_blob_c[4:], dtype=np.uint8)
+                rx_b_f = np.frombuffer(rx_blob_f[4:], dtype=np.uint8)
+
+                dec_c, dec_f = self._decode_bits_to_indices(rx_b_c, nbc_rx, rx_b_f, nbf_rx, idx_c.shape[1], idx_f.shape[1])
                 rx_idx_c.append(dec_c)
                 rx_idx_f.append(dec_f)
 
@@ -508,6 +544,8 @@ def main() -> None:
                     ldpc_cfg=ldpc_cfg,
                     seed=seed,
                     snr_db=float(snr_db),
+                    frame_bytes=args.frame_bytes,
+                    conceal=args.conceal,
                 )
                 evaluator = AnomalyEvaluator(
                     model=wrapper,
@@ -522,6 +560,7 @@ def main() -> None:
                 cu_c, cu_f, cu_t = wrapper.avg_channel_uses_per_clip()
                 hf_c, hf_f, hf_any = wrapper.huffman_failure_counts()
                 oor_c, oor_f = wrapper.fixedlen_clip_counts()
+                nfr, nff, fer = wrapper.frame_failure_stats()
                 ids = res.get(args.machine_type, {})
                 for mid, v in ids.items():
                     if not isinstance(v, dict):
@@ -531,6 +570,7 @@ def main() -> None:
                 print(
                     f"[{args.machine_type}] method={args.method} entropy={args.entropy} uep={args.uep} "
                     f"snr={snr_db} seed={seed} cu_total={cu_t:.1f}/clip "
+                    f"frames={nfr} failed={nff} fer={fer:.3f} "
                     f"huff_fail_any={hf_any} clip_oor_c={oor_c} clip_oor_f={oor_f} avg={ids.get('average')}"
                 )
 
