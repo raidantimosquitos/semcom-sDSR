@@ -147,15 +147,28 @@ class AWGNIndexChannelWrapper(nn.Module):
     def _make_uep_codes(self, base: LDPCConfig, uep: UEPPoint) -> tuple[LDPCCode, LDPCCode]:
         # Map target rates to (d_v, d_c) pairs (rate ≈ 1 - d_v/d_c).
         # These are standard, fast-to-generate configs under pyldpc.
+        def _round_up_to_multiple(n: int, m: int) -> int:
+            if m <= 0:
+                raise ValueError(f"m must be > 0, got {m}")
+            if n <= 0:
+                raise ValueError(f"n must be > 0, got {n}")
+            return ((n + m - 1) // m) * m
+
         def cfg_for_rate(R: float) -> LDPCConfig:
             if abs(R - 1 / 2) < 1e-6:
-                return LDPCConfig(n=base.n, d_v=2, d_c=4, maxiter=base.maxiter, seed=base.seed)
+                dc = 4
+                return LDPCConfig(n=_round_up_to_multiple(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
             if abs(R - 2 / 3) < 1e-6:
-                return LDPCConfig(n=base.n, d_v=2, d_c=6, maxiter=base.maxiter, seed=base.seed)
+                dc = 6
+                return LDPCConfig(n=_round_up_to_multiple(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
             if abs(R - 1 / 3) < 1e-6:
-                return LDPCConfig(n=base.n, d_v=2, d_c=3, maxiter=base.maxiter, seed=base.seed)
+                # Important: pyldpc requires (n % d_c == 0) for a regular LDPC matrix.
+                # With default n=512, d_c=3 would fail (512 % 3 != 0).
+                dc = 3
+                return LDPCConfig(n=_round_up_to_multiple(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
             if abs(R - 1 / 4) < 1e-6:
-                return LDPCConfig(n=base.n, d_v=3, d_c=4, maxiter=base.maxiter, seed=base.seed)
+                dc = 4
+                return LDPCConfig(n=_round_up_to_multiple(base.n, dc), d_v=3, d_c=dc, maxiter=base.maxiter, seed=base.seed)
             raise ValueError(f"Unsupported target LDPC rate: {R}")
 
         code_c = make_ldpc_code(cfg_for_rate(uep.Rc))
@@ -257,7 +270,9 @@ class AWGNIndexChannelWrapper(nn.Module):
 
             q_fine, q_coarse = self.vq_vae.indices_to_quantized(rx_idx_c_t, rx_idx_f_t)
             # NOTE: indices_to_quantized returns (q_fine, q_coarse) in this repo
-            m_out = self.model.forward_from_quantized(q_fine=q_fine, q_coarse=q_coarse)
+            out = self.model.forward_from_quantized(q_fine=q_fine, q_coarse=q_coarse)
+            # Some model variants may return (m_out, aux1, aux2); evaluator expects a Tensor.
+            m_out: torch.Tensor = out[0] if isinstance(out, tuple) else out
             return m_out
 
 

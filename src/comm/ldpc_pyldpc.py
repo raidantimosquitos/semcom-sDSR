@@ -51,6 +51,11 @@ def make_ldpc_code(cfg: LDPCConfig) -> LDPCCode:
         raise ImportError(
             "pyldpc is required for LDPC experiments. Install with: pip install numpy pyldpc"
         ) from _pyldpc_import_error
+    if cfg.n % cfg.d_c != 0:
+        raise ValueError(
+            f"Invalid LDPCConfig for pyldpc regular LDPC: n={cfg.n} must be divisible by d_c={cfg.d_c}. "
+            f"Fix by choosing --ldpc_n as a multiple of {cfg.d_c}, or adjust the UEP mapping."
+        )
     H, G = pyldpc.make_ldpc(
         cfg.n, cfg.d_v, cfg.d_c, systematic=True, sparse=True, seed=cfg.seed
     )
