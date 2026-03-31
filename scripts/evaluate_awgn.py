@@ -136,6 +136,9 @@ class AWGNIndexChannelWrapper(nn.Module):
         self._cu_coarse_total = 0
         self._cu_fine_total = 0
         self._n_samples_total = 0
+        self._huff_fail_coarse = 0
+        self._huff_fail_fine = 0
+        self._huff_fail_any = 0
 
     def avg_channel_uses_per_clip(self) -> tuple[float, float, float]:
         if self._n_samples_total <= 0:
@@ -143,6 +146,10 @@ class AWGNIndexChannelWrapper(nn.Module):
         c = self._cu_coarse_total / self._n_samples_total
         f = self._cu_fine_total / self._n_samples_total
         return (float(c), float(f), float(c + f))
+
+    def huffman_failure_counts(self) -> tuple[int, int, int]:
+        """(coarse_failures, fine_failures, any_failures) across all processed samples."""
+        return (int(self._huff_fail_coarse), int(self._huff_fail_fine), int(self._huff_fail_any))
 
     def _make_uep_codes(self, base: LDPCConfig, uep: UEPPoint) -> tuple[LDPCCode, LDPCCode]:
         # Map target rates to (d_v, d_c) pairs (rate ≈ 1 - d_v/d_c).
@@ -203,8 +210,23 @@ class AWGNIndexChannelWrapper(nn.Module):
 
     def _decode_bits_to_indices(self, b_c: np.ndarray, nbc: int, b_f: np.ndarray, nbf: int, n_c: int, n_f: int) -> tuple[np.ndarray, np.ndarray]:
         assert self.huff_c is not None and self.huff_f is not None
-        idx_c = decode_symbols(self.huff_c, b_c, nbc, n_c)
-        idx_f = decode_symbols(self.huff_f, b_f, nbf, n_f)
+        fail_any = False
+        try:
+            idx_c = decode_symbols(self.huff_c, b_c, nbc, n_c)
+        except ValueError:
+            # Huffman is not error-resilient: a single bit error can desync the stream.
+            # For sweep robustness, treat this as a decode failure and fall back to a safe default.
+            idx_c = np.zeros(n_c, dtype=np.int64)
+            self._huff_fail_coarse += 1
+            fail_any = True
+        try:
+            idx_f = decode_symbols(self.huff_f, b_f, nbf, n_f)
+        except ValueError:
+            idx_f = np.zeros(n_f, dtype=np.int64)
+            self._huff_fail_fine += 1
+            fail_any = True
+        if fail_any:
+            self._huff_fail_any += 1
         return idx_c, idx_f
 
     def _ldpc_channel(self, bits: np.ndarray, *, code: LDPCCode, ebn0_db: float, rng: np.random.Generator) -> np.ndarray:
@@ -359,6 +381,7 @@ def main() -> None:
                 )
                 res = evaluator.evaluate()
                 cu_c, cu_f, cu_t = wrapper.avg_channel_uses_per_clip()
+                hf_c, hf_f, hf_any = wrapper.huffman_failure_counts()
                 ids = res.get(args.machine_type, {})
                 for mid, v in ids.items():
                     if not isinstance(v, dict):
@@ -367,7 +390,8 @@ def main() -> None:
                 f.flush()
                 print(
                     f"[{args.machine_type}] method={args.method} entropy={args.entropy} uep={args.uep} "
-                    f"snr={snr_db} seed={seed} cu_total={cu_t:.1f}/clip avg={ids.get('average')}"
+                    f"snr={snr_db} seed={seed} cu_total={cu_t:.1f}/clip "
+                    f"huff_fail_any={hf_any} avg={ids.get('average')}"
                 )
 
     print(f"Saved: {out_path}")
