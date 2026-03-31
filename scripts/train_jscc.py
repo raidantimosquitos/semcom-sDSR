@@ -98,7 +98,7 @@ def main() -> None:
         n = 0
         for x, _lbl, _mid in loader:
             x = x.to(device)
-            with torch.inference_mode():
+            with torch.no_grad():
                 idx_c, idx_f = vq_vae.encode_to_indices(x)
                 q_fine_t, q_coarse_t = vq_vae.indices_to_quantized(idx_c, idx_f)
 
