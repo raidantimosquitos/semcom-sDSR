@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--snr_min", type=float, default=-5.0)
+    p.add_argument("--snr_min", type=float, default=0.0)
     p.add_argument("--snr_max", type=float, default=20.0)
     p.add_argument("--alpha_c", type=int, default=10)
     p.add_argument("--alpha_f", type=int, default=3)

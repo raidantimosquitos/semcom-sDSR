@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
-    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 5, 10, 15])
+    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 2, 4, 6, 8, 10, 12, 15, 20])
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--output", type=str, default=None)
     return p.parse_args()

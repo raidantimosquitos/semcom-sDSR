@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import os
 import shutil
 import subprocess
@@ -60,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--protect_pages", type=int, default=2, help="For channel_mode=ogg_pages, protect the first N Ogg pages (typically OpusHead/OpusTags).")
     p.add_argument("--protect_bytes", type=int, default=128, help="For channel_mode=prefix, do not flip bits in the first N bytes.")
     p.add_argument("--ffmpeg_bin", type=str, default=None, help="Path to ffmpeg binary. Resolution order if omitted: $FFMPEG_BIN, /usr/bin/ffmpeg, PATH.")
+    p.add_argument("--opus_cache_dir", type=str, default=None, help="If set, cache per-clip Ogg Opus bitstreams here to avoid re-encoding on every SNR/seed pass.")
+    p.add_argument("--no_preencode", action="store_true", help="If set, do not pre-encode the full test set into --opus_cache_dir before evaluation.")
     p.add_argument("--output", type=str, default=None)
     return p.parse_args()
 
@@ -140,6 +143,41 @@ def opus_decode_bytes_ffmpeg(opus_bytes: bytes, *, ffmpeg_bin: str) -> tuple[tor
         wav_d, sr_d = torchaudio.load(str(out_wav))
         return wav_d, int(sr_d)
 
+def _opus_cache_path(cache_dir: Path, wav_path: str, kbps: int) -> Path:
+    h = hashlib.sha1(f"{kbps}|{wav_path}".encode("utf-8", errors="ignore")).hexdigest()
+    return cache_dir / f"{h}.ogg"
+
+def preencode_opus_testset(
+    *,
+    base: DCASE2020Task2TestDataset,
+    cache_dir: Path,
+    kbps: int,
+    ffmpeg_bin: str,
+) -> tuple[int, int]:
+    """
+    Pre-encode all test clips to Ogg Opus and store them in cache_dir.
+    Returns (n_present, n_encoded).
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    n_present = 0
+    n_encoded = 0
+    samples = getattr(base, "samples", [])
+    for i, s in enumerate(samples):
+        wav_path = s[0]
+        out_p = _opus_cache_path(cache_dir, str(wav_path), kbps)
+        if out_p.exists() and out_p.stat().st_size > 0:
+            n_present += 1
+            continue
+        wav, sr = torchaudio.load(str(wav_path))
+        opus_blob = opus_encode_bytes_ffmpeg(wav, sr, kbps=kbps, ffmpeg_bin=ffmpeg_bin)
+        tmp = out_p.with_suffix(".tmp")
+        tmp.write_bytes(opus_blob)
+        tmp.replace(out_p)
+        n_encoded += 1
+        if (i + 1) % 100 == 0:
+            print(f"[opus] pre-encode progress: {i+1}/{len(samples)} (new={n_encoded}, cached={n_present})")
+    return n_present, n_encoded
+
 
 def wav_to_logmel(
     wav: torch.Tensor,
@@ -217,9 +255,12 @@ class OpusTestDataset(torch.utils.data.Dataset):
         protect_pages: int,
         channel_mode: str,
         ffmpeg_bin: str,
+        opus_cache_dir: str | None,
         target_T: int,
     ) -> None:
         self.base = base
+        # critical: evaluator keys results by dataset.machine_type
+        self.machine_type = getattr(base, "machine_type", "unknown")
         self.kbps = int(kbps)
         self.use_channel = bool(use_channel)
         self.snr_db = float(snr_db)
@@ -229,6 +270,7 @@ class OpusTestDataset(torch.utils.data.Dataset):
         self.protect_pages = int(protect_pages)
         self.channel_mode = str(channel_mode)
         self.ffmpeg_bin = str(ffmpeg_bin)
+        self.opus_cache_dir = Path(opus_cache_dir) if opus_cache_dir else None
         self.target_T = int(target_T)
         self._rng = np.random.default_rng(self.seed)
         self._cu_total = 0
@@ -250,8 +292,24 @@ class OpusTestDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int):
         wav_path, label, machine_id = self.base.samples[idx]  # type: ignore[attr-defined]
-        wav, sr = torchaudio.load(wav_path)
-        opus_blob = opus_encode_bytes_ffmpeg(wav, sr, kbps=self.kbps, ffmpeg_bin=self.ffmpeg_bin)
+        opus_blob: bytes | None = None
+        if self.opus_cache_dir is not None:
+            p = _opus_cache_path(self.opus_cache_dir, str(wav_path), self.kbps)
+            if p.exists() and p.stat().st_size > 0:
+                opus_blob = p.read_bytes()
+
+        if opus_blob is None:
+            wav, sr = torchaudio.load(wav_path)
+            opus_blob = opus_encode_bytes_ffmpeg(wav, sr, kbps=self.kbps, ffmpeg_bin=self.ffmpeg_bin)
+            if self.opus_cache_dir is not None:
+                self.opus_cache_dir.mkdir(parents=True, exist_ok=True)
+                p = _opus_cache_path(self.opus_cache_dir, str(wav_path), self.kbps)
+                tmp = p.with_suffix(".tmp")
+                tmp.write_bytes(opus_blob)
+                tmp.replace(p)
+        else:
+            # Only load sr for silence fallback sizing. Most DCASE clips are same sr, but we read header cheaply.
+            _, sr = torchaudio.load(wav_path, num_frames=1)
 
         if self.use_channel:
             if self.ber_curve is None:
@@ -328,6 +386,12 @@ def main() -> None:
     out_path = Path(args.output) if args.output else (Path(args.stage2_ckpt).resolve().parent / "results" / "opus_results.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    opus_cache_dir = Path(args.opus_cache_dir) if args.opus_cache_dir else (out_path.parent / "opus_cache" / args.machine_type / f"{int(args.opus_kbps)}kbps")
+    if not args.no_preencode:
+        print(f"[opus] caching enabled, cache_dir={opus_cache_dir}")
+        n_present, n_encoded = preencode_opus_testset(base=test_ds, cache_dir=opus_cache_dir, kbps=int(args.opus_kbps), ffmpeg_bin=ffmpeg_bin)
+        print(f"[opus] pre-encode done: cached={n_present}, newly_encoded={n_encoded}, total={len(test_ds)}")
+
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["machine_type", "method", "opus_kbps", "use_channel", "snr_db", "seed", "avg_cu_total", "machine_id", "auc", "pauc"])
@@ -344,6 +408,7 @@ def main() -> None:
                     protect_pages=args.protect_pages,
                     channel_mode=args.channel_mode,
                     ffmpeg_bin=ffmpeg_bin,
+                    opus_cache_dir=str(opus_cache_dir),
                     target_T=train_ds.target_T,
                 )
                 evaluator = AnomalyEvaluator(
