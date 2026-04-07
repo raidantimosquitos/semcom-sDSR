@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """
-Evaluate sDSR under an AWGN channel on the Stage-1 latent index maps.
+Evaluate sDSR under a BER-calibrated BSC channel on Stage-1 latent index maps.
 
-Two families:
-1) bitstream-first: (optional Huffman) -> LDPC (pyldpc) -> QPSK -> AWGN -> decode -> indices
-2) JSCC: (placeholder in this script; use training script to produce a JSCC model)
-
-This script focuses on **per machine_type** evaluation (no joint multi-type sweep).
+Pipeline:
+1) Deterministic fixed-length packing of coarse/fine indices (no entropy coding)
+2) Bit flips with probability BER(SNR) from a calibration CSV (BSC approximation)
+3) Fixed-length unpacking back to indices, then Stage-2 evaluation
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass
 import math
-import struct
 from pathlib import Path
-from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -27,18 +23,9 @@ from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestData
 from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
-from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
 
-from src.comm.huffman import build_huffman_from_counts, decode_symbols, encode_symbols
-from src.comm.bytes_bits import bytes_to_bits_lsb_first, bits_to_bytes_lsb_first
-from src.comm.framing_crc import packetize, depacketize, transmit_frames_over_channel
-from src.comm.ldpc_pyldpc import (
-    LDPCCode,
-    LDPCConfig,
-    ldpc_qpsk_awgn_roundtrip,
-    make_ldpc_code,
-)
+from src.comm.bitflip_ber import load_ber_curve_csv, bitflip_bytes
 
 def _bits_required(K: int) -> int:
     if K <= 1:
@@ -84,28 +71,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
-    p.add_argument("--snr_db", type=float, nargs="+", default=[-5, 0, 5, 10, 15, 20])
+    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 5, 10, 15])
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
-
     p.add_argument("--method", type=str, choices=["bitstream"], default="bitstream")
-    p.add_argument("--entropy", type=str, choices=["none", "huffman"], default="huffman")
-    p.add_argument("--bits_coarse", type=int, default=None, help="Fixed-length bits/index for coarse if entropy=none.")
-    p.add_argument("--bits_fine", type=int, default=None, help="Fixed-length bits/index for fine if entropy=none.")
-
-    p.add_argument("--uep", type=str, choices=["B1", "B2", "B3"], default="B2")
-    p.add_argument("--ldpc_n", type=int, default=512)
-    p.add_argument("--ldpc_dv", type=int, default=2)
-    p.add_argument("--ldpc_dc", type=int, default=4)
-    p.add_argument("--ldpc_maxiter", type=int, default=100)
-    p.add_argument("--frame_bytes", type=int, default=256, help="Payload bytes per CRC-protected frame.")
-    p.add_argument("--conceal", type=str, choices=["zeros"], default="zeros", help="Concealment on CRC fail (currently only zeros).")
+    p.add_argument("--bits_coarse", type=int, default=None, help="Fixed-length bits/index for coarse map.")
+    p.add_argument("--bits_fine", type=int, default=None, help="Fixed-length bits/index for fine map.")
+    p.add_argument("--ber_curve", type=str, required=True, help="CSV with columns snr_db, ber_postfec from calibrate_ldpc_bpsk_ber.py.")
 
     p.add_argument("--output", type=str, default=None)
-    p.add_argument(
-        "--smoke_test",
-        action="store_true",
-        help="Run a quick fixed-length (entropy=none) LDPC+QPSK round-trip sanity check and exit.",
-    )
     return p.parse_args()
 
 
@@ -120,19 +93,6 @@ def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer, embedding_dim: tuple
     return sDSR(vq_vae, cfg)
 
 
-@dataclass(frozen=True)
-class UEPPoint:
-    Rc: float
-    Rf: float
-
-
-UEP_POINTS: dict[str, UEPPoint] = {
-    "B1": UEPPoint(Rc=1 / 2, Rf=2 / 3),
-    "B2": UEPPoint(Rc=1 / 3, Rf=1 / 2),
-    "B3": UEPPoint(Rc=1 / 4, Rf=1 / 3),
-}
-
-
 class AWGNIndexChannelWrapper(nn.Module):
     """
     Wrap an sDSR model to inject an index-map channel before inference.
@@ -144,67 +104,35 @@ class AWGNIndexChannelWrapper(nn.Module):
         model: sDSR,
         vq_vae: VQ_VAE_2Layer,
         *,
-        train_ds: DCASE2020Task2LogMelDataset,
         device: torch.device,
-        entropy: str,
         bits_coarse: int | None,
         bits_fine: int | None,
-        uep: UEPPoint,
-        ldpc_cfg: LDPCConfig,
+        ber_curve_path: str,
         seed: int,
         snr_db: float,
-        frame_bytes: int,
-        conceal: str,
     ) -> None:
         super().__init__()
         self.model = model
         self.vq_vae = vq_vae
         self.device = device
-        self.entropy = entropy
         self._bits_arg_c = bits_coarse
         self._bits_arg_f = bits_fine
-        self.uep = uep
-        self.ldpc_cfg = ldpc_cfg
+        self.ber_curve = load_ber_curve_csv(ber_curve_path)
         self.seed = seed
         self.snr_db = snr_db
-        self.frame_bytes = int(frame_bytes)
-        self.conceal = str(conceal)
 
-        # Build Huffman codes from TRAIN distribution (per machine_type)
-        # (Using encode_to_indices, so this is consistent with transmitted symbols.)
-        if entropy == "huffman":
-            counts_c, counts_f = self._count_indices(train_ds)
-            self.huff_c = build_huffman_from_counts(counts_c)
-            self.huff_f = build_huffman_from_counts(counts_f)
-        else:
-            self.huff_c = None
-            self.huff_f = None
+        # Fixed-length symbol widths (computed from codebook sizes unless provided).
+        Kc = int(self.vq_vae.num_embeddings_coarse)
+        Kf = int(self.vq_vae.num_embeddings_fine)
+        self._bits_c = int(self._bits_arg_c) if self._bits_arg_c is not None else int(_bits_required(Kc))
+        self._bits_f = int(self._bits_arg_f) if self._bits_arg_f is not None else int(_bits_required(Kf))
 
-        # Fixed-length symbol widths for entropy=none (computed from codebook sizes unless provided).
-        self._bits_c = None
-        self._bits_f = None
-        if entropy == "none":
-            Kc = int(self.vq_vae.num_embeddings_coarse)
-            Kf = int(self.vq_vae.num_embeddings_fine)
-            self._bits_c = int(self._bits_arg_c) if self._bits_arg_c is not None else int(_bits_required(Kc))
-            self._bits_f = int(self._bits_arg_f) if self._bits_arg_f is not None else int(_bits_required(Kf))
-
-        # Two LDPC codes for UEP (coarse/fine) to realize (Rc, Rf) points.
-        # Regular LDPC has approximate rate ~ 1 - d_v/d_c; we map the target points
-        # to common (d_v, d_c) pairs and generate separate codes.
-        self.ldpc_code_c, self.ldpc_code_f = self._make_uep_codes(ldpc_cfg, uep)
-
-        # Accounting: channel-use counters (QPSK => 2 coded bits / channel use).
+        # Accounting: BSC on coded bitstream proxy => 1 bit/channel use.
         self._cu_coarse_total = 0
         self._cu_fine_total = 0
         self._n_samples_total = 0
-        self._huff_fail_coarse = 0
-        self._huff_fail_fine = 0
-        self._huff_fail_any = 0
         self._clip_oor_coarse = 0
         self._clip_oor_fine = 0
-        self._frames_total = 0
-        self._frames_failed = 0
 
     def avg_channel_uses_per_clip(self) -> tuple[float, float, float]:
         if self._n_samples_total <= 0:
@@ -213,139 +141,35 @@ class AWGNIndexChannelWrapper(nn.Module):
         f = self._cu_fine_total / self._n_samples_total
         return (float(c), float(f), float(c + f))
 
-    def huffman_failure_counts(self) -> tuple[int, int, int]:
-        """(coarse_failures, fine_failures, any_failures) across all processed samples."""
-        return (int(self._huff_fail_coarse), int(self._huff_fail_fine), int(self._huff_fail_any))
-
     def fixedlen_clip_counts(self) -> tuple[int, int]:
-        """(coarse_out_of_range, fine_out_of_range) counts before clipping (entropy=none)."""
+        """(coarse_out_of_range, fine_out_of_range) counts before clipping."""
         return (int(self._clip_oor_coarse), int(self._clip_oor_fine))
 
-    def frame_failure_stats(self) -> tuple[int, int, float]:
-        """(n_frames_total, n_frames_failed, fer)."""
-        n = int(self._frames_total)
-        f = int(self._frames_failed)
-        fer = (f / n) if n else 0.0
-        return n, f, float(fer)
-
-    def _make_uep_codes(self, base: LDPCConfig, uep: UEPPoint) -> tuple[LDPCCode, LDPCCode]:
-        # Map target rates to (d_v, d_c) pairs (rate ≈ 1 - d_v/d_c).
-        # These are standard, fast-to-generate configs under pyldpc.
-        def _round_up_to_multiple(n: int, m: int) -> int:
-            if m <= 0:
-                raise ValueError(f"m must be > 0, got {m}")
-            if n <= 0:
-                raise ValueError(f"n must be > 0, got {n}")
-            return ((n + m - 1) // m) * m
-
-        def cfg_for_rate(R: float) -> LDPCConfig:
-            if abs(R - 1 / 2) < 1e-6:
-                dc = 4
-                return LDPCConfig(n=_round_up_to_multiple(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
-            if abs(R - 2 / 3) < 1e-6:
-                dc = 6
-                return LDPCConfig(n=_round_up_to_multiple(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
-            if abs(R - 1 / 3) < 1e-6:
-                # Important: pyldpc requires (n % d_c == 0) for a regular LDPC matrix.
-                # With default n=512, d_c=3 would fail (512 % 3 != 0).
-                dc = 3
-                return LDPCConfig(n=_round_up_to_multiple(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
-            if abs(R - 1 / 4) < 1e-6:
-                dc = 4
-                return LDPCConfig(n=_round_up_to_multiple(base.n, dc), d_v=3, d_c=dc, maxiter=base.maxiter, seed=base.seed)
-            raise ValueError(f"Unsupported target LDPC rate: {R}")
-
-        code_c = make_ldpc_code(cfg_for_rate(uep.Rc))
-        code_f = make_ldpc_code(cfg_for_rate(uep.Rf))
-        return code_c, code_f
-
-    def _count_indices(self, train_ds: DCASE2020Task2LogMelDataset) -> tuple[np.ndarray, np.ndarray]:
-        loader = torch.utils.data.DataLoader(train_ds, batch_size=32, shuffle=False, num_workers=0)
-        # infer K from vq_vae
-        Kc = int(self.vq_vae.num_embeddings_coarse)
-        Kf = int(self.vq_vae.num_embeddings_fine)
-        counts_c = np.zeros(Kc, dtype=np.int64)
-        counts_f = np.zeros(Kf, dtype=np.int64)
-        self.vq_vae.eval()
-        with torch.inference_mode():
-            for x, _lbl, _mid in loader:
-                x = x.to(self.device)
-                idx_c, idx_f = self.vq_vae.encode_to_indices(x)
-                flat_c = idx_c.reshape(-1).detach().cpu().numpy().astype(np.int64)
-                flat_f = idx_f.reshape(-1).detach().cpu().numpy().astype(np.int64)
-                counts_c += np.bincount(flat_c, minlength=Kc)
-                counts_f += np.bincount(flat_f, minlength=Kf)
-        return counts_c, counts_f
-
     def _encode_indices_to_bits(self, idx_c: np.ndarray, idx_f: np.ndarray) -> tuple[np.ndarray, int, np.ndarray, int]:
-        if self.entropy == "huffman":
-            assert self.huff_c is not None and self.huff_f is not None
-            b_c, nbc = encode_symbols(self.huff_c, idx_c)
-            b_f, nbf = encode_symbols(self.huff_f, idx_f)
-            return b_c, nbc, b_f, nbf
-        if self.entropy == "none":
-            assert self._bits_c is not None and self._bits_f is not None
-            b_c, nbc = _pack_symbols_fixed_lsb(idx_c, self._bits_c)
-            b_f, nbf = _pack_symbols_fixed_lsb(idx_f, self._bits_f)
-            return b_c, nbc, b_f, nbf
-        raise ValueError(f"Unsupported entropy mode: {self.entropy}")
+        b_c, nbc = _pack_symbols_fixed_lsb(idx_c, self._bits_c)
+        b_f, nbf = _pack_symbols_fixed_lsb(idx_f, self._bits_f)
+        return b_c, nbc, b_f, nbf
 
     def _decode_bits_to_indices(self, b_c: np.ndarray, nbc: int, b_f: np.ndarray, nbf: int, n_c: int, n_f: int) -> tuple[np.ndarray, np.ndarray]:
-        if self.entropy == "none":
-            assert self._bits_c is not None and self._bits_f is not None
-            idx_c = _unpack_symbols_fixed_lsb(b_c, nbc, n_c, self._bits_c)
-            idx_f = _unpack_symbols_fixed_lsb(b_f, nbf, n_f, self._bits_f)
-            # Clip to valid codebook range (important if bits_per_symbol > ceil(log2(K)) or errors occur).
-            Kc = int(self.vq_vae.num_embeddings_coarse)
-            Kf = int(self.vq_vae.num_embeddings_fine)
-            oor_c = int(np.count_nonzero((idx_c < 0) | (idx_c >= Kc)))
-            oor_f = int(np.count_nonzero((idx_f < 0) | (idx_f >= Kf)))
-            self._clip_oor_coarse += oor_c
-            self._clip_oor_fine += oor_f
-            if oor_c:
-                idx_c = np.clip(idx_c, 0, Kc - 1)
-            if oor_f:
-                idx_f = np.clip(idx_f, 0, Kf - 1)
-            return idx_c, idx_f
-
-        assert self.huff_c is not None and self.huff_f is not None
-        fail_any = False
-        try:
-            idx_c = decode_symbols(self.huff_c, b_c, nbc, n_c)
-        except ValueError:
-            # Huffman is not error-resilient: a single bit error can desync the stream.
-            # For sweep robustness, treat this as a decode failure and fall back to a safe default.
-            idx_c = np.zeros(n_c, dtype=np.int64)
-            self._huff_fail_coarse += 1
-            fail_any = True
-        try:
-            idx_f = decode_symbols(self.huff_f, b_f, nbf, n_f)
-        except ValueError:
-            idx_f = np.zeros(n_f, dtype=np.int64)
-            self._huff_fail_fine += 1
-            fail_any = True
-        if fail_any:
-            self._huff_fail_any += 1
+        idx_c = _unpack_symbols_fixed_lsb(b_c, nbc, n_c, self._bits_c)
+        idx_f = _unpack_symbols_fixed_lsb(b_f, nbf, n_f, self._bits_f)
+        # Clip to valid codebook range (important if bits_per_symbol > ceil(log2(K)) or errors occur).
+        Kc = int(self.vq_vae.num_embeddings_coarse)
+        Kf = int(self.vq_vae.num_embeddings_fine)
+        oor_c = int(np.count_nonzero((idx_c < 0) | (idx_c >= Kc)))
+        oor_f = int(np.count_nonzero((idx_f < 0) | (idx_f >= Kf)))
+        self._clip_oor_coarse += oor_c
+        self._clip_oor_fine += oor_f
+        if oor_c:
+            idx_c = np.clip(idx_c, 0, Kc - 1)
+        if oor_f:
+            idx_f = np.clip(idx_f, 0, Kf - 1)
         return idx_c, idx_f
-
-    def _ldpc_channel(self, bits: np.ndarray, *, code: LDPCCode, ebn0_db: float, rng: np.random.Generator) -> np.ndarray:
-        return ldpc_qpsk_awgn_roundtrip(
-            bits,
-            code=code,
-            ldpc_maxiter=self.ldpc_cfg.maxiter,
-            ebn0_db=ebn0_db,
-            rng=rng,
-        )
-
-    def _frame_channel(self, frame: bytes, *, code: LDPCCode, ebn0_db: float, rng: np.random.Generator) -> bytes:
-        bits = bytes_to_bits_lsb_first(frame)
-        rx_bits = self._ldpc_channel(bits, code=code, ebn0_db=ebn0_db, rng=rng)
-        return bits_to_bytes_lsb_first(rx_bits)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.model.eval()
         self.vq_vae.eval()
-        rng = np.random.default_rng(self.seed)
+        ber = float(self.ber_curve.ber_at(self.snr_db))
 
         with torch.inference_mode():
             idx_c_t, idx_f_t = self.vq_vae.encode_to_indices(x.to(self.device))
@@ -359,41 +183,28 @@ class AWGNIndexChannelWrapper(nn.Module):
             cu_fine = 0
             for i in range(x.shape[0]):
                 b_c, nbc, b_f, nbf = self._encode_indices_to_bits(idx_c[i], idx_f[i])
-
-                # Build per-stream byte blobs with a small header carrying n_bits.
-                # This makes packetization safe even when the last byte is partially used.
-                blob_c = struct.pack("<I", int(nbc)) + bytes(np.asarray(b_c, dtype=np.uint8).tobytes())
-                blob_f = struct.pack("<I", int(nbf)) + bytes(np.asarray(b_f, dtype=np.uint8).tobytes())
-
-                frames_c = packetize(blob_c, self.frame_bytes)
-                frames_f = packetize(blob_f, self.frame_bytes)
-
-                def txrx_c(fr: bytes) -> bytes:
-                    return self._frame_channel(fr, code=self.ldpc_code_c, ebn0_db=float(self.snr_db), rng=rng)
-
-                def txrx_f(fr: bytes) -> bytes:
-                    return self._frame_channel(fr, code=self.ldpc_code_f, ebn0_db=float(self.snr_db), rng=rng)
-
-                rx_payloads_c, st_c = transmit_frames_over_channel(
-                    frames_c, frame_payload_bytes=self.frame_bytes, channel_txrx=txrx_c, concealment=self.conceal
+                payload_c = bytes(np.asarray(b_c, dtype=np.uint8).tobytes())
+                payload_f = bytes(np.asarray(b_f, dtype=np.uint8).tobytes())
+                rx_payload_c = bitflip_bytes(
+                    payload_c,
+                    ber=ber,
+                    protect_bytes=0,
+                    seed=int(self.seed) ^ int(i) ^ (int(self.snr_db * 100) & 0xFFFF) ^ 0xC0A5E,
                 )
-                rx_payloads_f, st_f = transmit_frames_over_channel(
-                    frames_f, frame_payload_bytes=self.frame_bytes, channel_txrx=txrx_f, concealment=self.conceal
+                rx_payload_f = bitflip_bytes(
+                    payload_f,
+                    ber=ber,
+                    protect_bytes=0,
+                    seed=int(self.seed) ^ int(i) ^ (int(self.snr_db * 100) & 0xFFFF) ^ 0xF1A9E,
                 )
-                self._frames_total += int(st_c.n_frames + st_f.n_frames)
-                self._frames_failed += int(st_c.n_failed + st_f.n_failed)
+                rx_b_c = np.frombuffer(rx_payload_c, dtype=np.uint8)
+                rx_b_f = np.frombuffer(rx_payload_f, dtype=np.uint8)
 
-                rx_blob_c = depacketize(rx_payloads_c, orig_len=len(blob_c))
-                rx_blob_f = depacketize(rx_payloads_f, orig_len=len(blob_f))
-
-                nbc_rx = int(struct.unpack("<I", rx_blob_c[:4])[0]) if len(rx_blob_c) >= 4 else 0
-                nbf_rx = int(struct.unpack("<I", rx_blob_f[:4])[0]) if len(rx_blob_f) >= 4 else 0
-                rx_b_c = np.frombuffer(rx_blob_c[4:], dtype=np.uint8)
-                rx_b_f = np.frombuffer(rx_blob_f[4:], dtype=np.uint8)
-
-                dec_c, dec_f = self._decode_bits_to_indices(rx_b_c, nbc_rx, rx_b_f, nbf_rx, idx_c.shape[1], idx_f.shape[1])
+                dec_c, dec_f = self._decode_bits_to_indices(rx_b_c, nbc, rx_b_f, nbf, idx_c.shape[1], idx_f.shape[1])
                 rx_idx_c.append(dec_c)
                 rx_idx_f.append(dec_f)
+                cu_coarse += int(nbc)
+                cu_fine += int(nbf)
 
             rx_idx_c = np.stack(rx_idx_c, axis=0)
             rx_idx_f = np.stack(rx_idx_f, axis=0)
@@ -418,66 +229,9 @@ class AWGNIndexChannelWrapper(nn.Module):
 def main() -> None:
     args = parse_args()
 
-    if args.smoke_test:
-        # Minimal sanity: fixed-length packing + LDPC round-trip at very high SNR should be lossless.
-        if args.entropy != "none":
-            raise ValueError("--smoke_test expects --entropy none")
-        rng = np.random.default_rng(0)
-        uep = UEP_POINTS[args.uep]
-        base = LDPCConfig(n=args.ldpc_n, d_v=args.ldpc_dv, d_c=args.ldpc_dc, maxiter=args.ldpc_maxiter, seed=0)
-
-        # Match the same UEP mapping logic used by the wrapper.
-        def round_up(n: int, m: int) -> int:
-            return ((n + m - 1) // m) * m
-
-        def cfg_for_rate(R: float) -> LDPCConfig:
-            if abs(R - 1 / 2) < 1e-6:
-                dc = 4
-                return LDPCConfig(n=round_up(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
-            if abs(R - 2 / 3) < 1e-6:
-                dc = 6
-                return LDPCConfig(n=round_up(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
-            if abs(R - 1 / 3) < 1e-6:
-                dc = 3
-                return LDPCConfig(n=round_up(base.n, dc), d_v=2, d_c=dc, maxiter=base.maxiter, seed=base.seed)
-            if abs(R - 1 / 4) < 1e-6:
-                dc = 4
-                return LDPCConfig(n=round_up(base.n, dc), d_v=3, d_c=dc, maxiter=base.maxiter, seed=base.seed)
-            raise ValueError(f"Unsupported target LDPC rate: {R}")
-
-        code_c = make_ldpc_code(cfg_for_rate(uep.Rc))
-        code_f = make_ldpc_code(cfg_for_rate(uep.Rf))
-
-        Kc, Kf = 1024, 4096
-        bits_c = int(args.bits_coarse) if args.bits_coarse is not None else _bits_required(Kc)
-        bits_f = int(args.bits_fine) if args.bits_fine is not None else _bits_required(Kf)
-
-        idx_c = rng.integers(0, Kc, size=16 * 40, dtype=np.int64)
-        idx_f = rng.integers(0, Kf, size=32 * 80, dtype=np.int64)
-        b_c, nbc = _pack_symbols_fixed_lsb(idx_c, bits_c)
-        b_f, nbf = _pack_symbols_fixed_lsb(idx_f, bits_f)
-        bits_c_vec = np.unpackbits(b_c, bitorder="little")[:nbc].astype(np.uint8)
-        bits_f_vec = np.unpackbits(b_f, bitorder="little")[:nbf].astype(np.uint8)
-
-        # Very high SNR (effectively noiseless)
-        rx_bits_c = ldpc_qpsk_awgn_roundtrip(bits_c_vec, code=code_c, ldpc_maxiter=code_c.k, ebn0_db=60.0, rng=rng)
-        rx_bits_f = ldpc_qpsk_awgn_roundtrip(bits_f_vec, code=code_f, ldpc_maxiter=code_f.k, ebn0_db=60.0, rng=rng)
-        rx_b_c = np.packbits(rx_bits_c, bitorder="little")
-        rx_b_f = np.packbits(rx_bits_f, bitorder="little")
-        dec_c = _unpack_symbols_fixed_lsb(rx_b_c, nbc, idx_c.size, bits_c)
-        dec_f = _unpack_symbols_fixed_lsb(rx_b_f, nbf, idx_f.size, bits_f)
-
-        if not np.array_equal(idx_c, dec_c):
-            raise RuntimeError("Smoke test failed: coarse indices mismatch")
-        if not np.array_equal(idx_f, dec_f):
-            raise RuntimeError("Smoke test failed: fine indices mismatch")
-        print("Smoke test passed: fixed-length pack/unpack + LDPC round-trip is lossless at high SNR.")
-        return
-
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    _norm_mean, _norm_std = load_norm_from_stage1_ckpt(stage1_ckpt)
 
     train_ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,
@@ -518,34 +272,24 @@ def main() -> None:
     model = model.to(device)
     vq_vae = vq_vae.to(device)
 
-    uep = UEP_POINTS[args.uep]
-    ldpc_cfg = LDPCConfig(
-        n=args.ldpc_n, d_v=args.ldpc_dv, d_c=args.ldpc_dc, maxiter=args.ldpc_maxiter, seed=0
-    )
-
     out_path = Path(args.output) if args.output else (Path(args.stage2_ckpt).resolve().parent / "results" / "awgn_results.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["machine_type", "method", "entropy", "uep", "snr_db", "seed", "avg_cu_coarse", "avg_cu_fine", "avg_cu_total", "machine_id", "auc", "pauc"])
+        w.writerow(["machine_type", "method", "channel", "snr_db", "seed", "avg_cu_coarse", "avg_cu_fine", "avg_cu_total", "machine_id", "auc", "pauc"])
 
         for snr_db in args.snr_db:
             for seed in args.seeds:
                 wrapper = AWGNIndexChannelWrapper(
                     model=model,
                     vq_vae=vq_vae,
-                    train_ds=train_ds,
                     device=device,
-                    entropy=args.entropy,
                     bits_coarse=args.bits_coarse,
                     bits_fine=args.bits_fine,
-                    uep=uep,
-                    ldpc_cfg=ldpc_cfg,
+                    ber_curve_path=args.ber_curve,
                     seed=seed,
                     snr_db=float(snr_db),
-                    frame_bytes=args.frame_bytes,
-                    conceal=args.conceal,
                 )
                 evaluator = AnomalyEvaluator(
                     model=wrapper,
@@ -558,20 +302,17 @@ def main() -> None:
                 )
                 res = evaluator.evaluate()
                 cu_c, cu_f, cu_t = wrapper.avg_channel_uses_per_clip()
-                hf_c, hf_f, hf_any = wrapper.huffman_failure_counts()
                 oor_c, oor_f = wrapper.fixedlen_clip_counts()
-                nfr, nff, fer = wrapper.frame_failure_stats()
                 ids = res.get(args.machine_type, {})
                 for mid, v in ids.items():
                     if not isinstance(v, dict):
                         continue
-                    w.writerow([args.machine_type, args.method, args.entropy, args.uep, snr_db, seed, f"{cu_c:.2f}", f"{cu_f:.2f}", f"{cu_t:.2f}", mid, v["auc"], v["pauc"]])
+                    w.writerow([args.machine_type, args.method, "bsc_ber_curve", snr_db, seed, f"{cu_c:.2f}", f"{cu_f:.2f}", f"{cu_t:.2f}", mid, v["auc"], v["pauc"]])
                 f.flush()
                 print(
-                    f"[{args.machine_type}] method={args.method} entropy={args.entropy} uep={args.uep} "
+                    f"[{args.machine_type}] method={args.method} channel=bsc_ber_curve "
                     f"snr={snr_db} seed={seed} cu_total={cu_t:.1f}/clip "
-                    f"frames={nfr} failed={nff} fer={fer:.3f} "
-                    f"huff_fail_any={hf_any} clip_oor_c={oor_c} clip_oor_f={oor_f} avg={ids.get('average')}"
+                    f"clip_oor_c={oor_c} clip_oor_f={oor_f} avg={ids.get('average')}"
                 )
 
     print(f"Saved: {out_path}")

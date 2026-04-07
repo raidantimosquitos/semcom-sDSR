@@ -1,0 +1,18 @@
+.git
+.gitignore
+.cursor
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.ipynb_checkpoints
+
+# Large/generated artifacts
+checkpoints/
+results/
+dataset/
+notebooks/
+example_bitstreams/
+example_bitstreams_*/
+

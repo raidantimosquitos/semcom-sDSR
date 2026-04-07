@@ -17,8 +17,6 @@ from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
 from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
-from src.utils.stage1_norm import load_norm_from_stage1_ckpt
-
 from src.comm.jscc_cnn import JSCCDualMap, JSCCMapConfig
 
 
@@ -32,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
-    p.add_argument("--snr_db", type=float, nargs="+", default=[-5, 0, 5, 10, 15, 20])
+    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 5, 10, 15])
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--output", type=str, default=None)
     return p.parse_args()
@@ -80,7 +78,6 @@ def main() -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    _norm_mean, _norm_std = load_norm_from_stage1_ckpt(stage1_ckpt)
 
     train_ds = DCASE2020Task2LogMelDataset(root=args.data_path, machine_type=args.machine_type, include_test=False)
     test_ds = DCASE2020Task2TestDataset(root=args.data_path, machine_type=args.machine_type, target_T=train_ds.target_T)

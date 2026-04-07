@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -34,12 +36,10 @@ from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
 from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
-from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 from src.utils.audio import standardize_spectrogram
 
-from src.comm.bytes_bits import bytes_to_bits_lsb_first, bits_to_bytes_lsb_first
-from src.comm.framing_crc import packetize, depacketize, transmit_frames_over_channel
-from src.comm.ldpc_pyldpc import LDPCConfig, make_ldpc_code, ldpc_qpsk_awgn_roundtrip
+from src.comm.bitflip_ber import load_ber_curve_csv, bitflip_bytes
+from src.comm.ogg_payload import bitflip_ogg_payload_pages
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,15 +52,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
     p.add_argument("--opus_kbps", type=int, default=12)
-    p.add_argument("--snr_db", type=float, nargs="+", default=[-5, 0, 5, 10, 15, 20])
+    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 5, 10, 15])
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
-    p.add_argument("--use_channel", action="store_true")
-    p.add_argument("--frame_bytes", type=int, default=256, help="Payload bytes per CRC-protected frame (when --use_channel).")
-    p.add_argument("--conceal", type=str, choices=["zeros"], default="zeros", help="Concealment on CRC fail (currently only zeros).")
-    p.add_argument("--ldpc_n", type=int, default=512)
-    p.add_argument("--ldpc_dv", type=int, default=2)
-    p.add_argument("--ldpc_dc", type=int, default=4)
-    p.add_argument("--ldpc_maxiter", type=int, default=100)
+    p.add_argument("--use_channel", action="store_true", help="If set, corrupt Opus bytes using BER(SNR) bit flips.")
+    p.add_argument("--ber_curve", type=str, default=None, help="CSV with columns snr_db, ber_postfec (from calibrate_ldpc_bpsk_ber.py). Required when --use_channel.")
+    p.add_argument("--channel_mode", type=str, choices=["ogg_pages", "prefix"], default="ogg_pages", help="Channel corruption mode: Ogg page-body masking with CRC rewrite (default) or legacy prefix protection.")
+    p.add_argument("--protect_pages", type=int, default=2, help="For channel_mode=ogg_pages, protect the first N Ogg pages (typically OpusHead/OpusTags).")
+    p.add_argument("--protect_bytes", type=int, default=128, help="For channel_mode=prefix, do not flip bits in the first N bytes.")
+    p.add_argument("--ffmpeg_bin", type=str, default=None, help="Path to ffmpeg binary. Resolution order if omitted: $FFMPEG_BIN, /usr/bin/ffmpeg, PATH.")
     p.add_argument("--output", type=str, default=None)
     return p.parse_args()
 
@@ -76,7 +75,21 @@ def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer, embedding_dim: tuple
     return sDSR(vq_vae, cfg)
 
 
-def opus_encode_bytes_ffmpeg(wav: torch.Tensor, sr: int, kbps: int) -> bytes:
+def resolve_ffmpeg_bin(ffmpeg_bin_arg: str | None) -> str:
+    if ffmpeg_bin_arg:
+        return str(ffmpeg_bin_arg)
+    env_bin = os.environ.get("FFMPEG_BIN")
+    if env_bin:
+        return env_bin
+    if Path("/usr/bin/ffmpeg").exists():
+        return "/usr/bin/ffmpeg"
+    path_bin = shutil.which("ffmpeg")
+    if path_bin:
+        return path_bin
+    raise FileNotFoundError("ffmpeg not found. Set --ffmpeg_bin or FFMPEG_BIN.")
+
+
+def opus_encode_bytes_ffmpeg(wav: torch.Tensor, sr: int, kbps: int, *, ffmpeg_bin: str) -> bytes:
     """Encode wav -> Ogg Opus bytes using ffmpeg."""
     if wav.dim() == 1:
         wav = wav.unsqueeze(0)
@@ -87,7 +100,7 @@ def opus_encode_bytes_ffmpeg(wav: torch.Tensor, sr: int, kbps: int) -> bytes:
         torchaudio.save(str(in_wav), wav.cpu(), sample_rate=sr)
         enc = subprocess.run(
             [
-                "ffmpeg",
+                ffmpeg_bin,
                 "-y",
                 "-hide_banner",
                 "-loglevel",
@@ -109,7 +122,7 @@ def opus_encode_bytes_ffmpeg(wav: torch.Tensor, sr: int, kbps: int) -> bytes:
         return out_opus.read_bytes()
 
 
-def opus_decode_bytes_ffmpeg(opus_bytes: bytes) -> tuple[torch.Tensor, int]:
+def opus_decode_bytes_ffmpeg(opus_bytes: bytes, *, ffmpeg_bin: str) -> tuple[torch.Tensor, int]:
     """Decode Ogg Opus bytes -> wav, sr using ffmpeg."""
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
@@ -117,7 +130,7 @@ def opus_decode_bytes_ffmpeg(opus_bytes: bytes) -> tuple[torch.Tensor, int]:
         out_wav = td / "out.wav"
         in_opus.write_bytes(opus_bytes)
         dec = subprocess.run(
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(in_opus), str(out_wav)],
+            [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", str(in_opus), str(out_wav)],
             capture_output=True,
         )
         if dec.returncode != 0:
@@ -162,7 +175,7 @@ def wav_to_logmel(
 
 
 class OpusBaselineWrapper(nn.Module):
-    def __init__(self, model: sDSR, *, device: torch.device, kbps: int, use_channel: bool, snr_db: float, seed: int, ldpc: LDPCConfig, data_root: Path, machine_type: str, target_T: int) -> None:
+    def __init__(self, model: sDSR, *, device: torch.device, kbps: int, use_channel: bool, snr_db: float, seed: int, data_root: Path, machine_type: str, target_T: int) -> None:
         super().__init__()
         self.model = model
         self.device = device
@@ -170,8 +183,6 @@ class OpusBaselineWrapper(nn.Module):
         self.use_channel = bool(use_channel)
         self.snr_db = float(snr_db)
         self.seed = int(seed)
-        self.ldpc_cfg = ldpc
-        self.ldpc_code = make_ldpc_code(ldpc)
         self.data_root = Path(data_root)
         self.machine_type = machine_type
         self.target_T = int(target_T)
@@ -193,30 +204,46 @@ class OpusTestDataset(torch.utils.data.Dataset):
     but with an OPUS encode/decode (and optional channel) applied to the waveform before feature extraction.
     """
 
-    def __init__(self, base: DCASE2020Task2TestDataset, *, kbps: int, use_channel: bool, snr_db: float, seed: int, ldpc: LDPCConfig, target_T: int, frame_bytes: int, conceal: str) -> None:
+    def __init__(
+        self,
+        base: DCASE2020Task2TestDataset,
+        *,
+        kbps: int,
+        use_channel: bool,
+        snr_db: float,
+        seed: int,
+        ber_curve_path: str | None,
+        protect_bytes: int,
+        protect_pages: int,
+        channel_mode: str,
+        ffmpeg_bin: str,
+        target_T: int,
+    ) -> None:
         self.base = base
         self.kbps = int(kbps)
         self.use_channel = bool(use_channel)
         self.snr_db = float(snr_db)
         self.seed = int(seed)
-        self.ldpc_cfg = ldpc
-        self.ldpc_code = make_ldpc_code(ldpc)
+        self.ber_curve = load_ber_curve_csv(ber_curve_path) if (use_channel and ber_curve_path) else None
+        self.protect_bytes = int(protect_bytes)
+        self.protect_pages = int(protect_pages)
+        self.channel_mode = str(channel_mode)
+        self.ffmpeg_bin = str(ffmpeg_bin)
         self.target_T = int(target_T)
-        self.frame_bytes = int(frame_bytes)
-        self.conceal = str(conceal)
         self._rng = np.random.default_rng(self.seed)
         self._cu_total = 0
         self._n_total = 0
-        self._frames_total = 0
-        self._frames_failed = 0
+        self._decode_ok = 0
+        self._decode_fail = 0
 
     def avg_channel_uses_per_clip(self) -> float:
         return float(self._cu_total / self._n_total) if self._n_total else 0.0
 
-    def frame_failure_stats(self) -> tuple[int, int, float]:
-        n = int(self._frames_total)
-        f = int(self._frames_failed)
-        return n, f, (f / n) if n else 0.0
+    def decode_success_stats(self) -> tuple[int, int, float]:
+        ok = int(self._decode_ok)
+        fail = int(self._decode_fail)
+        tot = ok + fail
+        return ok, fail, (ok / tot) if tot else 0.0
 
     def __len__(self) -> int:
         return len(self.base)
@@ -224,39 +251,38 @@ class OpusTestDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx: int):
         wav_path, label, machine_id = self.base.samples[idx]  # type: ignore[attr-defined]
         wav, sr = torchaudio.load(wav_path)
-        opus_blob = opus_encode_bytes_ffmpeg(wav, sr, kbps=self.kbps)
+        opus_blob = opus_encode_bytes_ffmpeg(wav, sr, kbps=self.kbps, ffmpeg_bin=self.ffmpeg_bin)
 
         if self.use_channel:
-            frames = packetize(opus_blob, self.frame_bytes)
-
-            def txrx(fr: bytes) -> bytes:
-                bits = bytes_to_bits_lsb_first(fr)
-                rx_bits = ldpc_qpsk_awgn_roundtrip(
-                    bits,
-                    code=self.ldpc_code,
-                    ldpc_maxiter=self.ldpc_cfg.maxiter,
-                    ebn0_db=self.snr_db,
-                    rng=self._rng,
+            if self.ber_curve is None:
+                raise RuntimeError("--use_channel requires --ber_curve")
+            ber = self.ber_curve.ber_at(self.snr_db)
+            seed = int(self.seed) ^ int(idx) ^ (int(self.snr_db * 100) & 0xFFFF)
+            if self.channel_mode == "ogg_pages":
+                opus_blob = bitflip_ogg_payload_pages(
+                    opus_blob,
+                    ber=ber,
+                    protect_first_pages=self.protect_pages,
+                    seed=seed,
                 )
-                # channel uses (QPSK): blocks*n / 2
-                k, n0 = int(self.ldpc_code.k), int(self.ldpc_code.n)
-                blocks = (int(bits.size) + k - 1) // k
-                self._cu_total += (blocks * n0 + 1) // 2
-                return bits_to_bytes_lsb_first(rx_bits)
-
-            rx_payloads, st = transmit_frames_over_channel(
-                frames, frame_payload_bytes=self.frame_bytes, channel_txrx=txrx, concealment=self.conceal
-            )
-            self._frames_total += int(st.n_frames)
-            self._frames_failed += int(st.n_failed)
+            else:
+                opus_blob = bitflip_bytes(
+                    opus_blob,
+                    ber=ber,
+                    protect_bytes=self.protect_bytes,
+                    seed=seed,
+                )
+            # channel uses approximation for LDPC(1/2)+BPSK: coded_bits ~= 2*info_bits.
+            self._cu_total += int(2 * len(opus_blob) * 8)
             self._n_total += 1
-            opus_blob = depacketize(rx_payloads, orig_len=len(opus_blob))
 
         try:
-            wav_d, sr_d = opus_decode_bytes_ffmpeg(opus_blob)
+            wav_d, sr_d = opus_decode_bytes_ffmpeg(opus_blob, ffmpeg_bin=self.ffmpeg_bin)
+            self._decode_ok += 1
         except Exception:
             # If decoding fails due to erasures, fall back to silence.
-            wav_d, sr_d = torch.zeros((1, int(sr)), dtype=torch.float32), int(sr)
+            wav_d, sr_d = torch.zeros((10, int(sr)), dtype=torch.float32), int(sr)
+            self._decode_fail += 1
         x = wav_to_logmel(wav_d, sr_d, target_T=self.target_T)
         return x, label, machine_id
 
@@ -264,9 +290,10 @@ class OpusTestDataset(torch.utils.data.Dataset):
 def main() -> None:
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    ffmpeg_bin = resolve_ffmpeg_bin(args.ffmpeg_bin)
+    print(f"[opus] using ffmpeg binary: {ffmpeg_bin}")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    _norm_mean, _norm_std = load_norm_from_stage1_ckpt(stage1_ckpt)
 
     train_ds = DCASE2020Task2LogMelDataset(root=args.data_path, machine_type=args.machine_type, include_test=False)
     test_ds = DCASE2020Task2TestDataset(root=args.data_path, machine_type=args.machine_type, target_T=train_ds.target_T)
@@ -298,8 +325,6 @@ def main() -> None:
     model.load_state_dict(st2)
     model = model.to(device)
 
-    ldpc_cfg = LDPCConfig(n=args.ldpc_n, d_v=args.ldpc_dv, d_c=args.ldpc_dc, maxiter=args.ldpc_maxiter, seed=0)
-
     out_path = Path(args.output) if args.output else (Path(args.stage2_ckpt).resolve().parent / "results" / "opus_results.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -314,10 +339,12 @@ def main() -> None:
                     use_channel=args.use_channel,
                     snr_db=float(snr_db),
                     seed=seed,
-                    ldpc=ldpc_cfg,
+                    ber_curve_path=args.ber_curve,
+                    protect_bytes=args.protect_bytes,
+                    protect_pages=args.protect_pages,
+                    channel_mode=args.channel_mode,
+                    ffmpeg_bin=ffmpeg_bin,
                     target_T=train_ds.target_T,
-                    frame_bytes=args.frame_bytes,
-                    conceal=args.conceal,
                 )
                 evaluator = AnomalyEvaluator(
                     model=model,
@@ -329,7 +356,7 @@ def main() -> None:
                 res = evaluator.evaluate()
                 ids = res.get(args.machine_type, {})
                 cu = ds.avg_channel_uses_per_clip() if args.use_channel else 0.0
-                nfr, nff, fer = ds.frame_failure_stats() if args.use_channel else (0, 0, 0.0)
+                ok, fail, okr = ds.decode_success_stats() if args.use_channel else (0, 0, 0.0)
                 for mid, v in ids.items():
                     if not isinstance(v, dict):
                         continue
@@ -337,7 +364,8 @@ def main() -> None:
                 f.flush()
                 print(
                     f"[{args.machine_type}] opus {args.opus_kbps}kbps use_channel={args.use_channel} "
-                    f"snr={snr_db} seed={seed} frames={nfr} failed={nff} fer={fer:.3f} cu_total={cu:.1f}/clip avg={ids.get('average')}"
+                    f"channel_mode={args.channel_mode} "
+                    f"snr={snr_db} seed={seed} decode_ok={ok} decode_fail={fail} ok_rate={okr:.3f} cu_total={cu:.1f}/clip avg={ids.get('average')}"
                 )
 
     print(f"Saved: {out_path}")
