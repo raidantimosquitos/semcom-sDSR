@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
     p.add_argument("--quality", type=int, default=50)
-    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 5, 10, 15])
+    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 2, 4, 6, 8, 10, 12, 15, 20])
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--use_channel", action="store_true", help="If set, corrupt JPEG bytes using BER(SNR) bit flips.")
     p.add_argument("--ber_curve", type=str, default=None, help="CSV with columns snr_db, ber_postfec (from calibrate_ldpc_bpsk_ber.py). Required when --use_channel.")
@@ -187,6 +187,7 @@ class JPEGBaselineWrapper(nn.Module):
 def main() -> None:
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    NAN = float("nan")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
 
@@ -225,7 +226,32 @@ def main() -> None:
 
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["machine_type", "method", "quality", "use_channel", "snr_db", "seed", "avg_cu_total", "machine_id", "auc", "pauc"])
+        w.writerow(
+            [
+                "machine_type",
+                "method",
+                "channel",
+                "snr_db",
+                "seed",
+                "quality",
+                "opus_kbps",
+                "jscc_ckpt",
+                "ber_curve",
+                "channel_mode",
+                "avg_cu_coarse",
+                "avg_cu_fine",
+                "avg_cu_total",
+                "cu_unit",
+                "decode_ok",
+                "decode_fail",
+                "decode_ok_rate",
+                "clip_oor_c",
+                "clip_oor_f",
+                "machine_id",
+                "auc",
+                "pauc",
+            ]
+        )
         for snr_db in args.snr_db:
             for seed in args.seeds:
                 wrapper = JPEGBaselineWrapper(
@@ -253,12 +279,38 @@ def main() -> None:
                 for mid, v in ids.items():
                     if not isinstance(v, dict):
                         continue
-                    w.writerow([args.machine_type, "jpeg", args.quality, int(args.use_channel), snr_db, seed, f"{cu:.2f}", mid, v["auc"], v["pauc"]])
+                    w.writerow(
+                        [
+                            args.machine_type,
+                            "jpeg",
+                            "ber_bitflip" if args.use_channel else "none",
+                            snr_db,
+                            seed,
+                            args.quality,
+                            NAN,
+                            NAN,
+                            args.ber_curve if args.use_channel else NAN,
+                            args.channel_mode if args.use_channel else NAN,
+                            NAN,
+                            NAN,
+                            f"{cu:.2f}",
+                            "coded_bits_proxy",
+                            ok,
+                            fail,
+                            f"{okr:.6f}",
+                            NAN,
+                            NAN,
+                            mid,
+                            v["auc"],
+                            v["pauc"],
+                        ]
+                    )
                 f.flush()
                 print(
-                    f"[{args.machine_type}] jpeg Q={args.quality} use_channel={args.use_channel} "
-                    f"channel_mode={args.channel_mode} snr={snr_db} seed={seed} "
-                    f"decode_ok={ok} decode_fail={fail} ok_rate={okr:.3f} avg={ids.get('average')}"
+                    f"[{args.machine_type}] method=jpeg channel={'ber_bitflip' if args.use_channel else 'none'} "
+                    f"quality={args.quality} snr={snr_db} seed={seed} "
+                    f"cu_total={cu:.1f}/clip decode_ok={ok} decode_fail={fail} ok_rate={okr:.3f} "
+                    f"clip_oor_c=nan clip_oor_f=nan avg={ids.get('average')}"
                 )
 
     print(f"Saved: {out_path}")

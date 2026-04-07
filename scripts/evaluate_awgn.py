@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
-    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 5, 10, 15])
+    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 2, 4, 6, 8, 10, 12, 15, 20])
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--method", type=str, choices=["bitstream"], default="bitstream")
     p.add_argument("--bits_coarse", type=int, default=None, help="Fixed-length bits/index for coarse map.")
@@ -230,6 +230,7 @@ def main() -> None:
     args = parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    NAN = float("nan")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
 
@@ -277,7 +278,32 @@ def main() -> None:
 
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["machine_type", "method", "channel", "snr_db", "seed", "avg_cu_coarse", "avg_cu_fine", "avg_cu_total", "machine_id", "auc", "pauc"])
+        w.writerow(
+            [
+                "machine_type",
+                "method",
+                "channel",
+                "snr_db",
+                "seed",
+                "quality",
+                "opus_kbps",
+                "jscc_ckpt",
+                "ber_curve",
+                "channel_mode",
+                "avg_cu_coarse",
+                "avg_cu_fine",
+                "avg_cu_total",
+                "cu_unit",
+                "decode_ok",
+                "decode_fail",
+                "decode_ok_rate",
+                "clip_oor_c",
+                "clip_oor_f",
+                "machine_id",
+                "auc",
+                "pauc",
+            ]
+        )
 
         for snr_db in args.snr_db:
             for seed in args.seeds:
@@ -307,11 +333,37 @@ def main() -> None:
                 for mid, v in ids.items():
                     if not isinstance(v, dict):
                         continue
-                    w.writerow([args.machine_type, args.method, "bsc_ber_curve", snr_db, seed, f"{cu_c:.2f}", f"{cu_f:.2f}", f"{cu_t:.2f}", mid, v["auc"], v["pauc"]])
+                    w.writerow(
+                        [
+                            args.machine_type,
+                            args.method,
+                            "bsc_ber_curve",
+                            snr_db,
+                            seed,
+                            NAN,
+                            NAN,
+                            NAN,
+                            args.ber_curve,
+                            NAN,
+                            f"{cu_c:.2f}",
+                            f"{cu_f:.2f}",
+                            f"{cu_t:.2f}",
+                            "bits",
+                            NAN,
+                            NAN,
+                            NAN,
+                            oor_c,
+                            oor_f,
+                            mid,
+                            v["auc"],
+                            v["pauc"],
+                        ]
+                    )
                 f.flush()
                 print(
                     f"[{args.machine_type}] method={args.method} channel=bsc_ber_curve "
-                    f"snr={snr_db} seed={seed} cu_total={cu_t:.1f}/clip "
+                    f"snr={snr_db} seed={seed} "
+                    f"cu_total={cu_t:.1f}/clip decode_ok=nan decode_fail=nan ok_rate=nan "
                     f"clip_oor_c={oor_c} clip_oor_f={oor_f} avg={ids.get('average')}"
                 )
 

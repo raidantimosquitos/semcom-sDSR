@@ -70,12 +70,15 @@ class JSCCWrapper(nn.Module):
             snr = torch.full((x.shape[0],), self.snr_db, device=self.device, dtype=torch.float32)
             q_coarse_hat, q_fine_hat = self.jscc(idx_c, idx_f, snr_db=snr)
             # JSCC returns q tensors directly (B,C,H,W)
-            return self.model.forward_from_quantized(q_fine=q_fine_hat, q_coarse=q_coarse_hat)
+            out = self.model.forward_from_quantized(q_fine=q_fine_hat, q_coarse=q_coarse_hat)
+            m_out: torch.Tensor = out[0] if isinstance(out, tuple) else out
+            return m_out
 
 
 def main() -> None:
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    NAN = float("nan")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
 
@@ -122,7 +125,32 @@ def main() -> None:
 
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["machine_type", "method", "jscc_ckpt", "snr_db", "seed", "cu_total", "machine_id", "auc", "pauc"])
+        w.writerow(
+            [
+                "machine_type",
+                "method",
+                "channel",
+                "snr_db",
+                "seed",
+                "quality",
+                "opus_kbps",
+                "jscc_ckpt",
+                "ber_curve",
+                "channel_mode",
+                "avg_cu_coarse",
+                "avg_cu_fine",
+                "avg_cu_total",
+                "cu_unit",
+                "decode_ok",
+                "decode_fail",
+                "decode_ok_rate",
+                "clip_oor_c",
+                "clip_oor_f",
+                "machine_id",
+                "auc",
+                "pauc",
+            ]
+        )
         for snr_db in args.snr_db:
             for seed in args.seeds:
                 wrapper = JSCCWrapper(model=model, vq_vae=vq_vae, jscc=jscc, device=device, snr_db=float(snr_db), seed=seed)
@@ -138,9 +166,40 @@ def main() -> None:
                 for mid, v in ids.items():
                     if not isinstance(v, dict):
                         continue
-                    w.writerow([args.machine_type, "jscc", args.jscc_ckpt, snr_db, seed, wrapper.channel_uses_per_clip, mid, v["auc"], v["pauc"]])
+                    w.writerow(
+                        [
+                            args.machine_type,
+                            "jscc",
+                            "awgn",
+                            snr_db,
+                            seed,
+                            NAN,
+                            NAN,
+                            args.jscc_ckpt,
+                            NAN,
+                            NAN,
+                            NAN,
+                            NAN,
+                            float(wrapper.channel_uses_per_clip),
+                            "uses",
+                            NAN,
+                            NAN,
+                            NAN,
+                            NAN,
+                            NAN,
+                            mid,
+                            v["auc"],
+                            v["pauc"],
+                        ]
+                    )
                 f.flush()
-                print(f"[{args.machine_type}] jscc cu_total={wrapper.channel_uses_per_clip}/clip snr={snr_db} seed={seed} avg={ids.get('average')}")
+                print(
+                    f"[{args.machine_type}] method=jscc channel=awgn jscc_ckpt={Path(args.jscc_ckpt).name} "
+                    f"snr={snr_db} seed={seed} "
+                    f"cu_total={float(wrapper.channel_uses_per_clip):.1f}/clip "
+                    f"decode_ok=nan decode_fail=nan ok_rate=nan "
+                    f"clip_oor_c=nan clip_oor_f=nan avg={ids.get('average')}"
+                )
 
     print(f"Saved: {out_path}")
 

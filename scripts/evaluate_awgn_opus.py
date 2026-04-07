@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--pauc_max_fpr", type=float, default=0.1)
     p.add_argument("--opus_kbps", type=int, default=12)
-    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 5, 10, 15])
+    p.add_argument("--snr_db", type=float, nargs="+", default=[0, 2, 4, 6, 8, 10, 12, 15, 20])
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--use_channel", action="store_true", help="If set, corrupt Opus bytes using BER(SNR) bit flips.")
     p.add_argument("--ber_curve", type=str, default=None, help="CSV with columns snr_db, ber_postfec (from calibrate_ldpc_bpsk_ber.py). Required when --use_channel.")
@@ -348,6 +348,7 @@ class OpusTestDataset(torch.utils.data.Dataset):
 def main() -> None:
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    NAN = float("nan")
     ffmpeg_bin = resolve_ffmpeg_bin(args.ffmpeg_bin)
     print(f"[opus] using ffmpeg binary: {ffmpeg_bin}")
 
@@ -394,7 +395,32 @@ def main() -> None:
 
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["machine_type", "method", "opus_kbps", "use_channel", "snr_db", "seed", "avg_cu_total", "machine_id", "auc", "pauc"])
+        w.writerow(
+            [
+                "machine_type",
+                "method",
+                "channel",
+                "snr_db",
+                "seed",
+                "quality",
+                "opus_kbps",
+                "jscc_ckpt",
+                "ber_curve",
+                "channel_mode",
+                "avg_cu_coarse",
+                "avg_cu_fine",
+                "avg_cu_total",
+                "cu_unit",
+                "decode_ok",
+                "decode_fail",
+                "decode_ok_rate",
+                "clip_oor_c",
+                "clip_oor_f",
+                "machine_id",
+                "auc",
+                "pauc",
+            ]
+        )
         for snr_db in args.snr_db:
             for seed in args.seeds:
                 ds = OpusTestDataset(
@@ -421,16 +447,42 @@ def main() -> None:
                 res = evaluator.evaluate()
                 ids = res.get(args.machine_type, {})
                 cu = ds.avg_channel_uses_per_clip() if args.use_channel else 0.0
-                ok, fail, okr = ds.decode_success_stats() if args.use_channel else (0, 0, 0.0)
+                ok, fail, okr = ds.decode_success_stats()
                 for mid, v in ids.items():
                     if not isinstance(v, dict):
                         continue
-                    w.writerow([args.machine_type, "opus", args.opus_kbps, int(args.use_channel), snr_db, seed, f"{cu:.2f}", mid, v["auc"], v["pauc"]])
+                    w.writerow(
+                        [
+                            args.machine_type,
+                            "opus",
+                            "ber_bitflip" if args.use_channel else "none",
+                            snr_db,
+                            seed,
+                            NAN,
+                            args.opus_kbps,
+                            NAN,
+                            args.ber_curve if args.use_channel else NAN,
+                            args.channel_mode if args.use_channel else NAN,
+                            NAN,
+                            NAN,
+                            f"{cu:.2f}",
+                            "coded_bits_proxy",
+                            ok,
+                            fail,
+                            f"{okr:.6f}",
+                            NAN,
+                            NAN,
+                            mid,
+                            v["auc"],
+                            v["pauc"],
+                        ]
+                    )
                 f.flush()
                 print(
-                    f"[{args.machine_type}] opus {args.opus_kbps}kbps use_channel={args.use_channel} "
-                    f"channel_mode={args.channel_mode} "
-                    f"snr={snr_db} seed={seed} decode_ok={ok} decode_fail={fail} ok_rate={okr:.3f} cu_total={cu:.1f}/clip avg={ids.get('average')}"
+                    f"[{args.machine_type}] method=opus channel={'ber_bitflip' if args.use_channel else 'none'} "
+                    f"opus_kbps={int(args.opus_kbps)} snr={snr_db} seed={seed} "
+                    f"cu_total={cu:.1f}/clip decode_ok={ok} decode_fail={fail} ok_rate={okr:.3f} "
+                    f"clip_oor_c=nan clip_oor_f=nan avg={ids.get('average')}"
                 )
 
     print(f"Saved: {out_path}")
