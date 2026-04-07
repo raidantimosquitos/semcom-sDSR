@@ -56,6 +56,8 @@ class JSCCWrapper(nn.Module):
         self.device = device
         self.snr_db = float(snr_db)
         self.seed = int(seed)
+        # Make channel noise reproducible while still varying across batches.
+        self._call_idx = 0
 
     @property
     def channel_uses_per_clip(self) -> int:
@@ -65,14 +67,25 @@ class JSCCWrapper(nn.Module):
         self.model.eval()
         self.vq_vae.eval()
         self.jscc.eval()
-        with torch.inference_mode():
-            idx_c, idx_f = self.vq_vae.encode_to_indices(x.to(self.device))
-            snr = torch.full((x.shape[0],), self.snr_db, device=self.device, dtype=torch.float32)
-            q_coarse_hat, q_fine_hat = self.jscc(idx_c, idx_f, snr_db=snr)
-            # JSCC returns q tensors directly (B,C,H,W)
-            out = self.model.forward_from_quantized(q_fine=q_fine_hat, q_coarse=q_coarse_hat)
-            m_out: torch.Tensor = out[0] if isinstance(out, tuple) else out
-            return m_out
+        # `jscc_cnn.awgn_real` uses `torch.randn_like`, so we seed torch RNG here.
+        # Use fork_rng so we don't affect outer callers / dataloader randomness.
+        seed = self.seed + self._call_idx
+        self._call_idx += 1
+        cuda_devices: list[int] = []
+        if self.device.type == "cuda":
+            cuda_devices = [self.device.index] if self.device.index is not None else [0]
+        with torch.random.fork_rng(devices=cuda_devices, enabled=True):
+            torch.manual_seed(seed)
+            if self.device.type == "cuda":
+                torch.cuda.manual_seed_all(seed)
+            with torch.inference_mode():
+                idx_c, idx_f = self.vq_vae.encode_to_indices(x.to(self.device))
+                snr = torch.full((x.shape[0],), self.snr_db, device=self.device, dtype=torch.float32)
+                q_coarse_hat, q_fine_hat = self.jscc(idx_c, idx_f, snr_db=snr)
+                # JSCC returns q tensors directly (B,C,H,W)
+                out = self.model.forward_from_quantized(q_fine=q_fine_hat, q_coarse=q_coarse_hat)
+                m_out: torch.Tensor = out[0] if isinstance(out, tuple) else out
+                return m_out
 
 
 def main() -> None:

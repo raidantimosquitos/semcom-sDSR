@@ -1,31 +1,35 @@
 """
 Anomaly map generation for sDSR training.
 
-This project uses a single **audio_specific** synthetic anomaly mask generator
-for all machine types, matching the paper description:
+Three strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 
-- Select a random frequency band (2–16 mel bins).
-- Mark multiple disjoint time intervals inside that band as anomalous.
+1. PerlinNoiseStrategy        – threshold/binarize Perlin noise (generic fallback)
+2. AudioSpecificStrategy      – generic audio-domain mask (freq band + time segments)
+3. MachineSpecificStrategy    – per-machine-type mask derived from DCASE2020 Task 2
+                                spectrogram analysis (fan / pump / slider / toycar /
+                                toyconveyor / valve)
+
+AnomalyMapGenerator selects between strategies at call time.
 """
 
 from __future__ import annotations
 
 import random
-from typing import Sequence
+from typing import Literal, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from scipy.ndimage import rotate as ndimage_rotate
 
-from .perlin import generate_perlin_noise_2d
+from .perlin import rand_perlin_2d_np
 
-# Minimum mask extent so regions survive pooling to coarse latent (8×8 from input).
-# NOTE: For audio_specific we allow narrower (2–16) bands per paper.
-MIN_FREQ_BINS = 4
-MIN_TIME_FRAMES = 4
+# ---------------------------------------------------------------------------
+# Helpers for disjoint time-segment sampling (shared by audio_specific and
+# machine-specific strategies that need them)
+# ---------------------------------------------------------------------------
 
-# Helper functions
 def _intervals_overlap(a0: int, a1: int, b0: int, b1: int) -> bool:
-    """True if [a0,a1) and [b0,b1) intersect (half-open)."""
     return not (a1 <= b0 or b1 <= a0)
 
 
@@ -34,256 +38,264 @@ def _sample_disjoint_time_segments(
     T: int,
     seg_len_lo: int,
     seg_len_hi: int,
-    max_tries_per_seg: int = 400,
+    max_tries: int = 400,
 ) -> list[tuple[int, int]]:
-    """
-    Sample up to n_seg non-overlapping half-open intervals [t_start, t_end) in [0, T).
-    Stops early if a segment cannot be placed after max_tries_per_seg attempts.
-    """
-    if T <= MIN_TIME_FRAMES:
+    if T <= 4:
         return [(0, T)]
     lo = max(1, min(seg_len_lo, T))
     hi = min(seg_len_hi, T)
     if hi < lo:
         lo, hi = hi, lo
-    if lo > T:
-        lo = min(MIN_TIME_FRAMES, T)
-    if hi < lo:
-        return [(0, T)]
-
     intervals: list[tuple[int, int]] = []
     for _ in range(n_seg):
         placed = False
-        for _ in range(max_tries_per_seg):
+        for _ in range(max_tries):
             seg_len = random.randint(lo, hi)
             if seg_len > T:
                 continue
-            max_start = T - seg_len
-            t_start = random.randint(0, max_start)
+            t_start = random.randint(0, T - seg_len)
             t_end = t_start + seg_len
-            if any(
-                _intervals_overlap(t_start, t_end, s, e) for s, e in intervals
-            ):
+            if any(_intervals_overlap(t_start, t_end, s, e) for s, e in intervals):
                 continue
             intervals.append((t_start, t_end))
             placed = True
             break
         if not placed:
             break
-
     if not intervals:
-        seg_len = min(hi, T)
-        return [(0, max(seg_len, min(lo, T)))]
+        return [(0, min(hi, T))]
     return intervals
 
 
-def _sample_disjoint_time_segments_in_window(
-    n_seg: int,
-    t_lo: int,
-    t_hi: int,
-    seg_len_lo: int,
-    seg_len_hi: int,
-    max_tries_per_seg: int = 400,
-) -> list[tuple[int, int]]:
-    """
-    Disjoint [t_start, t_end) inside [t_lo, t_hi) by sampling in T_sub = t_hi - t_lo
-    then offsetting (reuses _sample_disjoint_time_segments on [0, T_sub)).
-    """
-    t_lo = max(0, min(t_lo, t_hi - 1))
-    t_hi = max(t_lo + 1, t_hi)
-    T_sub = t_hi - t_lo
-    if T_sub <= MIN_TIME_FRAMES:
-        return [(t_lo, t_hi)]
-    raw = _sample_disjoint_time_segments(
-        n_seg, T_sub, seg_len_lo, seg_len_hi, max_tries_per_seg
-    )
-    return [(t_lo + a, t_lo + b) for a, b in raw]
-
-
-class AudioSpecificStrategy:
-    """
-    Paper-style audio-specific anomaly masks (applies to all machine types).
-
-    Procedure:
-    - Pick a random frequency band width in [2, 16] mel bins.
-    - Pick a random band location (f_low:f_high).
-    - Sample several disjoint time intervals and mark them in that band.
-    """
-
-    def __init__(
-        self,
-        spectrogram_shape: tuple[int, int],
-        n_mels: int,
-        T: int,
-        min_segments: int = 2,
-        max_segments: int = 8,
-        band_lo: int = 2,
-        band_hi: int = 96,
-    ) -> None:
-        self.spectrogram_shape = spectrogram_shape
-        self.n_mels = n_mels
-        self.T = T
-        self.min_segments = max(1, min_segments)
-        self.max_segments = max(self.min_segments, max_segments)
-        self.band_lo = max(1, band_lo)
-        self.band_hi = max(self.band_lo, band_hi)
-
-    def _single_mask_numpy(self) -> np.ndarray:
-        n_mels, T = self.n_mels, self.T
-        M = np.zeros((n_mels, T), dtype=np.float32)
-
-        # Frequency band
-        bw = random.randint(self.band_lo, min(self.band_hi, n_mels))
-        bw = max(1, min(bw, n_mels))
-        f_low = random.randint(0, max(0, n_mels - bw))
-        f_high = min(n_mels, f_low + bw)
-
-        # Disjoint time segments inside that band
-        n_seg = random.randint(self.min_segments, self.max_segments)
-        seg_len_lo = max(MIN_TIME_FRAMES, T // 40)
-        seg_len_hi = max(seg_len_lo, min(T, T // 6))
-        for t_start, t_end in _sample_disjoint_time_segments(
-            n_seg, T, seg_len_lo, seg_len_hi
-        ):
-            M[f_low:f_high, t_start:t_end] = 1.0
-        return M
-
-    def single_mask(self, device: torch.device | str) -> torch.Tensor:
-        arr = self._single_mask_numpy()
-        return (
-            torch.from_numpy(arr.astype(np.float32))
-            .unsqueeze(0)
-            .unsqueeze(0)
-            .to(device)
-        )
-
-    def __call__(
-        self,
-        batch_size: int,
-        device: torch.device | str,
-    ) -> torch.Tensor:
-        masks = []
-        for _ in range(batch_size):
-            arr = self._single_mask_numpy()
-            masks.append(torch.from_numpy(arr.astype(np.float32)).unsqueeze(0).unsqueeze(0))
-        return torch.cat(masks, dim=0).to(device)
-
+# ---------------------------------------------------------------------------
+# 1. Perlin noise strategy (generic)
+# ---------------------------------------------------------------------------
 
 class PerlinNoiseStrategy:
     """
-    Simple Perlin-noise anomaly masks.
-
-    Uses :func:`generate_perlin_noise_2d` to generate a (H, W) Perlin field,
-    then binarizes with a threshold.
+    Generate anomaly map by thresholding Perlin noise.
+    Produces blob-like regions. Optionally rotates noise for varied orientations.
     """
 
     def __init__(
         self,
         spectrogram_shape: tuple[int, int],
+        q_shape: tuple[int, int] | None = None,
         threshold: float = 0.5,
-        res_exponent_lo: int = 0,
-        res_exponent_hi: int = 4,
+        perlin_scale_range: tuple[int, int] = (0, 6),
+        rotate: bool = True,
+        rotation_range: tuple[float, float] = (-90.0, 90.0),
     ) -> None:
         self.spectrogram_shape = spectrogram_shape
+        # q_shape retained for backward compatibility; output is always spectrogram_shape
+        self.q_shape = q_shape or spectrogram_shape
         self.threshold = threshold
-        self.res_exponent_lo = res_exponent_lo
-        self.res_exponent_hi = max(res_exponent_lo, res_exponent_hi)
-
-    def _rand_res(self) -> tuple[int, int]:
-        """
-        Pick a Perlin resolution (ry, rx) as powers of 2 that (best-effort)
-        divide the target shape, to avoid degenerate artifacts.
-        """
-        H, W = self.spectrogram_shape
-        exps = list(range(self.res_exponent_lo, self.res_exponent_hi + 1))
-        candidates: list[tuple[int, int]] = []
-        for ey in exps:
-            ry = 2**ey
-            if ry > H:
-                continue
-            for ex in exps:
-                rx = 2**ex
-                if rx > W:
-                    continue
-                if H % ry == 0 and W % rx == 0:
-                    candidates.append((ry, rx))
-        if candidates:
-            return random.choice(candidates)
-        # Fallback: any power-of-2 <= shape
-        ry = min(2 ** random.choice(exps), max(1, H))
-        rx = min(2 ** random.choice(exps), max(1, W))
-        return max(1, ry), max(1, rx)
-
-    def _single_mask_numpy(self) -> np.ndarray:
-        H, W = self.spectrogram_shape
-        ry, rx = self._rand_res()
-        noise = generate_perlin_noise_2d((H, W), (ry, rx))  # ~[-1, 1]
-        M = (noise > self.threshold).astype(np.float32)
-        return M
+        self.perlin_scale_range = perlin_scale_range
+        self.rotate = rotate
+        self.rotation_range = rotation_range
 
     def __call__(self, batch_size: int, device: torch.device | str) -> torch.Tensor:
         masks = []
         for _ in range(batch_size):
-            arr = self._single_mask_numpy()
-            masks.append(torch.from_numpy(arr.astype(np.float32)).unsqueeze(0).unsqueeze(0))
-        return torch.cat(masks, dim=0).to(device)
+            res_y = 2 ** random.randint(*self.perlin_scale_range)
+            res_x = 2 ** random.randint(*self.perlin_scale_range)
+            noise = rand_perlin_2d_np(self.spectrogram_shape, (res_y, res_x))
+            if self.rotate:
+                angle = random.uniform(*self.rotation_range)
+                noise = ndimage_rotate(noise, angle, reshape=False, order=1, mode="constant", cval=0)
+            binary = (noise > self.threshold).astype(np.float32)
+            masks.append(torch.from_numpy(binary).unsqueeze(0).unsqueeze(0))
+        M = torch.cat(masks, dim=0).to(device)
+        if self.q_shape != self.spectrogram_shape:
+            M = F.interpolate(M, size=self.q_shape, mode="nearest")
+        return M
 
+
+# ---------------------------------------------------------------------------
+# 2. Generic audio-specific strategy
+# ---------------------------------------------------------------------------
+
+class AudioSpecificStrategy:
+    """
+    Generate anomaly map for spectrograms — frequency band + time segments.
+    Generic fallback when no machine-specific strategy is available.
+    """
+
+    def __init__(
+        self,
+        spectrogram_shape: tuple[int, int],
+        q_shape: tuple[int, int] | None = None,
+        n_mels: int | None = None,
+        T: int | None = None,
+        min_band_fraction: float = 0.02,
+        max_band_fraction: float = 0.50,
+        min_segments: int = 2,
+        max_segments: int = 8,
+    ) -> None:
+        self.spectrogram_shape = spectrogram_shape
+        self.q_shape = q_shape or spectrogram_shape
+        self.n_mels = n_mels or spectrogram_shape[0]
+        self.T = T or spectrogram_shape[1]
+        self.min_band_fraction = min_band_fraction
+        self.max_band_fraction = max_band_fraction
+        self.min_segments = max(1, min_segments)
+        self.max_segments = max(self.min_segments, max_segments)
+
+    def _single_mask_numpy(self) -> np.ndarray:
+        n_mels, T = self.n_mels, self.T
+        M = np.zeros((n_mels, T), dtype=np.float32)
+        bw = max(1, int(n_mels * random.uniform(self.min_band_fraction, self.max_band_fraction)))
+        f_low = random.randint(0, max(0, n_mels - bw))
+        f_high = min(n_mels, f_low + bw)
+        n_seg = random.randint(self.min_segments, self.max_segments)
+        seg_lo = max(4, T // 40)
+        seg_hi = max(seg_lo, T // 6)
+        for ts, te in _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi):
+            M[f_low:f_high, ts:te] = 1.0
+        return M
+
+    def __call__(self, batch_size: int, device: torch.device | str) -> torch.Tensor:
+        masks = [
+            torch.from_numpy(self._single_mask_numpy()).unsqueeze(0).unsqueeze(0)
+            for _ in range(batch_size)
+        ]
+        M = torch.cat(masks, dim=0).to(device)
+        if self.q_shape != self.spectrogram_shape:
+            M = F.interpolate(M, size=self.q_shape, mode="nearest")
+        return M
+
+
+# ---------------------------------------------------------------------------
+# 3. Machine-specific strategies
+# ---------------------------------------------------------------------------
+
+_MACHINE_STRATEGY_CLASSES: dict[str, str] = {
+    "fan":          "src.utils.anomalies.machine_specific.fan.FanAnomalyStrategy",
+    "pump":         "src.utils.anomalies.machine_specific.pump.PumpAnomalyStrategy",
+    "slider":       "src.utils.anomalies.machine_specific.slider.SliderAnomalyStrategy",
+    "toycar":       "src.utils.anomalies.machine_specific.toycar.ToyCarAnomalyStrategy",
+    "toyconveyor":  "src.utils.anomalies.machine_specific.toyconveyor.ToyConveyorAnomalyStrategy",
+    "valve":        "src.utils.anomalies.machine_specific.valve.ValveAnomalyStrategy",
+}
+
+
+def _load_machine_strategy(
+    machine_type: str,
+    spectrogram_shape: tuple[int, int],
+    n_mels: int,
+    T: int,
+) -> object | None:
+    """Lazily instantiate the machine-specific strategy class, or return None if unavailable."""
+    key = machine_type.lower()
+    if key not in _MACHINE_STRATEGY_CLASSES:
+        return None
+    module_path, cls_name = _MACHINE_STRATEGY_CLASSES[key].rsplit(".", 1)
+    try:
+        import importlib
+        mod = importlib.import_module(module_path)
+        cls = getattr(mod, cls_name)
+        return cls(spectrogram_shape=spectrogram_shape, n_mels=n_mels, T=T)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 4. AnomalyMapGenerator — unified entry point
+# ---------------------------------------------------------------------------
 
 class AnomalyMapGenerator:
     """
     Generate anomaly map M for training.
 
-    This implementation always uses :class:`AudioSpecificStrategy` for all
-    machine types.
+    strategy options:
+        "perlin"           – Perlin noise only
+        "audio_specific"   – generic audio-specific only
+        "machine_specific" – per-machine-type strategy (falls back to audio_specific)
+        "both"             – 20% Perlin, 80% audio_specific (original default)
+        "machine_both"     – 20% Perlin, 80% machine_specific (new recommended)
+
+    When force_anomaly=False, each sample independently receives a zero mask
+    with probability zero_mask_prob.
     """
 
     def __init__(
         self,
-        strategy: str,
+        strategy: Literal[
+            "perlin", "audio_specific", "machine_specific", "both", "machine_both"
+        ],
         spectrogram_shape: tuple[int, int],
+        q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
         zero_mask_prob: float = 0.5,
+        machine_type: str | None = None,
     ) -> None:
-        """
-        Args:
-            strategy: ``perlin``, ``machine_specific`` (per-type masks; slider +
-                ToyCar + placeholders), ``both`` (50% Perlin vs machine-specific),
-                or deprecated alias ``audio_specific`` (same as ``machine_specific``).
-            spectrogram_shape: (n_mels, T)
-            n_mels, T: required for ``machine_specific`` and ``both``
-            zero_mask_prob: per-sample probability of returning a zero mask (no anomaly)
-        """
         self.strategy_name = strategy
         self.spectrogram_shape = spectrogram_shape
+        # q_shape kept for backward compat but masks are generated at spectrogram_shape
+        self.q_shape = q_shape or spectrogram_shape
         self.zero_mask_prob = zero_mask_prob
-        if n_mels is None or T is None:
-            n_mels, T = spectrogram_shape
+        self.machine_type = machine_type
+
+        _n_mels = n_mels or spectrogram_shape[0]
+        _T = T or spectrogram_shape[1]
+
         self.perlin = (
-            PerlinNoiseStrategy(spectrogram_shape)
-            if self.strategy_name in ("perlin", "both")
+            PerlinNoiseStrategy(spectrogram_shape, self.q_shape)
+            if strategy in ("perlin", "both", "machine_both")
             else None
         )
-        self.audio_specific = AudioSpecificStrategy(spectrogram_shape, n_mels, T)
+        self.audio_specific = (
+            AudioSpecificStrategy(spectrogram_shape, self.q_shape, _n_mels, _T)
+            if strategy in ("audio_specific", "both")
+            else None
+        )
+        # Machine-specific strategy (may be None if machine_type not recognised)
+        self._machine_strategy = None
+        if strategy in ("machine_specific", "machine_both") and machine_type is not None:
+            self._machine_strategy = _load_machine_strategy(
+                machine_type, spectrogram_shape, _n_mels, _T
+            )
+        # Always keep a generic audio_specific as fallback
+        self._fallback = AudioSpecificStrategy(spectrogram_shape, self.q_shape, _n_mels, _T)
 
-    def _generate_one(
-        self,
-        device: torch.device | str,
-        machine_type: str | None = None,
-    ) -> torch.Tensor:
+    def _get_machine_or_fallback(self) -> object:
+        return self._machine_strategy if self._machine_strategy is not None else self._fallback
+
+    def _generate_one(self, device: torch.device | str) -> torch.Tensor:
         """Generate a single non-zero mask (1, 1, H, W)."""
-        _ = machine_type  # unused; same generator for all types
-        if self.strategy_name == "perlin":
+        name = self.strategy_name
+
+        if name == "perlin":
             assert self.perlin is not None
             return self.perlin(1, device)
-        if self.strategy_name == "both":
-            # Mix Perlin (20%) and audio_specific (80%) for now.
-            if random.random() < 0.2:
+
+        if name == "audio_specific":
+            assert self.audio_specific is not None
+            return self.audio_specific(1, device)
+
+        if name == "machine_specific":
+            strat = self._get_machine_or_fallback()
+            return strat(1, device)  # type: ignore[operator]
+
+        if name == "both":
+            # 20% Perlin, 80% audio_specific
+            if random.random() < 0.20:
                 assert self.perlin is not None
                 return self.perlin(1, device)
+            assert self.audio_specific is not None
             return self.audio_specific(1, device)
-        # Default: audio_specific
-        return self.audio_specific(1, device)
+
+        if name == "machine_both":
+            # 20% Perlin, 80% machine-specific
+            if random.random() < 0.20:
+                assert self.perlin is not None
+                return self.perlin(1, device)
+            strat = self._get_machine_or_fallback()
+            return strat(1, device)  # type: ignore[operator]
+
+        # Fallback
+        return self._fallback(1, device)
 
     def generate_for_training_sample(
         self,
@@ -291,10 +303,10 @@ class AnomalyMapGenerator:
         force_anomaly: bool = True,
         machine_type: str | None = None,
     ) -> torch.Tensor:
-        """Generate one mask for a single training sample."""
+        """Generate one mask for a single training sample (convenience wrapper)."""
         if force_anomaly:
-            return self._generate_one(device, machine_type=machine_type)
-        return self.generate(1, device, force_anomaly=False, machine_types=None)
+            return self._generate_one(device)
+        return self.generate(1, device, force_anomaly=False)
 
     def generate(
         self,
@@ -304,52 +316,29 @@ class AnomalyMapGenerator:
         machine_types: Sequence[str] | None = None,
     ) -> torch.Tensor:
         """
-        Generate anomaly map M.
-
-        When force_anomaly=False, each sample is decided independently: with
-        probability zero_mask_prob the mask is all zeros, else one mask from
-        the strategy (per-sample 50% no-anomaly, matching original DSR).
-
-        For ``machine_specific`` / ``both`` with ``force_anomaly=True`` and
-        ``batch_size > 1``, pass ``machine_types`` of length ``batch_size`` for
-        per-row types; if omitted, masks use the placeholder strategy (unknown
-        type) for every sample — training uses
-        :meth:`generate_for_training_sample` with per-sample ``machine_type``.
+        Generate batch of anomaly masks.
 
         Args:
-            batch_size: number of masks to generate
+            batch_size: number of masks
             device: torch device
-            force_anomaly: if True, skip zero_mask_prob and always generate real masks
-            machine_types: optional per-batch machine_type strings (DCASE keys)
+            force_anomaly: if True, always generate real masks (skip zero_mask_prob)
+            machine_types: per-sample machine types (ignored; use AnomalyMapGenerator
+                           per machine type for per-type control)
 
         Returns:
             M: (B, 1, n_mels, T) binary mask
         """
         if force_anomaly:
-            _ = machine_types  # unused
-            if self.strategy_name == "perlin":
-                assert self.perlin is not None
-                return self.perlin(batch_size, device)
-            if self.strategy_name == "both":
-                # Batch-level mix (matches prior behavior of choosing one branch per call).
-                if random.random() < 0.2:
-                    assert self.perlin is not None
-                    return self.perlin(batch_size, device)
-                return self.audio_specific(batch_size, device)
-            return self.audio_specific(batch_size, device)
+            return torch.cat(
+                [self._generate_one(device) for _ in range(batch_size)], dim=0
+            )
 
         masks = []
         for _ in range(batch_size):
             if random.random() < self.zero_mask_prob:
                 masks.append(
-                    torch.zeros(
-                        1,
-                        1,
-                        *self.spectrogram_shape,
-                        device=device,
-                        dtype=torch.float32,
-                    )
+                    torch.zeros(1, 1, *self.spectrogram_shape, device=device, dtype=torch.float32)
                 )
             else:
-                masks.append(self._generate_one(device, machine_type=None))
+                masks.append(self._generate_one(device))
         return torch.cat(masks, dim=0)

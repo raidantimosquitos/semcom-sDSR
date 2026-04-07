@@ -27,7 +27,6 @@ from src.engine.stage1 import Stage1Trainer
 from src.engine.stage2 import Stage2Trainer
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
-from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 
 
 def parse_args() -> argparse.Namespace:
@@ -87,8 +86,8 @@ def parse_args() -> argparse.Namespace:
         "--anomaly_strategy",
         type=str,
         default="both",
-        choices=["perlin", "audio_specific", "both"],
-        help="Synthetic anomaly mask: perlin; audio_specific; or both (50% Perlin vs audio_specific)",
+        choices=["perlin", "audio_specific", "machine_specific", "both", "machine_both"],
+        help="Synthetic anomaly mask: perlin; audio_specific; machine_specific; both (20% Perlin vs 80% audio_specific); machine_both (20% Perlin vs 80% machine_specific)",
     )
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
     s2.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
