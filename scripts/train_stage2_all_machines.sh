@@ -13,7 +13,7 @@ export PYTHONPATH="$REPO_ROOT"
 
 DATA_PATH="${DATA_PATH:-./dataset/dcase2020_task2_dev_dataset}"
 CKPT_DIR="${CKPT_DIR:-./checkpoints}"
-GCS_CHECKPOINTS="${GCS_CHECKPOINTS:-gs://semcom-sdsr-training-data-1772509648/checkpoints_mar24}"
+GCS_CHECKPOINTS="${GCS_CHECKPOINTS:-gs://semcom-sdsr-training-data-1772509648/checkpoints_apr07}"
 N_ITER=10000
 BATCH_SIZE=16
 
@@ -30,7 +30,7 @@ fi
 MACHINE_TYPES=(fan pump slider valve ToyCar ToyConveyor)
 
 # Anomaly mask strategies to train stage2 with
-ANOMALY_STRATEGIES=(both)
+ANOMALY_STRATEGIES=(machine_both)
 
 # Optional: space-separated machine_ids (e.g. "id_00 id_01 id_02"). When set, train/eval per (machine_type, machine_id)
 # with other machine_ids of same type used as adversarial samples (mask all 1s). When unset, one run per machine_type (all IDs).
