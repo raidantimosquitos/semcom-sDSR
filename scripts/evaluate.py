@@ -34,7 +34,6 @@ from src.data.dataset import (
 from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
-from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 
 
 def parse_args() -> argparse.Namespace:
@@ -177,7 +176,6 @@ def main() -> None:
 def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     """Run evaluation; all user-facing output via tee (terminal + log file)."""
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    norm_mean, norm_std = load_norm_from_stage1_ckpt(stage1_ckpt)
 
     if args.machine_types is not None:
         if args.machine_id is not None:
