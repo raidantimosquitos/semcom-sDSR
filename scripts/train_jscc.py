@@ -67,7 +67,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--snr_max", type=float, default=20.0)
     p.add_argument("--alpha_c", type=int, default=10)
     p.add_argument("--alpha_f", type=int, default=3)
-    p.add_argument("--out", type=str, required=True, help="Output .pt path")
+    p.add_argument(
+        "--out",
+        type=str,
+        required=True,
+        help="Output path. Either a .pt file path, or a directory to place an auto-named checkpoint file.",
+    )
     return p.parse_args()
 
 
@@ -140,7 +145,14 @@ def main() -> None:
     opt = torch.optim.Adam(jscc.parameters(), lr=args.lr)
 
     out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Allow --out to be either a directory or a .pt file.
+    if out_path.suffix != ".pt":
+        out_dir = out_path
+        out_dir.mkdir(parents=True, exist_ok=True)
+        run_name = "+".join(sorted(used_machine_types)) if len(used_machine_types) > 1 else used_machine_types[0]
+        out_path = out_dir / f"jscc_{run_name}_a{int(args.alpha_c)}-{int(args.alpha_f)}_snr{float(args.snr_min):g}-{float(args.snr_max):g}.pt"
+    else:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
     jscc.train()
     total = 0.0
