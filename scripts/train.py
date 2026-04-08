@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--machine_type", type=str, nargs="+", default=["fan", "pump", "slider", "valve", "ToyCar", "ToyConveyor"], help="One or more machine types (e.g. fan pump slider)")
     s1.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
     s1.add_argument("--n_iter", type=int, default=20000)
-    s1.add_argument("--lr", type=float, default=1e-4)
+    s1.add_argument("--lr", type=float, default=2e-4)
     s1.add_argument("--num_embeddings_coarse", type=int, default=512)
     s1.add_argument("--num_embeddings_fine", type=int, default=4096)
     s1.add_argument("--embedding_dim_fine", type=int, default=64)
