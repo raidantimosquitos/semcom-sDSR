@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Stage-1 grid: num_embeddings_coarse = num_embeddings_fine ∈ {512,1024,2048},
-# embedding_dim_coarse = embedding_dim_fine ∈ {64,128}.
+# Stage-1 grid: compare codebook size pairs (coarse,fine) with default embedding dims.
+# Keeps Stage-1 defaults by NOT passing --embedding_dim_* flags.
 # 20k iterations, batch 256, default hidden_channels (coarse=256, fine=64).
 # After each train run, full test-set reconstruction MSE (mean over all elements).
 #
@@ -29,7 +29,14 @@ MACHINE_TYPES=(fan pump slider valve ToyCar ToyConveyor)
 RUN_NAME="ToyCar+ToyConveyor+fan+pump+slider+valve"
 
 CODEBOOK_SIZES=(512 1024 2048)
-EMBEDDING_DIMS=(64 128)
+# (num_embeddings_coarse, num_embeddings_fine)
+# NOTE: last value is 2046 as requested (not a power of two).
+CODEBOOK_PAIRS=(
+  "128:256"
+  "256:512"
+  "512:1024"
+  "1024:2046"
+)
 
 if [[ ! -d "$DATA_PATH" ]]; then
   echo "Dataset not found at $DATA_PATH"
@@ -38,14 +45,15 @@ fi
 
 mkdir -p "$RUNS_DIR"
 if [[ ! -f "$CSV_OUT" ]]; then
-  echo "num_embeddings,embedding_dim,n_iter,batch_size,avg_test_mse,ckpt_path,json_path" >"$CSV_OUT"
+  echo "num_embeddings_coarse,num_embeddings_fine,n_iter,batch_size,avg_test_mse,ckpt_path,json_path" >"$CSV_OUT"
 fi
 
-for K in "${CODEBOOK_SIZES[@]}"; do
-  for emb in "${EMBEDDING_DIMS[@]}"; do
-    stamp="K${K}_emb${emb}_iter${N_ITER}_bs${BATCH_SIZE}"
+for cfg in "${CODEBOOK_PAIRS[@]}"; do
+  Kc="${cfg%%:*}"
+  Kf="${cfg##*:}"
+  stamp="Kc${Kc}_Kf${Kf}_iter${N_ITER}_bs${BATCH_SIZE}"
     echo "=============================================="
-    echo "Training: K_coarse=K_fine=$K  emb_coarse=emb_fine=$emb  ($stamp)"
+    echo "Training: K_coarse=$Kc  K_fine=$Kf  (embedding_dim defaults)  ($stamp)"
     echo "=============================================="
 
     RUN_CKPT_DIR="${CKPT_ROOT}/${stamp}"
@@ -55,10 +63,8 @@ for K in "${CODEBOOK_SIZES[@]}"; do
       --ckpt_dir "$RUN_CKPT_DIR" \
       --n_iter "$N_ITER" \
       --batch_size "$BATCH_SIZE" \
-      --num_embeddings_coarse "$K" \
-      --num_embeddings_fine "$K" \
-      --embedding_dim_coarse "$emb" \
-      --embedding_dim_fine "$emb"
+      --num_embeddings_coarse "$Kc" \
+      --num_embeddings_fine "$Kf"
 
     CKPT_PATH="${RUN_CKPT_DIR}/stage1/${RUN_NAME}/stage1_${RUN_NAME}_best.pt"
     if [[ ! -f "$CKPT_PATH" ]]; then
@@ -78,8 +84,7 @@ for K in "${CODEBOOK_SIZES[@]}"; do
     # Parse avg_mse from JSON (avoid brittle grep on scientific notation)
     AVG_MSE="$(python -c "import json; print(json.load(open('$JSON_PATH'))['avg_mse'])")"
 
-    echo "${K},${emb},${N_ITER},${BATCH_SIZE},${AVG_MSE},\"${CKPT_PATH}\",\"${JSON_PATH}\"" >>"$CSV_OUT"
-  done
+    echo "${Kc},${Kf},${N_ITER},${BATCH_SIZE},${AVG_MSE},\"${CKPT_PATH}\",\"${JSON_PATH}\"" >>"$CSV_OUT"
 done
 
 echo "Done. Summary: $CSV_OUT"
