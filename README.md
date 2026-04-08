@@ -17,6 +17,12 @@ conda run -n sDSR pip install --no-build-isolation pyldpc
 ```
 (`pyldpc` is not on conda; its sdist build needs the env’s NumPy, so build isolation is disabled. Alternatively run `bash scripts/bootstrap_conda_env.sh`.)
 
+## Clone the dataset
+
+```bash
+gsutil -m cp -r gs://semcom-sdsr-training-data-1772509648/dcase2020_task2/dcase2020_task2_dev_dataset ./dataset
+```
+
 ## BER-calibrated bitflip baselines (OPUS/JPEG)
 
 To avoid extremely slow per-clip LDPC decoding for OPUS/JPEG sweeps, you can:

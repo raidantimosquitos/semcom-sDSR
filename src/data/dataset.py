@@ -279,7 +279,9 @@ class AudDSRAnomTrainDataset(Dataset):
     def __init__(
         self,
         base_dataset: DCASE2020Task2LogMelDataset,
-        strategy: Literal["perlin", "audio_specific", "machine_specific", "both", "machine_both"] = "both",
+        strategy: Literal[
+            "perlin", "mix", "audio_specific", "machine_specific", "both", "machine_both"
+        ] = "both",
         zero_mask_prob: float = 0.5,
         adversarial_dataset: Dataset | None = None,
     ) -> None:

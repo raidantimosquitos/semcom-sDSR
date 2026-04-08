@@ -1,11 +1,12 @@
 """
 Anomaly map generation for sDSR training.
 
-Three strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
+Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 
 1. PerlinNoiseStrategy        – threshold/binarize Perlin noise (generic fallback)
-2. AudioSpecificStrategy      – generic audio-domain mask (freq band + time segments)
-3. MachineSpecificStrategy    – per-machine-type mask derived from DCASE2020 Task 2
+2. MixNoiseStrategy           – smoothed random field + Poisson bursts (v/h/d/blob), quantile cut
+3. AudioSpecificStrategy      – generic audio-domain mask (freq band + time segments)
+4. MachineSpecificStrategy    – per-machine-type mask derived from DCASE2020 Task 2
                                 spectrogram analysis (fan / pump / slider / toycar /
                                 toyconveyor / valve)
 
@@ -20,7 +21,7 @@ from typing import Literal, Sequence
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy.ndimage import rotate as ndimage_rotate
+from scipy.ndimage import gaussian_filter, rotate as ndimage_rotate
 
 from .perlin import rand_perlin_2d_np
 
@@ -105,6 +106,124 @@ class PerlinNoiseStrategy:
                 noise = ndimage_rotate(noise, angle, reshape=False, order=1, mode="constant", cval=0)
             binary = (noise > self.threshold).astype(np.float32)
             masks.append(torch.from_numpy(binary).unsqueeze(0).unsqueeze(0))
+        M = torch.cat(masks, dim=0).to(device)
+        if self.q_shape != self.spectrogram_shape:
+            M = F.interpolate(M, size=self.q_shape, mode="nearest")
+        return M
+
+
+# ---------------------------------------------------------------------------
+# 1b. Mix strategy (smooth field + structured bursts)
+# ---------------------------------------------------------------------------
+
+class MixNoiseStrategy:
+    """
+    Smooth random base (Gaussian-blurred white noise or optional Perlin) plus Poisson-count
+    structured additions, then z-score and quantile threshold.
+
+    Array layout is (n_mels, T): row index = mel / frequency, column = time. Modes: ``v``
+    adds a Gaussian ridge along time (broadband temporal event); ``h`` adds a Gaussian ridge
+    along frequency (narrowband over time); ``d`` a thickened diagonal; ``blob`` a 2D Gaussian.
+    """
+
+    def __init__(
+        self,
+        spectrogram_shape: tuple[int, int],
+        q_shape: tuple[int, int] | None = None,
+        lambda_k: float = 3.0,
+        quantile: float = 0.98,
+        base: Literal["smoothed_white", "perlin"] = "smoothed_white",
+        perlin_scale_range: tuple[int, int] = (0, 6),
+        diag_half_width: int = 1,
+        norm_eps: float = 1e-6,
+    ) -> None:
+        self.spectrogram_shape = spectrogram_shape
+        self.q_shape = q_shape or spectrogram_shape
+        self.lambda_k = max(0.0, lambda_k)
+        self.quantile = quantile
+        self.base = base
+        self.perlin_scale_range = perlin_scale_range
+        self.diag_half_width = max(0, diag_half_width)
+        self.norm_eps = norm_eps
+
+    def _scaled_smooth_sigmas(self, H: int, W: int) -> tuple[float, float]:
+        sigma_f = max(1e-3, 8.0 * H / 128.0)
+        sigma_t = max(1e-3, 20.0 * W / 320.0)
+        return sigma_f, sigma_t
+
+    def _single_mask_numpy(self) -> np.ndarray:
+        H, W = self.spectrogram_shape
+        sigma_f0, sigma_t0 = self._scaled_smooth_sigmas(H, W)
+
+        if self.base == "perlin":
+            res_y = 2 ** random.randint(*self.perlin_scale_range)
+            res_x = 2 ** random.randint(*self.perlin_scale_range)
+            Z = rand_perlin_2d_np((H, W), (res_y, res_x)).astype(np.float64)
+            blur_f = max(0.5, sigma_f0 / 4.0)
+            blur_t = max(0.5, sigma_t0 / 4.0)
+            Z = gaussian_filter(Z, sigma=(blur_f, blur_t))
+        else:
+            Z = np.random.randn(H, W).astype(np.float64)
+            Z = gaussian_filter(Z, sigma=(sigma_f0, sigma_t0))
+
+        scale_h = H / 128.0
+        scale_w = W / 320.0
+
+        K = int(np.random.poisson(self.lambda_k)) if self.lambda_k > 0 else 0
+        for _ in range(K):
+            typ = random.choice(["v", "h", "d", "blob"])
+
+            if typ == "v":
+                t0 = random.randint(0, W - 1) if W > 0 else 0
+                sigma_t = float(np.random.uniform(2.0, 10.0) * scale_w)
+                sigma_t = max(sigma_t, 1e-3)
+                t_ax = np.arange(W, dtype=np.float64)
+                row = np.exp(-((t_ax - t0) ** 2) / (2.0 * sigma_t**2))
+                Z += row[np.newaxis, :]
+
+            elif typ == "h":
+                f0 = random.randint(0, H - 1) if H > 0 else 0
+                sigma_f = float(np.random.uniform(1.0, 5.0) * scale_h)
+                sigma_f = max(sigma_f, 1e-3)
+                f_ax = np.arange(H, dtype=np.float64)
+                col = np.exp(-((f_ax - f0) ** 2) / (2.0 * sigma_f**2))
+                Z += col[:, np.newaxis]
+
+            elif typ == "d":
+                a = float(np.random.uniform(-0.2, 0.2))
+                b = float(np.random.uniform(0.0, float(H)))
+                hw = self.diag_half_width
+                for t in range(W):
+                    f_line = int(round(a * t + b))
+                    for df in range(-hw, hw + 1):
+                        ff = f_line + df
+                        if 0 <= ff < H:
+                            Z[ff, t] += 1.0
+
+            else:
+                f0 = random.randint(0, H - 1) if H > 0 else 0
+                t0 = random.randint(0, W - 1) if W > 0 else 0
+                sigma_f = float(np.random.uniform(3.0, 10.0) * scale_h)
+                sigma_t = float(np.random.uniform(5.0, 20.0) * scale_w)
+                sigma_f = max(sigma_f, 1e-3)
+                sigma_t = max(sigma_t, 1e-3)
+                F, Tgrid = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
+                Z += np.exp(
+                    -((F - f0) ** 2) / (2.0 * sigma_f**2)
+                    -((Tgrid - t0) ** 2) / (2.0 * sigma_t**2)
+                )
+
+        z_mean = float(Z.mean())
+        z_std = max(float(Z.std()), self.norm_eps)
+        Z = (Z - z_mean) / z_std
+        tau = float(np.quantile(Z, self.quantile))
+        return (Z > tau).astype(np.float32)
+
+    def __call__(self, batch_size: int, device: torch.device | str) -> torch.Tensor:
+        masks = [
+            torch.from_numpy(self._single_mask_numpy()).unsqueeze(0).unsqueeze(0)
+            for _ in range(batch_size)
+        ]
         M = torch.cat(masks, dim=0).to(device)
         if self.q_shape != self.spectrogram_shape:
             M = F.interpolate(M, size=self.q_shape, mode="nearest")
@@ -209,6 +328,7 @@ class AnomalyMapGenerator:
 
     strategy options:
         "perlin"           – Perlin noise only
+        "mix"              – smoothed field + burst mix, quantile threshold
         "audio_specific"   – generic audio-specific only
         "machine_specific" – per-machine-type strategy (falls back to audio_specific)
         "both"             – 20% Perlin, 80% audio_specific (original default)
@@ -221,7 +341,12 @@ class AnomalyMapGenerator:
     def __init__(
         self,
         strategy: Literal[
-            "perlin", "audio_specific", "machine_specific", "both", "machine_both"
+            "perlin",
+            "mix",
+            "audio_specific",
+            "machine_specific",
+            "both",
+            "machine_both",
         ],
         spectrogram_shape: tuple[int, int],
         q_shape: tuple[int, int] | None = None,
@@ -243,6 +368,11 @@ class AnomalyMapGenerator:
         self.perlin = (
             PerlinNoiseStrategy(spectrogram_shape, self.q_shape)
             if strategy in ("perlin", "both", "machine_both")
+            else None
+        )
+        self.mix = (
+            MixNoiseStrategy(spectrogram_shape, self.q_shape)
+            if strategy == "mix"
             else None
         )
         self.audio_specific = (
@@ -269,6 +399,10 @@ class AnomalyMapGenerator:
         if name == "perlin":
             assert self.perlin is not None
             return self.perlin(1, device)
+
+        if name == "mix":
+            assert self.mix is not None
+            return self.mix(1, device)
 
         if name == "audio_specific":
             assert self.audio_specific is not None

@@ -51,8 +51,8 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--num_embeddings_coarse", type=int, default=512)
     s1.add_argument("--num_embeddings_fine", type=int, default=4096)
     s1.add_argument("--embedding_dim_fine", type=int, default=64)
-    s1.add_argument("--embedding_dim_coarse", type=int, default=256)
-    s1.add_argument("--hidden_channels_fine", type=int, default=64)
+    s1.add_argument("--embedding_dim_coarse", type=int, default=128)
+    s1.add_argument("--hidden_channels_fine", type=int, default=128)
     s1.add_argument("--hidden_channels_coarse", type=int, default=256)
     s1.add_argument("--commitment_cost", type=float, default=0.25)
     s1.add_argument("--decay", type=float, default=0.99)
@@ -86,8 +86,15 @@ def parse_args() -> argparse.Namespace:
         "--anomaly_strategy",
         type=str,
         default="both",
-        choices=["perlin", "audio_specific", "machine_specific", "both", "machine_both"],
-        help="Synthetic anomaly mask: perlin; audio_specific; machine_specific; both (20% Perlin vs 80% audio_specific); machine_both (20% Perlin vs 80% machine_specific)",
+        choices=[
+            "perlin",
+            "mix",
+            "audio_specific",
+            "machine_specific",
+            "both",
+            "machine_both",
+        ],
+        help="Synthetic anomaly mask: perlin; mix (smoothed field + bursts + quantile); audio_specific; machine_specific; both (20%% Perlin vs 80%% audio_specific); machine_both (20%% Perlin vs 80%% machine_specific)",
     )
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
     s2.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
