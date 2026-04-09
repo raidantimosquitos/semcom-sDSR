@@ -14,7 +14,7 @@ export PYTHONPATH="$REPO_ROOT"
 DATA_PATH="${DATA_PATH:-./dataset/dcase2020_task2_dev_dataset}"
 CKPT_DIR="${CKPT_DIR:-./checkpoints}"
 GCS_CHECKPOINTS="${GCS_CHECKPOINTS:-gs://semcom-sdsr-training-data-1772509648/checkpoints_apr09_larger_model}"
-N_ITER=2500
+N_ITER=10000
 BATCH_SIZE=16
 
 # Single shared stage1 trained on all machine types (same run_name as experiment_grid.sh)
@@ -72,40 +72,6 @@ for machine_type in "${MACHINE_TYPES[@]}"; do
       --anomaly_strategy "$anomaly_strategy" \
       --val_every 500
 
-    # Stage2Trainer saves checkpoints under:
-    #   ${ckpt_dir}/stage2/${machine_type}/stage2_${machine_type}_best.pt
-    stage2_machine_dir="${stage2_dir}/stage2/${machine_type}"
-    stage2_ckpt="${stage2_machine_dir}/stage2_${machine_type}_best.pt"
-    python scripts/evaluate.py \
-      --data_path "$DATA_PATH" \
-      --machine_type "$machine_type" \
-      --stage1_ckpt "$STAGE1_BEST" \
-      --stage2_ckpt "$stage2_ckpt" \
-      --output "${stage2_machine_dir}/results/results.csv" \
-      --no_score_norm
-
-    if [[ -d "$stage2_machine_dir" ]]; then
-      # Upload only training logs + evaluation results (not model weights).
-      # - Training log:   ${stage2_machine_dir}/train.log
-      # - Eval results:  ${stage2_machine_dir}/results/
-      dest="${GCS_CHECKPOINTS}/${STAMP}/${machine_type}/${anomaly_strategy}"
-
-      if [[ -f "$stage2_machine_dir/train.log" ]]; then
-        echo "Uploading $stage2_machine_dir/train.log -> ${dest}/train.log"
-        gsutil -m cp "$stage2_machine_dir/train.log" "${dest}/train.log"
-      else
-        echo "Warning: train.log not found at $stage2_machine_dir/train.log, skipping"
-      fi
-
-      if [[ -d "$stage2_machine_dir/results" ]]; then
-        echo "Uploading $stage2_machine_dir/results -> ${dest}/results"
-        gsutil -m cp -r "$stage2_machine_dir/results" "${dest}/results"
-      else
-        echo "Warning: results dir not found at $stage2_machine_dir/results, skipping"
-      fi
-    else
-      echo "Warning: stage2 dir not found at $stage2_machine_dir, skipping upload"
-    fi
   done
 done
 
