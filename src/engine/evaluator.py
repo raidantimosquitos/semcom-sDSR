@@ -67,11 +67,11 @@ class AnomalyEvaluator:
     def _anomaly_scores(self, m_out: torch.Tensor) -> torch.Tensor:
         """
         Aggregate M_out to per-clip anomaly score (mean over spatial dims).
-        Returns (B,) tensor of mean anomaly logit per clip.
+        Returns (B,) tensor of mean anomaly probability per clip.
         """
-        logits = m_out[:, 1]  # (B, H, W) — anomaly channel
-        flat = logits.view(m_out.shape[0], -1)  # (B, H*W)
-        return flat.mean(dim=1).cpu()
+        probs = torch.softmax(m_out, dim=1)
+        anomaly_prob = probs[:, 1]  # (B, H, W)
+        return anomaly_prob.view(m_out.shape[0], -1).mean(dim=1).cpu()
 
     def evaluate(self) -> dict[str, Any]:
         """

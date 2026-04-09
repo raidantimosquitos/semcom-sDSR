@@ -3,14 +3,16 @@ Anomaly map generation for sDSR training.
 
 Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 
-1. PerlinNoiseStrategy        – threshold/binarize Perlin noise (generic fallback)
-2. MixNoiseStrategy           – smoothed random field + Poisson bursts (v/h/d/blob), quantile cut
-3. AudioSpecificStrategy      – generic audio-domain mask (freq band + time segments)
-4. MachineSpecificStrategy    – per-machine-type mask derived from DCASE2020 Task 2
-                                spectrogram analysis (fan / pump / slider / toycar /
-                                toyconveyor / valve)
+1. PerlinNoiseStrategy            – threshold/binarize Perlin noise (generic fallback)
+2. MixNoiseStrategy               – smoothed random field + Poisson bursts, quantile cut
+3. LatentAlignedBandStrategy      – full-width horizontal bands aligned to VQ-VAE latent
+                                    grid (replaces AudioSpecificStrategy)
+4. MachineSpecificStrategy        – per-machine-type mask derived from DCASE2020 Task 2
+                                    spectrogram analysis (fan / pump / slider / toycar /
+                                    toyconveyor / valve)
 
 AnomalyMapGenerator selects between strategies at call time.
+``AudioSpecificStrategy`` is kept as an alias for backward compatibility.
 """
 
 from __future__ import annotations
@@ -26,8 +28,8 @@ from scipy.ndimage import gaussian_filter, rotate as ndimage_rotate
 from .perlin import rand_perlin_2d_np
 
 # ---------------------------------------------------------------------------
-# Helpers for disjoint time-segment sampling (shared by audio_specific and
-# machine-specific strategies that need them)
+# Helpers for disjoint time-segment sampling (used by machine-specific
+# strategies that need them)
 # ---------------------------------------------------------------------------
 
 def _intervals_overlap(a0: int, a1: int, b0: int, b1: int) -> bool:
@@ -231,13 +233,28 @@ class MixNoiseStrategy:
 
 
 # ---------------------------------------------------------------------------
-# 2. Generic audio-specific strategy
+# 2. Latent-aligned band strategy (replaces AudioSpecificStrategy)
 # ---------------------------------------------------------------------------
 
-class AudioSpecificStrategy:
+class LatentAlignedBandStrategy:
     """
-    Generate anomaly map for spectrograms — frequency band + time segments.
-    Generic fallback when no machine-specific strategy is available.
+    Full-width horizontal band masks whose boundaries align with the fine-level
+    VQ-VAE latent grid so that avg_pool2d + binarisation produces clean
+    per-row masks in latent space.
+
+    Designed from empirical analysis of real DCASE2020 Task 2 anomaly geometry
+    in quantised feature maps (||E[q|anom] - E[q|norm]||_2):
+
+      * All six machine types exhibit full-duration horizontal frequency bands
+        as the dominant anomaly shape in both fine and coarse latent grids.
+      * Band count, width and position vary across machines and IDs but the
+        geometry is universal.
+      * Valve is an outlier — anomalies are broadband / diffuse with low
+        amplitude across most of the frequency axis.  A dedicated diffuse
+        mode covers this case.
+
+    Parameters are specified in *fine latent rows* (1 row = ``latent_h_stride``
+    mel bins) so that masks downsample cleanly.
     """
 
     def __init__(
@@ -246,31 +263,94 @@ class AudioSpecificStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        min_band_fraction: float = 0.02,
-        max_band_fraction: float = 0.50,
-        min_segments: int = 2,
-        max_segments: int = 8,
+        latent_h_stride: int = 4,
+        min_bands: int = 1,
+        max_bands: int = 4,
+        min_band_rows: int = 1,
+        max_band_rows: int = 8,
+        min_band_sep_rows: int = 2,
+        full_time_prob: float = 0.70,
+        min_time_frac: float = 0.85,
+        max_time_frac: float = 1.0,
+        diffuse_prob: float = 0.15,
+        diffuse_min_coverage: float = 0.50,
+        diffuse_max_coverage: float = 0.90,
     ) -> None:
         self.spectrogram_shape = spectrogram_shape
         self.q_shape = q_shape or spectrogram_shape
         self.n_mels = n_mels or spectrogram_shape[0]
         self.T = T or spectrogram_shape[1]
-        self.min_band_fraction = min_band_fraction
-        self.max_band_fraction = max_band_fraction
-        self.min_segments = max(1, min_segments)
-        self.max_segments = max(self.min_segments, max_segments)
+        self.stride = max(1, latent_h_stride)
+        self.n_latent_rows = self.n_mels // self.stride
+
+        self.min_bands = max(1, min_bands)
+        self.max_bands = max(self.min_bands, max_bands)
+        self.min_band_rows = max(1, min_band_rows)
+        self.max_band_rows = max(self.min_band_rows, max_band_rows)
+        self.min_band_sep_rows = max(0, min_band_sep_rows)
+
+        self.full_time_prob = full_time_prob
+        self.min_time_frac = min_time_frac
+        self.max_time_frac = max_time_frac
+
+        self.diffuse_prob = diffuse_prob
+        self.diffuse_min_cov = diffuse_min_coverage
+        self.diffuse_max_cov = diffuse_max_coverage
+
+    def _place_bands(self, n_bands: int) -> list[tuple[int, int]]:
+        """Sample ``n_bands`` non-overlapping band intervals in latent rows."""
+        total = self.n_latent_rows
+        bands: list[tuple[int, int]] = []
+        for _ in range(n_bands):
+            placed = False
+            for _ in range(300):
+                w = random.randint(self.min_band_rows, min(self.max_band_rows, total))
+                r0 = random.randint(0, max(0, total - w))
+                r1 = r0 + w
+                too_close = any(
+                    not (r1 + self.min_band_sep_rows <= s or r0 >= e + self.min_band_sep_rows)
+                    for s, e in bands
+                )
+                if too_close:
+                    continue
+                bands.append((r0, r1))
+                placed = True
+                break
+            if not placed:
+                break
+        return bands
+
+    def _time_extent(self) -> tuple[int, int]:
+        T = self.T
+        if random.random() < self.full_time_prob:
+            return 0, T
+        frac = random.uniform(self.min_time_frac, self.max_time_frac)
+        t_len = max(1, int(T * frac))
+        t0 = random.randint(0, max(0, T - t_len))
+        return t0, t0 + t_len
 
     def _single_mask_numpy(self) -> np.ndarray:
-        n_mels, T = self.n_mels, self.T
+        n_mels, T, stride = self.n_mels, self.T, self.stride
         M = np.zeros((n_mels, T), dtype=np.float32)
-        bw = max(1, int(n_mels * random.uniform(self.min_band_fraction, self.max_band_fraction)))
-        f_low = random.randint(0, max(0, n_mels - bw))
-        f_high = min(n_mels, f_low + bw)
-        n_seg = random.randint(self.min_segments, self.max_segments)
-        seg_lo = max(4, T // 40)
-        seg_hi = max(seg_lo, T // 6)
-        for ts, te in _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi):
-            M[f_low:f_high, ts:te] = 1.0
+
+        if random.random() < self.diffuse_prob:
+            cov = random.uniform(self.diffuse_min_cov, self.diffuse_max_cov)
+            n_rows = max(1, int(self.n_latent_rows * cov))
+            rows = random.sample(range(self.n_latent_rows), min(n_rows, self.n_latent_rows))
+            t0, t1 = self._time_extent()
+            for r in rows:
+                mel_lo = r * stride
+                mel_hi = min(n_mels, mel_lo + stride)
+                M[mel_lo:mel_hi, t0:t1] = 1.0
+            return M
+
+        n_bands = random.randint(self.min_bands, self.max_bands)
+        bands = self._place_bands(n_bands)
+        for r0, r1 in bands:
+            mel_lo = r0 * stride
+            mel_hi = min(n_mels, r1 * stride)
+            t0, t1 = self._time_extent()
+            M[mel_lo:mel_hi, t0:t1] = 1.0
         return M
 
     def __call__(self, batch_size: int, device: torch.device | str) -> torch.Tensor:
@@ -282,6 +362,9 @@ class AudioSpecificStrategy:
         if self.q_shape != self.spectrogram_shape:
             M = F.interpolate(M, size=self.q_shape, mode="nearest")
         return M
+
+
+AudioSpecificStrategy = LatentAlignedBandStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -329,10 +412,10 @@ class AnomalyMapGenerator:
     strategy options:
         "perlin"           – Perlin noise only
         "mix"              – smoothed field + burst mix, quantile threshold
-        "audio_specific"   – generic audio-specific only
+        "audio_specific"   – latent-aligned horizontal bands
         "machine_specific" – per-machine-type strategy (falls back to audio_specific)
-        "both"             – 20% Perlin, 80% audio_specific (original default)
-        "machine_both"     – 20% Perlin, 80% machine_specific (new recommended)
+        "both"             – 20% Perlin, 80% latent-aligned bands (recommended)
+        "machine_both"     – 20% Perlin, 80% machine_specific
 
     When force_anomaly=False, each sample independently receives a zero mask
     with probability zero_mask_prob.

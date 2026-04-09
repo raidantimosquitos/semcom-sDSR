@@ -86,6 +86,9 @@ class AnomalyGeneration(nn.Module):
         if M_coarse.shape[2] != H_coarse or M_coarse.shape[3] != W_coarse:
             M_coarse = _match_mask_size(M_coarse, (H_coarse, W_coarse))
 
+        M_fine = (M_fine > 0).float()
+        M_coarse = (M_coarse > 0).float()
+
         if self.sampling == "uniform":
             q_coarse_a = generate_fake_anomalies_uniform(q_coarse, cb_coarse, M_coarse)
             q_fine_a = generate_fake_anomalies_uniform(q_fine, cb_fine, M_fine)

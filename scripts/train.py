@@ -21,6 +21,7 @@ from torch.utils.data import Subset
 
 from src.data.dataset import (
     DCASE2020Task2LogMelDataset,
+    DCASE2020Task2TestDataset,
     AudDSRAnomTrainDataset,
 )
 from src.engine.stage1 import Stage1Trainer
@@ -97,6 +98,7 @@ def parse_args() -> argparse.Namespace:
         help="Synthetic anomaly mask: perlin; mix (smoothed field + bursts + quantile); audio_specific; machine_specific; both (20%% Perlin vs 80%% audio_specific); machine_both (20%% Perlin vs 80%% machine_specific)",
     )
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
+    s2.add_argument("--val_every", type=int, default=1000, help="Run validation every N iterations (0 to disable)")
     s2.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
     # Full
@@ -272,6 +274,23 @@ def run_stage2(args: argparse.Namespace) -> None:
         embedding_dim=(embedding_dim_coarse, embedding_dim_fine),
         anomaly_sampling=args.anomaly_sampling,
     )
+
+    val_dataset = None
+    val_every = getattr(args, "val_every", 0)
+    if val_every > 0:
+        if len(machine_types) == 1:
+            val_dataset = DCASE2020Task2TestDataset(
+                root=args.data_path,
+                machine_type=machine_types[0],
+                target_T=q_vae_dataset.target_T,
+            )
+        else:
+            val_dataset = DCASE2020Task2TestDataset(
+                root=args.data_path,
+                machine_types=machine_types,
+                target_T=q_vae_dataset.target_T,
+            )
+
     trainer = Stage2Trainer(
         model=model,
         dataset=train_dataset,
@@ -287,6 +306,8 @@ def run_stage2(args: argparse.Namespace) -> None:
         ckpt_dir=args.ckpt_dir,
         use_amp=not args.no_amp,
         device=args.device,
+        val_dataset=val_dataset,
+        val_every=val_every,
     )
     trainer.train(n_iterations=args.n_iter, resume_from=args.resume)
 

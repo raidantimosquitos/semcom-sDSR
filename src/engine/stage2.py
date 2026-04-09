@@ -53,6 +53,9 @@ class Stage2Trainer(BaseTrainer):
         use_amp: bool = True,
         device: str = "cuda",
         total_steps: int = 20000,
+        val_dataset: Any | None = None,
+        val_every: int = 1000,
+        val_batch_size: int = 32,
     ) -> None:
         self.machine_type = machine_type
         self.lambda_recon = lambda_recon
@@ -92,6 +95,11 @@ class Stage2Trainer(BaseTrainer):
 
         self.best_total_loss = float("inf")
         self._last_ckpt_path: Path | None = None
+
+        self._val_dataset = val_dataset
+        self._val_every = val_every
+        self._val_batch_size = val_batch_size
+        self.best_val_pauc: float = 0.0
 
         n_params = sum(p.numel() for p in trainable)
         self._tee(f"Stage2 | Device: {self.device} | AMP: {self.use_amp} | Trainable params: {n_params:,}")
@@ -268,3 +276,61 @@ class Stage2Trainer(BaseTrainer):
         if "best_total_loss" in ckpt:
             self.best_total_loss = ckpt["best_total_loss"]
         self._tee(f"Resumed from {path} at step {self.global_step}")
+
+    # ------------------------------------------------------------------
+    # Validation hook: evaluate on real test set and track best pAUC
+    # ------------------------------------------------------------------
+
+    def _post_checkpoint_hook(self) -> None:
+        if self._val_dataset is None:
+            return
+        if self.global_step % self._val_every != 0:
+            return
+        self._run_validation()
+
+    def _run_validation(self) -> None:
+        from .evaluator import AnomalyEvaluator
+
+        self.model.eval()
+        evaluator = AnomalyEvaluator(
+            model=self.model,
+            test_dataset=self._val_dataset,
+            device=str(self.device),
+            batch_size=self._val_batch_size,
+            train_score_stats=None,
+        )
+        results = evaluator.evaluate()
+
+        for run_name, ids in results.items():
+            self._tee(f"  [val@{self.global_step}] {run_name}:")
+            for k, v in ids.items():
+                if isinstance(v, dict):
+                    self._tee(f"    {k}: AUC={v['auc']:.4f} pAUC={v['pauc']:.4f}")
+
+        avg = None
+        for run_name, ids in results.items():
+            if "average" in ids:
+                avg = ids["average"]
+                break
+
+        if avg is not None:
+            mean_pauc = avg["pauc"]
+            mean_auc = avg["auc"]
+            self._tee(
+                f"  [val@{self.global_step}] average AUC={mean_auc:.4f} pAUC={mean_pauc:.4f} "
+                f"(best pAUC={self.best_val_pauc:.4f})"
+            )
+            if mean_pauc > self.best_val_pauc:
+                self.best_val_pauc = mean_pauc
+                payload = {
+                    "global_step": self.global_step,
+                    "model_state_dict": self.model.state_dict(),
+                    "optim_state_dict": self.optimizer.state_dict(),
+                    "scaler_state_dict": self.scaler.state_dict(),
+                    "best_val_pauc": self.best_val_pauc,
+                }
+                best_path = self.ckpt_dir / f"stage2_{self.machine_type}_best_pauc.pt"
+                torch.save(payload, best_path)
+                self._tee(f"  New best val pAUC model saved: {best_path} (pAUC={mean_pauc:.4f})")
+
+        self.model.train()

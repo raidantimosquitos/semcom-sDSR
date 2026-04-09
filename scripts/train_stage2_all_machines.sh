@@ -27,10 +27,10 @@ if [[ -n "${STAGE1_CKPT:-}" ]]; then
 fi
 
 # All 6 DCASE2020 Task 2 machine types for stage2
-MACHINE_TYPES=(fan pump slider valve ToyCar ToyConveyor)
+MACHINE_TYPES=(fan slider valve)
 
 # Anomaly mask strategies to train stage2 with
-ANOMALY_STRATEGIES=(mix)
+ANOMALY_STRATEGIES=(both)
 
 # Optional: space-separated machine_ids (e.g. "id_00 id_01 id_02"). When set, train/eval per (machine_type, machine_id)
 # with other machine_ids of same type used as adversarial samples (mask all 1s). When unset, one run per machine_type (all IDs).
@@ -69,7 +69,8 @@ for machine_type in "${MACHINE_TYPES[@]}"; do
       --n_iter "$N_ITER" \
       --batch_size "$BATCH_SIZE" \
       --anomaly_sampling "distant" \
-      --anomaly_strategy "$anomaly_strategy"
+      --anomaly_strategy "$anomaly_strategy" \
+      --val_every 500
 
     # Stage2Trainer saves checkpoints under:
     #   ${ckpt_dir}/stage2/${machine_type}/stage2_${machine_type}_best.pt

@@ -1,14 +1,24 @@
 """
 Generic anomaly generation: replace masked feature vectors with codebook samples.
 
-sDSR-style distant sampling (sample from top-k most distant codebook entries).
-Model-agnostic: accepts (z, embeddings, codebook, mask, strength).
+Two sampling regimes (selected per-sample):
+  * **Distant** (default): skip closest 5 % of codebook, sample from top-k nearest
+    controlled by ``strength`` — produces clearly out-of-distribution replacements.
+  * **Neighbor**: sample from ranks 2–``neighbor_k`` closest codebook entries
+    (skip only the identity match) — produces subtle, near-in-distribution
+    replacements that mimic the faint spectral shifts seen in real DCASE anomalies.
+
+``neighbor_prob`` controls the per-sample probability of choosing neighbor mode.
 """
 
 from __future__ import annotations
 
+import random as _py_random
+
 import torch
 import torch.nn.functional as F
+
+_NEIGHBOR_K_DEFAULT = 20
 
 
 def generate_fake_anomalies_distant(
@@ -17,20 +27,25 @@ def generate_fake_anomalies_distant(
     codebook: torch.Tensor,
     mask: torch.Tensor,
     strength: torch.Tensor | float,
+    neighbor_prob: float = 0.4,
+    neighbor_k: int = _NEIGHBOR_K_DEFAULT,
 ) -> torch.Tensor:
     """
-    Replace feature vectors in mask regions with distant codebook samples.
+    Replace feature vectors in mask regions with codebook samples.
 
-    sDSR-style: compute distances to codebook, take top-k nearest (smallest dist),
-    skip closest 5%, sample from remaining; higher strength = more distant.
+    For each sample in the batch, with probability ``neighbor_prob`` the
+    *neighbor* regime is used (ranks 2..``neighbor_k``); otherwise the
+    original *distant* regime is used (skip closest 5 %, sample up to
+    ``strength`` fraction of codebook).
 
     Args:
         z: (B, emb_dim, H, W) continuous features for distance computation
         embeddings: (B, emb_dim, H, W) quantized features to augment
         codebook: (num_embeddings, emb_dim) VQ codebook weights
         mask: (B, 1, H, W) anomaly mask, positive = replace
-        strength: (B,) or scalar; fraction [anom_par, 1.0] controlling how
-                  distant the replacement is (higher = more distant)
+        strength: (B,) or scalar; fraction controlling distant-mode range
+        neighbor_prob: probability of using neighbor mode per sample
+        neighbor_k: number of nearest entries to consider in neighbor mode
 
     Returns:
         Augmented embeddings (B, emb_dim, H, W)
@@ -47,26 +62,36 @@ def generate_fake_anomalies_distant(
 
     random_embeddings = torch.empty_like(embeddings, device=device)
     inputs = z.permute(0, 2, 3, 1).contiguous()
+    cb = codebook.to(device)
 
     for k in range(B):
         flat_input = inputs[k].view(-1, C)
         distances = (
             flat_input.pow(2).sum(dim=1, keepdim=True)
-            + codebook.to(device).pow(2).sum(dim=1)
-            - 2 * flat_input @ codebook.to(device).t()
+            + cb.pow(2).sum(dim=1)
+            - 2 * flat_input @ cb.t()
         )
-        pct = strength[k].item()
-        topk = max(1, min(int(pct * N) + 1, N - 1))
-        _, topk_indices = torch.topk(distances, topk, dim=1, largest=False) # Smallest distance
-        skip = int(N * 0.05)
-        topk_indices = topk_indices[:, skip:]
+
+        use_neighbor = _py_random.random() < neighbor_prob
+
+        if use_neighbor:
+            nk = min(max(2, neighbor_k), N)
+            _, topk_indices = torch.topk(distances, nk, dim=1, largest=False)
+            topk_indices = topk_indices[:, 1:]  # skip rank-0 (identity)
+        else:
+            pct = strength[k].item()
+            topk = max(1, min(int(pct * N) + 1, N - 1))
+            _, topk_indices = torch.topk(distances, topk, dim=1, largest=False)
+            skip = int(N * 0.05)
+            topk_indices = topk_indices[:, skip:]
+
         topk_n = topk_indices.shape[1]
         if topk_n < 1:
             topk_indices = topk_indices[:, -1:]
             topk_n = 1
         rand_col = torch.randint(topk_n, (topk_indices.shape[0],), device=device)
         chosen = topk_indices[torch.arange(topk_indices.shape[0], device=device), rand_col]
-        random_vecs = codebook.to(device)[chosen]
+        random_vecs = cb[chosen]
         random_embeddings[k] = random_vecs.view(H, W, C).permute(2, 0, 1)
 
     mask_exp = mask.expand_as(embeddings)

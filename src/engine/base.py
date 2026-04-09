@@ -131,6 +131,7 @@ class BaseTrainer(ABC):
 
                 if self.global_step % self.ckpt_every == 0:
                     self._save_checkpoint(tag=None, avg=self._last_avg)
+                    self._post_checkpoint_hook()
 
             self._save_checkpoint(tag="final", avg=self._last_avg)
         finally:
@@ -140,6 +141,10 @@ class BaseTrainer(ABC):
         """Override in subclass for custom logging. Default: print keys and values."""
         parts = "  ".join(f"{k}={v:.4f}" for k, v in avg.items())
         print(f"[{self.global_step:>6d}] {parts}  ({its_sec:.1f} it/s)")
+
+    def _post_checkpoint_hook(self) -> None:
+        """Called after each checkpoint save. Override in subclass for validation, etc."""
+        pass
 
     @abstractmethod
     def _save_checkpoint(self, tag: str | None = None, avg: dict[str, float] | None = None) -> None:

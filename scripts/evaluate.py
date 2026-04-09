@@ -92,9 +92,9 @@ def _compute_train_score_stats(
             x, _labels, machine_ids = batch
             x = x.to(device)
             m_out = model(x)
-            logits = m_out[:, 1]
-            flat = logits.view(m_out.shape[0], -1)
-            sc_mean = flat.mean(dim=1).cpu()
+            probs = torch.softmax(m_out, dim=1)
+            anomaly_prob = probs[:, 1]
+            sc_mean = anomaly_prob.view(m_out.shape[0], -1).mean(dim=1).cpu()
             for i in range(x.shape[0]):
                 mid = machine_ids[i] if isinstance(machine_ids[i], str) else str(machine_ids[i])
                 s = sc_mean[i].item()
