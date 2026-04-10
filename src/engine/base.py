@@ -133,7 +133,7 @@ class BaseTrainer(ABC):
                     self._save_checkpoint(tag=None, avg=self._last_avg)
                     self._post_checkpoint_hook()
 
-            self._save_checkpoint(tag="final", avg=self._last_avg)
+            self._on_training_end()
         finally:
             self._log_file.close()
 
@@ -145,6 +145,10 @@ class BaseTrainer(ABC):
     def _post_checkpoint_hook(self) -> None:
         """Called after each checkpoint save. Override in subclass for validation, etc."""
         pass
+
+    def _on_training_end(self) -> None:
+        """Called at the end of training. Default: save a final checkpoint."""
+        self._save_checkpoint(tag="final", avg=self._last_avg)
 
     @abstractmethod
     def _save_checkpoint(self, tag: str | None = None, avg: dict[str, float] | None = None) -> None:

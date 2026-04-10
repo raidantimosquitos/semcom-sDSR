@@ -100,6 +100,8 @@ class Stage2Trainer(BaseTrainer):
         self._val_every = val_every
         self._val_batch_size = val_batch_size
         self.best_val_pauc: float = 0.0
+        self.best_val_auc: float = 0.0
+        self.best_val_avg: float = 0.0
 
         n_params = sum(p.numel() for p in trainable)
         self._tee(f"Stage2 | Device: {self.device} | AMP: {self.use_amp} | Trainable params: {n_params:,}")
@@ -277,8 +279,12 @@ class Stage2Trainer(BaseTrainer):
             self.best_total_loss = ckpt["best_total_loss"]
         self._tee(f"Resumed from {path} at step {self.global_step}")
 
+    def _on_training_end(self) -> None:
+        """Skip final checkpoint; validation-selected models are preferred."""
+        pass
+
     # ------------------------------------------------------------------
-    # Validation hook: evaluate on real test set and track best pAUC
+    # Validation hook: evaluate on real test set and save best models
     # ------------------------------------------------------------------
 
     def _post_checkpoint_hook(self) -> None:
@@ -314,23 +320,34 @@ class Stage2Trainer(BaseTrainer):
                 break
 
         if avg is not None:
-            mean_pauc = avg["pauc"]
             mean_auc = avg["auc"]
+            mean_pauc = avg["pauc"]
+            mean_avg = 0.5 * (mean_auc + mean_pauc)
             self._tee(
                 f"  [val@{self.global_step}] average AUC={mean_auc:.4f} pAUC={mean_pauc:.4f} "
-                f"(best pAUC={self.best_val_pauc:.4f})"
+                f"avg={mean_avg:.4f}  (best: AUC={self.best_val_auc:.4f} "
+                f"pAUC={self.best_val_pauc:.4f} avg={self.best_val_avg:.4f})"
             )
-            if mean_pauc > self.best_val_pauc:
-                self.best_val_pauc = mean_pauc
-                payload = {
-                    "global_step": self.global_step,
-                    "model_state_dict": self.model.state_dict(),
-                    "optim_state_dict": self.optimizer.state_dict(),
-                    "scaler_state_dict": self.scaler.state_dict(),
-                    "best_val_pauc": self.best_val_pauc,
-                }
-                best_path = self.ckpt_dir / f"stage2_{self.machine_type}_best_pauc.pt"
-                torch.save(payload, best_path)
-                self._tee(f"  New best val pAUC model saved: {best_path} (pAUC={mean_pauc:.4f})")
+            self._save_val_best(mean_pauc, "best_val_pauc", "best_pauc", "pAUC")
+            self._save_val_best(mean_auc, "best_val_auc", "best_auc", "AUC")
+            self._save_val_best(mean_avg, "best_val_avg", "best_avg", "avg(AUC,pAUC)")
 
         self.model.train()
+
+    def _save_val_best(
+        self, value: float, attr: str, suffix: str, label: str,
+    ) -> None:
+        prev = getattr(self, attr)
+        if value <= prev:
+            return
+        setattr(self, attr, value)
+        payload = {
+            "global_step": self.global_step,
+            "model_state_dict": self.model.state_dict(),
+            "optim_state_dict": self.optimizer.state_dict(),
+            "scaler_state_dict": self.scaler.state_dict(),
+            f"{attr}": value,
+        }
+        path = self.ckpt_dir / f"stage2_{self.machine_type}_{suffix}.pt"
+        torch.save(payload, path)
+        self._tee(f"  New best val {label} model saved: {path} ({label}={value:.4f})")
