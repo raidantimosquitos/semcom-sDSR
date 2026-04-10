@@ -496,16 +496,16 @@ class AnomalyMapGenerator:
             return strat(1, device)  # type: ignore[operator]
 
         if name == "both":
-            # 20% Perlin, 80% audio_specific
-            if random.random() < 0.20:
+            # 40% Perlin, 60% audio_specific
+            if random.random() < 0.40:
                 assert self.perlin is not None
                 return self.perlin(1, device)
             assert self.audio_specific is not None
             return self.audio_specific(1, device)
 
         if name == "machine_both":
-            # 20% Perlin, 80% machine-specific
-            if random.random() < 0.20:
+            # 40% Perlin, 60% machine-specific
+            if random.random() < 0.40:
                 assert self.perlin is not None
                 return self.perlin(1, device)
             strat = self._get_machine_or_fallback()
