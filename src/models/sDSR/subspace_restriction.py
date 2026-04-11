@@ -20,31 +20,31 @@ class FeatureEncoder(nn.Module):
 
     def __init__(self, in_channels: int, base_width: int) -> None:
         super().__init__()
-        norm = nn.InstanceNorm2d
+        norm = nn.GroupNorm
         self.block1 = nn.Sequential(
             nn.Conv2d(in_channels, base_width, kernel_size=3, padding=1),
-            norm(base_width),
+            norm(8, base_width),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
-            norm(base_width),
+            norm(8, base_width),
             nn.ReLU(inplace=True),
         )
         self.mp1 = nn.MaxPool2d(2)
         self.block2 = nn.Sequential(
             nn.Conv2d(base_width, base_width * 2, kernel_size=3, padding=1),
-            norm(base_width * 2),
+            norm(8, base_width * 2),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
-            norm(base_width * 2),
+            norm(8, base_width * 2),
             nn.ReLU(inplace=True),
         )
         self.mp2 = nn.MaxPool2d(2)
         self.block3 = nn.Sequential(
             nn.Conv2d(base_width * 2, base_width * 4, kernel_size=3, padding=1),
-            norm(base_width * 4),
+            norm(8, base_width * 4),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
-            norm(base_width * 4),
+            norm(8, base_width * 4),
             nn.ReLU(inplace=True),
         )
 
@@ -62,36 +62,39 @@ class FeatureDecoder(nn.Module):
 
     def __init__(self, base_width: int, out_channels: int) -> None:
         super().__init__()
-        norm = nn.InstanceNorm2d
+        norm = nn.GroupNorm
         self.up2 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, padding=1),
-            norm(base_width * 2),
+            norm(8, base_width * 2),
             nn.ReLU(inplace=True),
         )
         self.db2 = nn.Sequential(
-            nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
-            norm(base_width * 2),
+            nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, padding=1),
+            norm(8, base_width * 2),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
-            norm(base_width * 2),
+            norm(8, base_width * 2),
             nn.ReLU(inplace=True),
         )
         self.up3 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(base_width * 2, base_width, kernel_size=3, padding=1),
-            norm(base_width),
+            norm(8, base_width),
             nn.ReLU(inplace=True),
         )
         self.db3 = nn.Sequential(
-            nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
-            norm(base_width),
+            nn.Conv2d(base_width*2, base_width, kernel_size=3, padding=1),
+            norm(8, base_width),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
-            norm(base_width),
+            norm(8, base_width),
             nn.ReLU(inplace=True),
         )
         self.fin_out = nn.Conv2d(base_width, out_channels, kernel_size=3, padding=1)
+        nn.init.zeros_(self.fin_out.weight)
+        if self.fin_out.bias is not None:
+            nn.init.zeros_(self.fin_out.bias)
 
     def forward(
         self,
@@ -100,10 +103,10 @@ class FeatureDecoder(nn.Module):
         b3: torch.Tensor,
     ) -> torch.Tensor:
         up2 = self.up2(b3)
-        db2 = self.db2(up2)
+        db2 = self.db2(torch.cat([up2, b2], dim=1))
 
         up3 = self.up3(db2)
-        db3 = self.db3(up3)
+        db3 = self.db3(torch.cat([up3, b1], dim=1))
 
         out = self.fin_out(db3)
         return out
@@ -117,16 +120,34 @@ class SubspaceRestrictionNetwork(nn.Module):
 
     def __init__(
         self,
-        in_channels: int = 64,
-        out_channels: int = 64,
-        base_width: int = 32,
+        in_channels: int = 128,
+        out_channels: int = 128,
+        base_width: int = 64,
     ) -> None:
         super().__init__()
         self.encoder = FeatureEncoder(in_channels, base_width)
         self.decoder = FeatureDecoder(base_width, out_channels=out_channels)
+        bottleneck_dim = base_width * 4  # 256 with default base_width=64
+        self.bottleneck_attn = nn.MultiheadAttention(
+            embed_dim=bottleneck_dim,
+            num_heads=8,
+            batch_first=True,
+        )
+        # Learned 2D positional embedding for the 8×20 bottleneck grid
+        # H/4=8, W/4=20 → 160 tokens
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, 8 * 20, bottleneck_dim)
+        )
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b1, b2, b3 = self.encoder(x)
+        B, C, H, W = b3.shape
+        tokens = b3.flatten(2).permute(0, 2, 1)
+        tokens = tokens + self.pos_embed
+        tokens, _ = self.bottleneck_attn(tokens, tokens, tokens)
+        b3 = tokens.permute(0, 2, 1).reshape(B, C, H, W)
+
         return self.decoder(b1, b2, b3)
 
 
@@ -136,12 +157,12 @@ class SubspaceRestrictionModule(nn.Module):
     with the frozen VQ. Returns (F̃, quantized(F̃), vq_loss) for decoder and loss.
     """
 
-    def __init__(self, embedding_size: int = 64) -> None:
+    def __init__(self, embedding_size: int = 128) -> None:
         super().__init__()
         self._unet = SubspaceRestrictionNetwork(
             in_channels=embedding_size,
             out_channels=embedding_size,
-            base_width=embedding_size,
+            base_width=embedding_size//2,
         )
 
     def forward(
@@ -159,7 +180,7 @@ class SubspaceRestrictionModule(nn.Module):
             quantized: quantized(F̃) for feeding to Object Specific Decoder.
             loss_vq: VQ commitment loss (can be ignored in total loss).
         """
-        feat = self._unet(x)
+        feat = self._unet(x) + x
         loss_vq, quantized, _perp, _enc = quantization(feat)
         return feat, quantized, loss_vq
 
