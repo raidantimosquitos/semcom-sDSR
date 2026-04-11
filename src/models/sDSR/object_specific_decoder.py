@@ -118,73 +118,73 @@ class SpectrogramReconstructionNetwork(nn.Module):
     ) -> None:
         super().__init__()
         self._in_channels = in_channels 
-        norm_layer = nn.GroupNorm
+        norm_layer = nn.InstanceNorm2d
         half = max(1, hidden_channels // 2)
 
         # Encoder: strided convs (no MaxPool)
         self._block1 = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-            norm_layer(8, in_channels),
-            nn.SiLU(inplace=True),
+            norm_layer(in_channels),
+            nn.ReLU(inplace=True),
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-            norm_layer(8, in_channels),
-            nn.SiLU(inplace=True),
+            norm_layer(in_channels),
+            nn.ReLU(inplace=True),
         )
         # self._mp1 = nn.MaxPool2d(2)
         self._mp1 = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1),
-            norm_layer(8, in_channels),
-            nn.SiLU(inplace=True),
+            norm_layer(in_channels),
+            nn.ReLU(inplace=True),
         )
         self._block2 = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-            norm_layer(8, in_channels),
-            nn.SiLU(inplace=True),
+            norm_layer(in_channels),
+            nn.ReLU(inplace=True),
             nn.Conv2d(in_channels, in_channels*2, kernel_size=3, padding=1),
-            norm_layer(8, in_channels * 2),
-            nn.SiLU(inplace=True),
+            norm_layer(in_channels * 2),
+            nn.ReLU(inplace=True),
         )
         # self._mp2 = nn.MaxPool2d(2)
         self._mp2 = nn.Sequential(
             nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, stride=2, padding=1),
-            norm_layer(8, in_channels * 2),
-            nn.SiLU(inplace=True),
+            norm_layer(in_channels * 2),
+            nn.ReLU(inplace=True),
         )
 
         self._bottleneck_conv= nn.Sequential(
             nn.Conv2d(in_channels * 2, in_channels, kernel_size=3, padding=1),
-            norm_layer(8, in_channels),
-            nn.SiLU(inplace=True),
+            norm_layer(in_channels),
+            nn.ReLU(inplace=True),
         )
 
         # Decoder stage 1
         self._upblock1 =  nn.Sequential(
             nn.ConvTranspose2d(in_channels, in_channels, kernel_size=4, stride=2, padding=1),
-            nn.SiLU(inplace=True),
+            nn.ReLU(inplace=True),
         )
 
         # Decoder stage 2
         self._upblock2 = nn.Sequential(
             nn.ConvTranspose2d(in_channels, in_channels, kernel_size=4, stride=2, padding=1),
-            nn.SiLU(inplace=True),
+            nn.ReLU(inplace=True),
         )
 
         self._fuse1 = nn.Sequential(
             nn.Conv2d(in_channels * 3, in_channels, kernel_size=3, padding=1),
-            norm_layer(8, in_channels),
-            nn.SiLU(inplace=True),
+            norm_layer(in_channels),
+            nn.ReLU(inplace=True),
         )
 
         self._fuse2 = nn.Sequential(
             nn.Conv2d(in_channels * 2, in_channels, kernel_size=3, padding=1),
-            norm_layer(8, in_channels),
-            nn.SiLU(inplace=True),
+            norm_layer(in_channels),
+            nn.ReLU(inplace=True),
         )
 
         self._conv_1 = nn.Sequential(
             nn.Conv2d(in_channels, hidden_channels, kernel_size=3, stride=1, padding=1),
-            norm_layer(8, hidden_channels),
-            nn.SiLU(inplace=True),
+            norm_layer(hidden_channels),
+            nn.ReLU(inplace=True),
         )
 
         # Final residual head and upsample to spectrogram resolution

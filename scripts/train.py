@@ -95,7 +95,7 @@ def parse_args() -> argparse.Namespace:
             "both",
             "machine_both",
         ],
-        help="Synthetic anomaly mask: perlin; mix (smoothed field + bursts + quantile); audio_specific; machine_specific; both (40%% Perlin vs 60%% audio_specific); machine_both (40%% Perlin vs 60%% machine_specific)",
+        help="Synthetic anomaly mask: perlin; mix (smoothed field + bursts + quantile); audio_specific; machine_specific; both (20%% Perlin vs 80%% audio_specific); machine_both (20%% Perlin vs 80%% machine_specific)",
     )
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
     s2.add_argument("--val_every", type=int, default=1000, help="Run validation every N iterations (0 to disable)")

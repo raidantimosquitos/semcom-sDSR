@@ -20,42 +20,42 @@ class FeatureEncoder(nn.Module):
 
     def __init__(self, in_channels: int, base_width: int) -> None:
         super().__init__()
-        norm = nn.GroupNorm
+        norm = nn.InstanceNorm2d
         self.block1 = nn.Sequential(
             nn.Conv2d(in_channels, base_width, kernel_size=3, padding=1),
-            norm(8, base_width),
-            nn.SiLU(inplace=True),
+            norm(base_width),
+            nn.ReLU(inplace=True),
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
-            norm(8, base_width),
-            nn.SiLU(inplace=True),
+            norm(base_width),
+            nn.ReLU(inplace=True),
         )
         # self.mp1 = nn.MaxPool2d(2)
         self.mp1 = nn.Sequential(
             nn.Conv2d(base_width, base_width, kernel_size=3, stride=2, padding=1),
-            norm(8, base_width),
-            nn.SiLU(inplace=True),
+            norm(base_width),
+            nn.ReLU(inplace=True),
         )
         self.block2 = nn.Sequential(
             nn.Conv2d(base_width, base_width * 2, kernel_size=3, padding=1),
-            norm(8, base_width * 2),
-            nn.SiLU(inplace=True),
+            norm(base_width * 2),
+            nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
-            norm(8, base_width * 2),
-            nn.SiLU(inplace=True),
+            norm(base_width * 2),
+            nn.ReLU(inplace=True),
         )
         # self.mp2 = nn.MaxPool2d(2)
         self.mp2 = nn.Sequential(
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, stride=2, padding=1),
             norm(8, base_width * 2),
-            nn.SiLU(inplace=True),
+            nn.ReLU(inplace=True),
         )
         self.block3 = nn.Sequential(
             nn.Conv2d(base_width * 2, base_width * 4, kernel_size=3, padding=1),
             norm(8, base_width * 4),
-            nn.SiLU(inplace=True),
+            nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
             norm(8, base_width * 4),
-            nn.SiLU(inplace=True),
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -72,34 +72,34 @@ class FeatureDecoder(nn.Module):
 
     def __init__(self, base_width: int, out_channels: int) -> None:
         super().__init__()
-        norm = nn.GroupNorm
+        norm = nn.InstanceNorm2d
         self.up2 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, padding=1),
-            norm(8, base_width * 2),
-            nn.SiLU(inplace=True),
+            norm(base_width * 2),
+            nn.ReLU(inplace=True),
         )
         self.db2 = nn.Sequential(
             nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, padding=1),
-            norm(8, base_width * 2),
-            nn.SiLU(inplace=True),
+            norm(base_width * 2),
+            nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
-            norm(8, base_width * 2),
-            nn.SiLU(inplace=True),
+            norm(base_width * 2),
+            nn.ReLU(inplace=True),
         )
         self.up3 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(base_width * 2, base_width, kernel_size=3, padding=1),
-            norm(8, base_width),
-            nn.SiLU(inplace=True),
+            norm(base_width),
+            nn.ReLU(inplace=True),
         )
         self.db3 = nn.Sequential(
             nn.Conv2d(base_width*2, base_width, kernel_size=3, padding=1),
-            norm(8, base_width),
-            nn.SiLU(inplace=True),
+            norm(base_width),
+            nn.ReLU(inplace=True),
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
-            norm(8, base_width),
-            nn.SiLU(inplace=True),
+            norm(base_width),
+            nn.ReLU(inplace=True),
         )
         self.fin_out = nn.Conv2d(base_width, out_channels, kernel_size=3, padding=1)
         nn.init.zeros_(self.fin_out.weight)
