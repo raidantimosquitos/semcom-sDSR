@@ -14,7 +14,7 @@ class AnomalyDetectionModule(nn.Module):
     """
     UNet: [X_specific, X_general] -> segmentation logits.
 
-    Input: (B, 1, n_mels, T) — concatenation of general and object-specific reconstructions
+    Input: (B, 2, n_mels, T) — concatenation of general and object-specific reconstructions
     Output: (B, 2, n_mels, T) — logits (normal vs anomaly)
     """
 
@@ -27,6 +27,16 @@ class AnomalyDetectionModule(nn.Module):
         super().__init__()
         self.unet_enc = _UnetEncoder(in_channels, base_width)
         self.unet_dec = _UnetDecoder(base_width, out_channels)
+        bottleneck_dim = base_width * 4  # 256 with default base_width=64
+        self.bottleneck_attn = nn.MultiheadAttention(
+            embed_dim=bottleneck_dim,
+            num_heads=8,
+            batch_first=True,
+        )
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, 16*40, bottleneck_dim)
+        )
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(
         self,
@@ -41,48 +51,65 @@ class AnomalyDetectionModule(nn.Module):
             logits: (B, 2, n_mels, T) segmentation logits [normal, anomaly]
         """
         x = torch.cat([x_specific, x_general], dim=1)
-        b1, b2, b3, b4 = self.unet_enc(x)
-        return self.unet_dec(b1, b2, b3, b4)
+        b1, b2, b3_skip, btn = self.unet_enc(x)
+        B, C, H, W = btn.shape
+        tokens = btn.flatten(2).permute(0, 2, 1)
+        tokens = tokens + self.pos_embed
+        tokens, _ = self.bottleneck_attn(tokens, tokens, tokens)
+        btn = tokens.permute(0, 2, 1).reshape(B, C, H, W)
+        return self.unet_dec(b1, b2, b3_skip, btn)
 
 class _UnetEncoder(nn.Module):
     def __init__(self, in_channels: int, base_width: int) -> None:
         super().__init__()
-        norm = nn.InstanceNorm2d
+        norm = nn.GroupNorm
         self.block1 = nn.Sequential(
             nn.Conv2d(in_channels, base_width, kernel_size=3, padding=1),
-            norm(base_width),
-            nn.ReLU(inplace=True),
+            norm(8, base_width),
+            nn.SiLU(inplace=True),
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
-            norm(base_width),
-            nn.ReLU(inplace=True),
+            norm(8, base_width),
+            nn.SiLU(inplace=True),
         )
-        self.mp1 = nn.MaxPool2d(2)
+        self.mp1 = nn.Sequential(
+            nn.Conv2d(base_width, base_width, kernel_size=3, stride=2, padding=1),
+            norm(8, base_width),
+            nn.SiLU(inplace=True),
+        )
         self.block2 = nn.Sequential(
             nn.Conv2d(base_width, base_width * 2, kernel_size=3, padding=1),
-            norm(base_width * 2),
-            nn.ReLU(inplace=True),
+            norm(8, base_width * 2),
+            nn.SiLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
-            norm(base_width * 2),
-            nn.ReLU(inplace=True),
+            norm(8, base_width * 2),
+            nn.SiLU(inplace=True),
         )
-        self.mp2 = nn.MaxPool2d(2)
+        self.mp2 = nn.Sequential(
+            nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, stride=2, padding=1),
+            norm(8, base_width * 2),
+            nn.SiLU(inplace=True),
+        )
         self.block3 = nn.Sequential(
             nn.Conv2d(base_width * 2, base_width * 4, kernel_size=3, padding=1),
-            norm(base_width * 4),
-            nn.ReLU(inplace=True),
+            norm(8, base_width * 4),
+            nn.SiLU(inplace=True),
             nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
-            norm(base_width * 4),
-            nn.ReLU(inplace=True),
+            norm(8, base_width * 4),
+            nn.SiLU(inplace=True),
         )
-        self.mp3 = nn.MaxPool2d(2)
-        self.block4 = nn.Sequential(
-            nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
-            norm(base_width * 4),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
-            norm(base_width * 4),
-            nn.ReLU(inplace=True),
+        self.mp3 = nn.Sequential(
+            nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, stride=2, padding=1),
+            norm(8, base_width * 4),
+            nn.SiLU(inplace=True),
         )
+        # self.block4 = nn.Sequential(
+        #     nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
+        #     norm(8, base_width * 4),
+        #     nn.SiLU(inplace=True),
+        #     nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
+        #     norm(8, base_width * 4),
+        #     nn.SiLU(inplace=True),
+        # )
 
     def forward(
         self, x: torch.Tensor
@@ -91,57 +118,56 @@ class _UnetEncoder(nn.Module):
         mp1 = self.mp1(b1)
         b2 = self.block2(mp1)
         mp2 = self.mp2(b2)
-        b3 = self.block3(mp2)
-        mp3 = self.mp3(b3)
-        b4 = self.block4(mp3)
-        return b1, b2, b3, b4
+        b3_skip = self.block3(mp2)
+        btn = self.mp3(b3_skip)
+        return b1, b2, b3_skip, btn
 
 
 class _UnetDecoder(nn.Module):
     def __init__(self, base_width: int, out_channels: int) -> None:
         super().__init__()
-        norm = nn.InstanceNorm2d
+        norm = nn.GroupNorm
         self.up1 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
-            norm(base_width * 4),
-            nn.ReLU(inplace=True),
+            norm(8, base_width * 4),
+            nn.SiLU(inplace=True),
         )
         self.db1 = nn.Sequential(
             nn.Conv2d(base_width * 8, base_width * 4, kernel_size=3, padding=1),
-            norm(base_width * 4),
-            nn.ReLU(inplace=True),
+            norm(8, base_width * 4),
+            nn.SiLU(inplace=True),
             nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
-            norm(base_width * 4),
-            nn.ReLU(inplace=True),
+            norm(8, base_width * 4),
+            nn.SiLU(inplace=True),
         )
         self.up2 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, padding=1),
-            norm(base_width * 2),
-            nn.ReLU(inplace=True),
+            norm(8, base_width * 2),
+            nn.SiLU(inplace=True),
         )
         self.db2 = nn.Sequential(
             nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, padding=1),
-            norm(base_width * 2),
-            nn.ReLU(inplace=True),
+            norm(8, base_width * 2),
+            nn.SiLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
-            norm(base_width * 2),
-            nn.ReLU(inplace=True),
+            norm(8, base_width * 2),
+            nn.SiLU(inplace=True),
         )
         self.up3 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(base_width * 2, base_width, kernel_size=3, padding=1),
-            norm(base_width),
-            nn.ReLU(inplace=True),
+            norm(8, base_width),
+            nn.SiLU(inplace=True),
         )
         self.db3 = nn.Sequential(
             nn.Conv2d(base_width * 2, base_width, kernel_size=3, padding=1),
-            norm(base_width),
-            nn.ReLU(inplace=True),
+            norm(8, base_width),
+            nn.SiLU(inplace=True),
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
-            norm(base_width),
-            nn.ReLU(inplace=True),
+            norm(8, base_width),
+            nn.SiLU(inplace=True),
         )
         self.fin_out = nn.Conv2d(base_width, out_channels, kernel_size=3, padding=1)
 
@@ -149,11 +175,11 @@ class _UnetDecoder(nn.Module):
         self,
         b1: torch.Tensor,
         b2: torch.Tensor,
-        b3: torch.Tensor,
-        b4: torch.Tensor,
+        b3_skip: torch.Tensor,
+        btn: torch.Tensor,
     ) -> torch.Tensor:
-        up1 = self.up1(b4)
-        cat1 = torch.cat([up1, b3], dim=1)
+        up1 = self.up1(btn)
+        cat1 = torch.cat([up1, b3_skip], dim=1)
         db1 = self.db1(cat1)
         up2 = self.up2(db1)
         cat2 = torch.cat([up2, b2], dim=1)
