@@ -107,7 +107,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
     symmetric 4x upsample to spectrogram resolution.
 
     Input: (B, 2 * embedding_dim, H_q, W_q) after concat; (H_q, W_q) = (n_mels/4, T/4) = (32, 80).
-    Output: (B, 3, n_mels, T)
+    Output: (B, 1, n_mels, T)
     """
 
     def __init__(
@@ -181,19 +181,23 @@ class SpectrogramReconstructionNetwork(nn.Module):
             nn.SiLU(inplace=True),
         )
 
-        self._conv_1 = nn.Conv2d(
-            in_channels, hidden_channels, kernel_size=3, stride=1, padding=1,
+        self._conv_1 = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, stride=1, padding=1),
+            norm_layer(8, hidden_channels),
+            nn.SiLU(inplace=True),
         )
 
         # Final residual head and upsample to spectrogram resolution
         self._residual_stack = ResidualStack(
             hidden_channels, hidden_channels, num_residual_layers, half
         )
-        self._conv_trans_1 = nn.ConvTranspose2d(
-            hidden_channels, hidden_channels, kernel_size=4, stride=2, padding=1,
+        self._conv_trans_1 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1),
         )
-        self._conv_trans_2 = nn.ConvTranspose2d(
-            hidden_channels, 1, kernel_size=4, stride=2, padding=1,
+        self._conv_trans_2 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Conv2d(hidden_channels, 1, kernel_size=3, padding=1),
         )
 
     def forward(
