@@ -14,7 +14,7 @@ export PYTHONPATH="$REPO_ROOT"
 DATA_PATH="${DATA_PATH:-./dataset/dcase2020_task2_dev_dataset}"
 CKPT_DIR="${CKPT_DIR:-./checkpoints}"
 GCS_CHECKPOINTS="${GCS_CHECKPOINTS:-gs://semcom-sdsr-training-data-1772509648/checkpoints_apr09_larger_model}"
-N_ITER=10000
+N_ITER=2500
 BATCH_SIZE=16
 
 # Single shared stage1 trained on all machine types (same run_name as experiment_grid.sh)
@@ -27,7 +27,7 @@ if [[ -n "${STAGE1_CKPT:-}" ]]; then
 fi
 
 # All 6 DCASE2020 Task 2 machine types for stage2
-MACHINE_TYPES=(fan slider valve ToyCar ToyConveyor pump)
+MACHINE_TYPES=(slider valve fan)
 
 # Anomaly mask strategies to train stage2 with
 ANOMALY_STRATEGIES=(both)
