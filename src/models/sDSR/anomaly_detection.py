@@ -87,14 +87,6 @@ class _UnetEncoder(nn.Module):
             norm(8, base_width * 4),
             nn.SiLU(inplace=True),
         )
-        # self.block4 = nn.Sequential(
-        #     nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
-        #     norm(8, base_width * 4),
-        #     nn.SiLU(inplace=True),
-        #     nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
-        #     norm(8, base_width * 4),
-        #     nn.SiLU(inplace=True),
-        # )
 
     def forward(
         self, x: torch.Tensor
