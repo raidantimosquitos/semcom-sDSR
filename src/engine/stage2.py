@@ -101,7 +101,8 @@ class Stage2Trainer(BaseTrainer):
         self._val_batch_size = val_batch_size
         self.best_val_pauc: float = 0.0
         self.best_val_auc: float = 0.0
-        self.best_val_avg: float = 0.0
+        # Previous best-val checkpoint path per metric (deleted when a new best is saved).
+        self._val_best_ckpt_paths: dict[str, Path] = {}
 
         n_params = sum(p.numel() for p in trainable)
         self._tee(f"Stage2 | Device: {self.device} | AMP: {self.use_amp} | Trainable params: {n_params:,}")
@@ -322,15 +323,12 @@ class Stage2Trainer(BaseTrainer):
         if avg is not None:
             mean_auc = avg["auc"]
             mean_pauc = avg["pauc"]
-            mean_avg = 0.5 * (mean_auc + mean_pauc)
             self._tee(
-                f"  [val@{self.global_step}] average AUC={mean_auc:.4f} pAUC={mean_pauc:.4f} "
-                f"avg={mean_avg:.4f}  (best: AUC={self.best_val_auc:.4f} "
-                f"pAUC={self.best_val_pauc:.4f} avg={self.best_val_avg:.4f})"
+                f"  [val@{self.global_step}] average AUC={mean_auc:.4f} pAUC={mean_pauc:.4f}  "
+                f"(best: AUC={self.best_val_auc:.4f} pAUC={self.best_val_pauc:.4f})"
             )
             self._save_val_best(mean_pauc, "best_val_pauc", "best_pauc", "pAUC")
             self._save_val_best(mean_auc, "best_val_auc", "best_auc", "AUC")
-            self._save_val_best(mean_avg, "best_val_avg", "best_avg", "avg(AUC,pAUC)")
 
         self.model.train()
 
@@ -348,6 +346,17 @@ class Stage2Trainer(BaseTrainer):
             "scaler_state_dict": self.scaler.state_dict(),
             f"{attr}": value,
         }
-        path = self.ckpt_dir / f"stage2_{self.machine_type}_{suffix}.pt"
+        old = self._val_best_ckpt_paths.get(suffix)
+        if old is not None and old.exists():
+            old.unlink()
+            self._tee(f"  Deleted previous val-{label} checkpoint: {old}")
+        path = (
+            self.ckpt_dir
+            / f"stage2_{self.machine_type}_{suffix}_iter_{self.global_step:07d}.pt"
+        )
         torch.save(payload, path)
-        self._tee(f"  New best val {label} model saved: {path} ({label}={value:.4f})")
+        self._val_best_ckpt_paths[suffix] = path
+        self._tee(
+            f"  New best val {label} model saved: {path} "
+            f"({label}={value:.4f}, iter={self.global_step})"
+        )

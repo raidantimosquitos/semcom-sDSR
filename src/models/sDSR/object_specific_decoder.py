@@ -118,40 +118,71 @@ class SpectrogramReconstructionNetwork(nn.Module):
     ) -> None:
         super().__init__()
         self._in_channels = in_channels 
-        norm_layer = nn.InstanceNorm2d
+        norm_layer = nn.GroupNorm
         half = max(1, hidden_channels // 2)
 
         # Encoder: strided convs (no MaxPool)
         self._block1 = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-            norm_layer(in_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels, in_channels * 2, kernel_size=3, padding=1),
-            norm_layer(in_channels * 2),
-            nn.ReLU(inplace=True),
+            norm_layer(8, in_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+            norm_layer(8, in_channels),
+            nn.SiLU(inplace=True),
         )
-        self._mp1 = nn.Sequential(nn.MaxPool2d(2))
+        # self._mp1 = nn.MaxPool2d(2)
+        self._mp1 = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1),
+            norm_layer(8, in_channels),
+            nn.SiLU(inplace=True),
+        )
         self._block2 = nn.Sequential(
-            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, padding=1),
-            norm_layer(in_channels * 2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels * 2, in_channels * 4, kernel_size=3, padding=1),
-            norm_layer(in_channels * 4),
-            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+            norm_layer(8, in_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(in_channels, in_channels*2, kernel_size=3, padding=1),
+            norm_layer(8, in_channels * 2),
+            nn.SiLU(inplace=True),
         )
-        self._mp2 = nn.Sequential(nn.MaxPool2d(2))
-        self._pre_vq_conv = nn.Conv2d(
-            in_channels * 4, half, kernel_size=3, padding=1
+        # self._mp2 = nn.MaxPool2d(2)
+        self._mp2 = nn.Sequential(
+            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, stride=2, padding=1),
+            norm_layer(8, in_channels * 2),
+            nn.SiLU(inplace=True),
+        )
+
+        self._bottleneck_conv= nn.Sequential(
+            nn.Conv2d(in_channels * 2, in_channels, kernel_size=3, padding=1),
+            norm_layer(8, in_channels),
+            nn.SiLU(inplace=True),
         )
 
         # Decoder stage 1
-        self._upblock1 =  nn.ConvTranspose2d(half, half, kernel_size=4, stride=2, padding=1)
+        self._upblock1 =  nn.Sequential(
+            nn.ConvTranspose2d(in_channels, in_channels, kernel_size=4, stride=2, padding=1),
+            nn.SiLU(inplace=True),
+        )
 
         # Decoder stage 2
-        self._upblock2 = nn.ConvTranspose2d(half, half, kernel_size=4, stride=2, padding=1)
+        self._upblock2 = nn.Sequential(
+            nn.ConvTranspose2d(in_channels, in_channels, kernel_size=4, stride=2, padding=1),
+            nn.SiLU(inplace=True),
+        )
+
+        self._fuse1 = nn.Sequential(
+            nn.Conv2d(in_channels * 3, in_channels, kernel_size=3, padding=1),
+            norm_layer(8, in_channels),
+            nn.SiLU(inplace=True),
+        )
+
+        self._fuse2 = nn.Sequential(
+            nn.Conv2d(in_channels * 2, in_channels, kernel_size=3, padding=1),
+            norm_layer(8, in_channels),
+            nn.SiLU(inplace=True),
+        )
 
         self._conv_1 = nn.Conv2d(
-            half, hidden_channels, kernel_size=3, stride=1, padding=1,
+            in_channels, hidden_channels, kernel_size=3, stride=1, padding=1,
         )
 
         # Final residual head and upsample to spectrogram resolution
@@ -174,22 +205,22 @@ class SpectrogramReconstructionNetwork(nn.Module):
             q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False
         )
         x = torch.cat([q_coarse_up, q_fine], dim=1)
-        x = self._block1(x)
-        x = self._mp1(x)
-        x = self._block2(x)
-        x = self._mp2(x)
-        x = self._pre_vq_conv(x)
+        skip_1 = self._block1(x)
+        x = self._mp1(skip_1)
+        skip_2 = self._block2(x)
+        x = self._mp2(skip_2)
+        x = self._bottleneck_conv(x)
 
         x = self._upblock1(x)
-        x = F.relu(x)
+        x = self._fuse1(torch.cat([x, skip_2], dim=1))
         x = self._upblock2(x)
-        x = F.relu(x)
+        x = self._fuse2(torch.cat([x, skip_1], dim=1))
         x = self._conv_1(x)
 
         x = self._residual_stack(x)
 
         x = self._conv_trans_1(x)
-        x = F.relu(x)
+        x = F.silu(x)
 
         return self._conv_trans_2(x)
 
