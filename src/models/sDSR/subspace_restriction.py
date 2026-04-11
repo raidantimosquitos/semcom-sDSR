@@ -137,37 +137,9 @@ class SubspaceRestrictionNetwork(nn.Module):
         super().__init__()
         self.encoder = FeatureEncoder(in_channels, base_width)
         self.decoder = FeatureDecoder(base_width, out_channels=out_channels)
-        bottleneck_dim = base_width * 4  # 256 with default base_width=64
-        self.bottleneck_attn = nn.MultiheadAttention(
-            embed_dim=bottleneck_dim,
-            num_heads=8,
-            batch_first=True,
-        )
-        # Learned 2D positional embedding for the 8×20 bottleneck grid
-        # H/4=8, W/4=20 → 160 tokens
-        self.pos_embed_fine = nn.Parameter(
-            torch.zeros(1, 8 * 20, bottleneck_dim)
-        )
-        self.pos_embed_coarse = nn.Parameter(
-            torch.zeros(1, 4 * 10, bottleneck_dim)
-        )
-        nn.init.trunc_normal_(self.pos_embed_fine, std=0.02)
-        nn.init.trunc_normal_(self.pos_embed_coarse, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b1, b2, b3 = self.encoder(x)
-        B, C, H, W = b3.shape
-        if H == 8 and W == 20:
-            pos_embed = self.pos_embed_fine
-        elif H == 4 and W == 10:
-            pos_embed = self.pos_embed_coarse
-        else:
-            raise ValueError(f"Invalid input shape: {H}x{W}")
-        tokens = b3.flatten(2).permute(0, 2, 1)
-        tokens = tokens + pos_embed
-        tokens, _ = self.bottleneck_attn(tokens, tokens, tokens)
-        b3 = tokens.permute(0, 2, 1).reshape(B, C, H, W)
-
         return self.decoder(b1, b2, b3)
 
 

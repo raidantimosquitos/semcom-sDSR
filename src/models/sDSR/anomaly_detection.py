@@ -27,16 +27,6 @@ class AnomalyDetectionModule(nn.Module):
         super().__init__()
         self.unet_enc = _UnetEncoder(in_channels, base_width)
         self.unet_dec = _UnetDecoder(base_width, out_channels)
-        bottleneck_dim = base_width * 4  # 256 with default base_width=64
-        self.bottleneck_attn = nn.MultiheadAttention(
-            embed_dim=bottleneck_dim,
-            num_heads=8,
-            batch_first=True,
-        )
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, 16*40, bottleneck_dim)
-        )
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(
         self,
@@ -52,11 +42,6 @@ class AnomalyDetectionModule(nn.Module):
         """
         x = torch.cat([x_specific, x_general], dim=1)
         b1, b2, b3_skip, btn = self.unet_enc(x)
-        B, C, H, W = btn.shape
-        tokens = btn.flatten(2).permute(0, 2, 1)
-        tokens = tokens + self.pos_embed
-        tokens, _ = self.bottleneck_attn(tokens, tokens, tokens)
-        btn = tokens.permute(0, 2, 1).reshape(B, C, H, W)
         return self.unet_dec(b1, b2, b3_skip, btn)
 
 class _UnetEncoder(nn.Module):
