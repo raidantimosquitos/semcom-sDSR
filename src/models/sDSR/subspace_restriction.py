@@ -135,16 +135,26 @@ class SubspaceRestrictionNetwork(nn.Module):
         )
         # Learned 2D positional embedding for the 8×20 bottleneck grid
         # H/4=8, W/4=20 → 160 tokens
-        self.pos_embed = nn.Parameter(
+        self.pos_embed_fine = nn.Parameter(
             torch.zeros(1, 8 * 20, bottleneck_dim)
         )
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        self.pos_embed_coarse = nn.Parameter(
+            torch.zeros(1, 4 * 10, bottleneck_dim)
+        )
+        nn.init.trunc_normal_(self.pos_embed_fine, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed_coarse, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b1, b2, b3 = self.encoder(x)
         B, C, H, W = b3.shape
+        if H == 8 and W == 20:
+            pos_embed = self.pos_embed_fine
+        elif H == 4 and W == 10:
+            pos_embed = self.pos_embed_coarse
+        else:
+            raise ValueError(f"Invalid input shape: {H}x{W}")
         tokens = b3.flatten(2).permute(0, 2, 1)
-        tokens = tokens + self.pos_embed
+        tokens = tokens + pos_embed
         tokens, _ = self.bottleneck_attn(tokens, tokens, tokens)
         b3 = tokens.permute(0, 2, 1).reshape(B, C, H, W)
 
