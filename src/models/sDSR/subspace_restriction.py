@@ -46,15 +46,15 @@ class FeatureEncoder(nn.Module):
         # self.mp2 = nn.MaxPool2d(2)
         self.mp2 = nn.Sequential(
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, stride=2, padding=1),
-            norm(8, base_width * 2),
+            norm(base_width * 2),
             nn.ReLU(inplace=True),
         )
         self.block3 = nn.Sequential(
             nn.Conv2d(base_width * 2, base_width * 4, kernel_size=3, padding=1),
-            norm(8, base_width * 4),
+            norm(base_width * 4),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
-            norm(8, base_width * 4),
+            norm(base_width * 4),
             nn.ReLU(inplace=True),
         )
 
