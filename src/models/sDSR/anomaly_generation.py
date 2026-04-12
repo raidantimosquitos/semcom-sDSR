@@ -55,6 +55,9 @@ class AnomalyGeneration(nn.Module):
         z_coarse: torch.Tensor | None = None,
         strength_fine: torch.Tensor | float = 0.5,
         strength_coarse: torch.Tensor | float = 0.5,
+        *,
+        augment_coarse: bool = True,
+        augment_fine: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Augment quantized features in mask regions.
@@ -66,6 +69,7 @@ class AnomalyGeneration(nn.Module):
             vq_fine, vq_coarse: VectorQuantizerEMA modules (for codebook access)
             z_fine, z_coarse: optional pre-quantize features (used only for "distant")
             strength_fine, strength_coarse: anomaly strength [0.2, 1.0] (used only for "distant")
+            augment_coarse, augment_fine: set False to skip that level (e.g. fine-only second pass).
 
         Returns:
             (q_fine_a, q_coarse_a): augmented quantized features
@@ -89,16 +93,23 @@ class AnomalyGeneration(nn.Module):
         M_fine = (M_fine > 0).float()
         M_coarse = (M_coarse > 0).float()
 
-        if self.sampling == "uniform":
+        if not augment_coarse:
+            q_coarse_a = q_coarse
+        elif self.sampling == "uniform":
             q_coarse_a = generate_fake_anomalies_uniform(q_coarse, cb_coarse, M_coarse)
+        else:
+            z_c = z_coarse if z_coarse is not None else q_coarse
+            q_coarse_a = generate_fake_anomalies_distant(
+                z_c, q_coarse, cb_coarse, M_coarse, strength_coarse
+            )
+
+        if not augment_fine:
+            q_fine_a = q_fine
+        elif self.sampling == "uniform":
             q_fine_a = generate_fake_anomalies_uniform(q_fine, cb_fine, M_fine)
         else:
-            z_fine = z_fine if z_fine is not None else q_fine
-            z_coarse = z_coarse if z_coarse is not None else q_coarse
-            q_coarse_a = generate_fake_anomalies_distant(
-                z_coarse, q_coarse, cb_coarse, M_coarse, strength_coarse
-            )
+            z_f = z_fine if z_fine is not None else q_fine
             q_fine_a = generate_fake_anomalies_distant(
-                z_fine, q_fine, cb_fine, M_fine, strength_fine
+                z_f, q_fine, cb_fine, M_fine, strength_fine
             )
         return q_fine_a, q_coarse_a

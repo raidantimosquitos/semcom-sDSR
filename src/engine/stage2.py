@@ -203,7 +203,7 @@ class Stage2Trainer(BaseTrainer):
                 loss_sub_coarse = F.mse_loss(
                     out["recon_feat_coarse"], out["q_coarse"].detach()
                 )
-                loss_sub = 0.5 * loss_sub_fine + 0.5 * loss_sub_coarse
+                loss_sub = loss_sub_fine + loss_sub_coarse
                 total_loss = total_loss + self.lambda_sub * loss_sub
                 sub_value = loss_sub.item()
             else:

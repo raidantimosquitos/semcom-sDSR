@@ -168,17 +168,17 @@ class VQ_VAE_2Layer(nn.Module):
             q_fine: (B, emb_dim, H_q, W_q) fine quantized features
             q_coarse: (B, emb_dim, H_q_coarse, W_q_coarse) coarse quantized features
         """
-        q_fine, q_coarse, _, _ = self.encode_with_prequant(x)
+        _, _, q_fine, q_coarse, _, _ = self.encode_with_prequant(x)
         return q_fine, q_coarse
 
     def encode_with_prequant(
         self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Encode with pre-quantize features (for AudDSR anomaly generation).
 
         Returns:
-            q_fine, q_coarse, z_fine, z_coarse (z_* are pre-quantize continuous features)
+            f_fine, f_coarse, quantized_fine, quantized_coarse, z_fine, z_coarse (z_* are pre-quantize continuous features)
         """
         f_fine = self._encoder_fine(x)
         f_coarse = self._encoder_coarse(f_fine)
@@ -188,7 +188,21 @@ class VQ_VAE_2Layer(nn.Module):
         feat_fine = torch.cat([f_fine, decoded_coarse], dim=1)
         z_fine = self._pre_vq_conv_fine(feat_fine)
         _, quantized_fine, _, _ = self._vq_fine(z_fine)
-        return quantized_fine, quantized_coarse, z_fine, z_coarse
+        return f_fine, f_coarse, quantized_fine, quantized_coarse, z_fine, z_coarse
+            
+    def recompute_fine_from_coarse(self, f_fine: torch.Tensor, q_coarse: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Recompute fine from coarse.
+
+        Args:
+            f_fine: (B, hidden_channels_fine, H_fine, W_fine)
+            q_coarse: (B, embedding_dim_coarse, H_coarse, W_coarse)
+        """
+        decoded_coarse = self._decoder_coarse(q_coarse)
+        feat_fine = torch.cat([f_fine, decoded_coarse], dim=1)
+        z_fine = self._pre_vq_conv_fine(feat_fine)
+        _, quantized_fine, _, _ = self._vq_fine(z_fine)
+        return quantized_fine, z_fine
 
     def encode_to_indices(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """

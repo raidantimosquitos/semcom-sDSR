@@ -172,7 +172,9 @@ class sDSR(nn.Module):
         Uses the dataset-provided anomaly map M_gt to augment q with synthetic
         anomalies (codebook replacement). For each sample with a non-zero mask,
         injection mode is sampled uniformly: fine latent only, coarse latent only,
-        or both. Normal samples (empty mask) use clean (q_fine, q_coarse).
+        or both. Coarse or both modes recompute fine latents from ``f_fine`` and
+        ``q_coarse_used`` so conditioning matches the hierarchy. Normal samples
+        (empty mask) use clean (q_fine, q_coarse).
 
         Args:
             x: (B, 3, n_mels, T) Mel spectrogram (normal)
@@ -192,7 +194,7 @@ class sDSR(nn.Module):
         batch_size = x.shape[0]
         device = x.device
 
-        q_fine, q_coarse, z_fine, z_coarse = self._vq_vae.encode_with_prequant(x)
+        f_fine, _, q_fine, q_coarse, z_fine, z_coarse = self._vq_vae.encode_with_prequant(x)
         vq_fine = self._vq_vae._vq_fine
         vq_coarse = self._vq_vae._vq_coarse
 
@@ -212,18 +214,37 @@ class sDSR(nn.Module):
         )
 
         has_anomaly = (M_gt.sum(dim=(1, 2, 3)) > 0).view(batch_size, 1, 1, 1).float()
-        # Per anomaly sample: 0 = inject at fine latent only, 1 = coarse only, 2 = both.
+        # Per anomaly sample: 0 = fine only, 1 = coarse only (recompute fine), 2 = both.
         inj_mode = torch.randint(0, 3, (batch_size,), device=device)
-        use_fine_a = has_anomaly * (
-            ((inj_mode == 0) | (inj_mode == 2)).float().view(batch_size, 1, 1, 1)
-        )
-        use_coarse_a = has_anomaly * (
-            ((inj_mode == 1) | (inj_mode == 2)).float().view(batch_size, 1, 1, 1)
-        )
-        q_fine_used = use_fine_a * q_fine_a + (1.0 - use_fine_a) * q_fine
+        is_fine_only = has_anomaly * (inj_mode == 0).float().view(batch_size, 1, 1, 1)
+        is_coarse_only = has_anomaly * (inj_mode == 1).float().view(batch_size, 1, 1, 1)
+        is_both = has_anomaly * (inj_mode == 2).float().view(batch_size, 1, 1, 1)
+
+        use_coarse_a = is_coarse_only + is_both
         q_coarse_used = use_coarse_a * q_coarse_a + (1.0 - use_coarse_a) * q_coarse
-        
+
         with torch.no_grad():
+            q_fine_recomp, z_fine_recomp = self._vq_vae.recompute_fine_from_coarse(
+                f_fine, q_coarse_used
+            )
+            q_fine_a2, _ = self._anomaly_generation(
+                q_fine_recomp,
+                q_coarse_used,
+                M_gt,
+                vq_fine,
+                vq_coarse,
+                z_fine=z_fine_recomp,
+                z_coarse=z_coarse,
+                strength_fine=strength_fine,
+                strength_coarse=strength_coarse,
+                augment_coarse=False,
+            )
+            q_fine_used = (
+                (1.0 - has_anomaly) * q_fine
+                + is_fine_only * q_fine_a
+                + is_coarse_only * q_fine_recomp
+                + is_both * q_fine_a2
+            )
             x_general = self._vq_vae.decode_general(q_fine_used, q_coarse_used)
 
         out_dec = self._object_decoder(
