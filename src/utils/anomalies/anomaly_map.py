@@ -257,6 +257,11 @@ class LatentAlignedBandStrategy:
     mel bins) so that masks downsample cleanly.
     """
 
+    # Geometric band-width weights: P(w=1)=0.50, P(w=2)=0.25, P(w=3)=0.15, P(w=4)=0.10
+    _BAND_WIDTH_WEIGHTS = (0.50, 0.25, 0.15, 0.10)
+    # Weighted band-count: P(n=1)=0.55, P(n=2)=0.30, P(n=3)=0.15
+    _BAND_COUNT_WEIGHTS = (0.55, 0.30, 0.15)
+
     def __init__(
         self,
         spectrogram_shape: tuple[int, int],
@@ -264,17 +269,13 @@ class LatentAlignedBandStrategy:
         n_mels: int | None = None,
         T: int | None = None,
         latent_h_stride: int = 4,
-        min_bands: int = 1,
-        max_bands: int = 4,
-        min_band_rows: int = 1,
-        max_band_rows: int = 8,
         min_band_sep_rows: int = 2,
         full_time_prob: float = 0.70,
         min_time_frac: float = 0.85,
         max_time_frac: float = 1.0,
-        diffuse_prob: float = 0.15,
-        diffuse_min_coverage: float = 0.50,
-        diffuse_max_coverage: float = 0.90,
+        diffuse_prob: float = 0.05,
+        diffuse_min_coverage: float = 0.30,
+        diffuse_max_coverage: float = 0.60,
     ) -> None:
         self.spectrogram_shape = spectrogram_shape
         self.q_shape = q_shape or spectrogram_shape
@@ -283,10 +284,6 @@ class LatentAlignedBandStrategy:
         self.stride = max(1, latent_h_stride)
         self.n_latent_rows = self.n_mels // self.stride
 
-        self.min_bands = max(1, min_bands)
-        self.max_bands = max(self.min_bands, max_bands)
-        self.min_band_rows = max(1, min_band_rows)
-        self.max_band_rows = max(self.min_band_rows, max_band_rows)
         self.min_band_sep_rows = max(0, min_band_sep_rows)
 
         self.full_time_prob = full_time_prob
@@ -297,14 +294,31 @@ class LatentAlignedBandStrategy:
         self.diffuse_min_cov = diffuse_min_coverage
         self.diffuse_max_cov = diffuse_max_coverage
 
+    @staticmethod
+    def _weighted_choice(weights: tuple[float, ...]) -> int:
+        """Return 1-based index sampled from *weights* (unnormalised ok)."""
+        r = random.random() * sum(weights)
+        cumul = 0.0
+        for i, w in enumerate(weights):
+            cumul += w
+            if r <= cumul:
+                return i + 1
+        return len(weights)
+
+    def _sample_band_width(self) -> int:
+        return self._weighted_choice(self._BAND_WIDTH_WEIGHTS)
+
+    def _sample_band_count(self) -> int:
+        return self._weighted_choice(self._BAND_COUNT_WEIGHTS)
+
     def _place_bands(self, n_bands: int) -> list[tuple[int, int]]:
         """Sample ``n_bands`` non-overlapping band intervals in latent rows."""
         total = self.n_latent_rows
         bands: list[tuple[int, int]] = []
         for _ in range(n_bands):
             placed = False
+            w = min(self._sample_band_width(), total)
             for _ in range(300):
-                w = random.randint(self.min_band_rows, min(self.max_band_rows, total))
                 r0 = random.randint(0, max(0, total - w))
                 r1 = r0 + w
                 too_close = any(
@@ -344,7 +358,7 @@ class LatentAlignedBandStrategy:
                 M[mel_lo:mel_hi, t0:t1] = 1.0
             return M
 
-        n_bands = random.randint(self.min_bands, self.max_bands)
+        n_bands = self._sample_band_count()
         bands = self._place_bands(n_bands)
         for r0, r1 in bands:
             mel_lo = r0 * stride
@@ -414,8 +428,8 @@ class AnomalyMapGenerator:
         "mix"              – smoothed field + burst mix, quantile threshold
         "audio_specific"   – latent-aligned horizontal bands
         "machine_specific" – per-machine-type strategy (falls back to audio_specific)
-        "both"             – 20% Perlin, 80% latent-aligned bands (recommended)
-        "machine_both"     – 20% Perlin, 80% machine_specific
+        "both"             – 5% Perlin, 95% latent-aligned bands (recommended)
+        "machine_both"     – 5% Perlin, 95% machine_specific
 
     When force_anomaly=False, each sample independently receives a zero mask
     with probability zero_mask_prob.
@@ -496,16 +510,16 @@ class AnomalyMapGenerator:
             return strat(1, device)  # type: ignore[operator]
 
         if name == "both":
-            # 20% Perlin, 80% audio_specific
-            if random.random() < 0.20:
+            # 5% Perlin, 95% audio_specific
+            if random.random() < 0.05:
                 assert self.perlin is not None
                 return self.perlin(1, device)
             assert self.audio_specific is not None
             return self.audio_specific(1, device)
 
         if name == "machine_both":
-            # 20% Perlin, 80% machine-specific
-            if random.random() < 0.20:
+            # 5% Perlin, 95% machine-specific
+            if random.random() < 0.05:
                 assert self.perlin is not None
                 return self.perlin(1, device)
             strat = self._get_machine_or_fallback()
