@@ -127,7 +127,7 @@ class sDSR(nn.Module):
             self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
-        m_out = self._anomaly_detection(x_specific, x_general.detach())
+        m_out = self._anomaly_detection(x_specific.detach(), x_general.detach())
         if return_intermediates:
             return m_out, x_general, x_specific
         return m_out
@@ -156,7 +156,7 @@ class sDSR(nn.Module):
             self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
-        m_out = self._anomaly_detection(x_specific, x_general.detach())
+        m_out = self._anomaly_detection(x_specific.detach(), x_general.detach())
         if return_intermediates:
             return m_out, x_general, x_specific
         return m_out
@@ -232,7 +232,7 @@ class sDSR(nn.Module):
             return_aux=True,
         )
         x_specific, aux = out_dec
-        m_out = self._anomaly_detection(x_specific, x_general.detach())
+        m_out = self._anomaly_detection(x_specific.detach(), x_general.detach())
 
         # GT mask for focal loss: M_gt at spectrogram shape (same as m_out spatial dims)
         result = {
