@@ -136,44 +136,7 @@ class Stage2Trainer(BaseTrainer):
             out = self.model.forward_train(x, M_gt=M_gt)
             m_out = out["m_out"]
             x_specific = out["x_specific"]
-            M = out["M"]
-
-            
-            if step % 100 == 0:
-                abs_diff = torch.abs(out["x_specific"] - out["x_general"].detach())
-
-                mask_pos = (M_gt > 0.5)                  # (B, 1, H, W) bool/float
-                has_pos_sample = (M_gt.sum(dim=(2,3)) > 0)
-
-                
-                pos_count = mask_pos.sum(dim=(2,3), keepdim=True).clamp(min=1)   # (B, 1, 1, 1)
-
-                abs_pos_sum = (abs_diff * mask_pos).sum(dim=(2,3), keepdim=True)     # (B, 1, 1, 1)
-                abs_neg_sum = (abs_diff * (~mask_pos)).sum(dim=(2,3), keepdim=True)
-
-                mean_abs_diff_pos_per_sample = abs_pos_sum / pos_count               # (B,1,1,1)
-                mean_abs_diff_neg_per_sample = abs_neg_sum / (~mask_pos).sum(dim=(2,3), keepdim=True).clamp(min=1)
-
-                anomaly_logit = m_out[:, 1:2, :, :]          # (B, 1, H, W)
-
-                anom_pos = (anomaly_logit * mask_pos).sum(dim=(2,3), keepdim=True) / pos_count
-                anom_neg = (anomaly_logit * (~mask_pos)).sum(dim=(2,3), keepdim=True) / (~mask_pos).sum(dim=(2,3), keepdim=True).clamp(min=1)
-
-                has_pos = has_pos_sample.squeeze(1)  # (B,)
-                # abs_diff: compare anomaly pixels vs non-anomaly pixels,
-                # but ONLY inside samples that have at least one anomaly pixel.
-                abs_pos_only = mean_abs_diff_pos_per_sample.squeeze()[has_pos].mean()
-                abs_neg_only = mean_abs_diff_neg_per_sample.squeeze()[has_pos].mean()
-                # (optional) baseline: non-anomaly pixels averaged over the anomaly-free samples
-                abs_neg_normal_only = mean_abs_diff_neg_per_sample.squeeze()[~has_pos].mean()
-                # anomaly head logits: same filtering
-                anom_pos_only = anom_pos.squeeze()[has_pos].mean()
-                anom_neg_only = anom_neg.squeeze()[has_pos].mean()
-                pos_rate = has_pos.float().mean()  # fraction of samples with any positive pixels
-                print(f"pos_rate={pos_rate:.3f} | abs_diff pos-only: {abs_pos_only:.4f} vs neg-only: {abs_neg_only:.4f}")
-                print(f"             anomaly_logit pos-only: {anom_pos_only:.4f} vs neg-only: {anom_neg_only:.4f}")
-
-                
+            M = out["M"]                
 
             # Reconstruction: L2(x, x_specific) on full batch (normal + anomalous).
             # For normal samples: object decoder learns x_specific ≈ x. For anomalous:

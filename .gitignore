@@ -10,6 +10,7 @@ checkpoints/
 
 # Jupyter Notebook checkpoints
 notebooks/.ipynb_checkpoints/
+.ipynb_checkpoints/
 
 # Python environments
 .micromamba/
