@@ -98,6 +98,13 @@ def parse_args() -> argparse.Namespace:
         help="Synthetic anomaly mask: perlin; mix (smoothed field + bursts + quantile); audio_specific; machine_specific; both (20%% Perlin vs 80%% audio_specific); machine_both (20%% Perlin vs 80%% machine_specific)",
     )
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
+    s2.add_argument(
+        "--anomaly_inj_distribution",
+        type=str,
+        default="uniform",
+        choices=["uniform", "dsr"],
+        help="Latent injection mix: uniform P=1/3 each mode; dsr P(both)=0.5 P(fine-only)=P(coarse-only)=0.25 (DSR-style)",
+    )
     s2.add_argument("--val_every", type=int, default=1000, help="Run validation every N iterations (0 to disable)")
     s2.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
 
@@ -114,6 +121,13 @@ def parse_args() -> argparse.Namespace:
     full.add_argument("--batch_size_s2", type=int, default=16, help="Stage 2 batch size")
     full.add_argument("--stage1_iter", type=int, default=20000)
     full.add_argument("--stage2_iter", type=int, default=10000)
+    full.add_argument(
+        "--anomaly_inj_distribution",
+        type=str,
+        default="uniform",
+        choices=["uniform", "dsr"],
+        help="Stage 2 latent injection mix (see stage2 --anomaly_inj_distribution)",
+    )
 
     return parser.parse_args()
 
@@ -145,6 +159,7 @@ def build_s_dsr(
     hidden_channels: Tuple[int, int],
     embedding_dim: Tuple[int, int],
     anomaly_sampling: Literal["distant", "uniform"] = "distant",
+    anomaly_inj_distribution: Literal["uniform", "dsr"] = "uniform",
 ) -> sDSR:
     cfg = sDSRConfig(
         embedding_dim=embedding_dim,
@@ -153,6 +168,7 @@ def build_s_dsr(
         n_mels=n_mels,
         T=T,
         anomaly_sampling=anomaly_sampling,
+        anomaly_inj_distribution=anomaly_inj_distribution,
     )
     return sDSR(vq_vae, cfg)
 
@@ -273,6 +289,7 @@ def run_stage2(args: argparse.Namespace) -> None:
         hidden_channels=(hidden_channels_coarse, hidden_channels_fine),
         embedding_dim=(embedding_dim_coarse, embedding_dim_fine),
         anomaly_sampling=args.anomaly_sampling,
+        anomaly_inj_distribution=args.anomaly_inj_distribution,
     )
 
     val_dataset = None
@@ -356,6 +373,7 @@ def run_full(args: argparse.Namespace) -> None:
         lambda_sub=1.0,
         anomaly_strategy="both",
         anomaly_sampling="distant",
+        anomaly_inj_distribution=args.anomaly_inj_distribution,
         machine_id=None,
         resume=None,
     )

@@ -68,7 +68,7 @@ for machine_type in "${MACHINE_TYPES[@]}"; do
       --stage1_ckpt "$STAGE1_BEST" \
       --n_iter "$N_ITER" \
       --batch_size "$BATCH_SIZE" \
-      --anomaly_sampling "uniform" \
+      --anomaly_sampling "distant" \
       --anomaly_strategy "$anomaly_strategy" \
       --val_every 500
 

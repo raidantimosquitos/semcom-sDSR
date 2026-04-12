@@ -34,6 +34,9 @@ class sDSRConfig:
     anomaly_strength_min: float = 0.2
     anomaly_strength_max: float = 1.0
     use_subspace_restriction: bool = True
+    # Stage-2 latent injection: "uniform" = P(fine-only)=P(coarse-only)=P(both)=1/3;
+    # "dsr" = P(both)=0.5, P(fine-only)=P(coarse-only)=0.25 (same tree as DSR use_both then use_hi/use_lo).
+    anomaly_inj_distribution: Literal["uniform", "dsr"] = "dsr"
 
 
 class sDSR(nn.Module):
@@ -82,6 +85,32 @@ class sDSR(nn.Module):
         self._anomaly_generation = AnomalyGeneration(sampling=cfg.anomaly_sampling)
 
         self._freeze_stage1()
+
+    @staticmethod
+    def _sample_inj_mode(
+        batch_size: int,
+        device: torch.device,
+        distribution: Literal["uniform", "dsr"],
+    ) -> torch.Tensor:
+        """
+        Per-sample injection mode for synthetic anomalies (used only when M_gt is non-empty).
+
+        Returns:
+            Long tensor (B,) with 0 = fine only, 1 = coarse only, 2 = both.
+        """
+        if distribution == "uniform":
+            return torch.randint(0, 3, (batch_size,), device=device)
+        u = torch.rand(batch_size, device=device)
+        sub = torch.rand(batch_size, device=device)
+        return torch.where(
+            u >= 0.5,
+            torch.full((batch_size,), 2, device=device, dtype=torch.long),
+            torch.where(
+                sub < 0.5,
+                torch.zeros(batch_size, device=device, dtype=torch.long),
+                torch.ones(batch_size, device=device, dtype=torch.long),
+            ),
+        )
 
     def _get_q_shape(self, n_mels: int, T: int) -> tuple[int, int]:
         """Infer q_fine spatial shape from spectrogram (fine x2/x4 down -> 64x80 for 128x320)."""
@@ -171,8 +200,9 @@ class sDSR(nn.Module):
 
         Uses the dataset-provided anomaly map M_gt to augment q with synthetic
         anomalies (codebook replacement). For each sample with a non-zero mask,
-        injection mode is sampled uniformly: fine latent only, coarse latent only,
-        or both. Coarse or both modes recompute fine latents from ``f_fine`` and
+        injection mode is sampled per ``anomaly_inj_distribution`` (uniform 1/3 each,
+        or DSR-style: 0.5 both, 0.25 fine-only, 0.25 coarse-only). Coarse or both
+        modes recompute fine latents from ``f_fine`` and
         ``q_coarse_used`` so conditioning matches the hierarchy. Normal samples
         (empty mask) use clean (q_fine, q_coarse).
 
@@ -214,8 +244,10 @@ class sDSR(nn.Module):
         )
 
         has_anomaly = (M_gt.sum(dim=(1, 2, 3)) > 0).view(batch_size, 1, 1, 1).float()
-        # Per anomaly sample: 0 = fine only, 1 = coarse only (recompute fine), 2 = both.
-        inj_mode = torch.randint(0, 3, (batch_size,), device=device)
+        # Per sample: 0 = fine only, 1 = coarse only (recompute fine), 2 = both.
+        inj_mode = self._sample_inj_mode(
+            batch_size, device, self.config.anomaly_inj_distribution
+        )
         is_fine_only = has_anomaly * (inj_mode == 0).float().view(batch_size, 1, 1, 1)
         is_coarse_only = has_anomaly * (inj_mode == 1).float().view(batch_size, 1, 1, 1)
         is_both = has_anomaly * (inj_mode == 2).float().view(batch_size, 1, 1, 1)
