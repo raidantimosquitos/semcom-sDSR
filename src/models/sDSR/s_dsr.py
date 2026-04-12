@@ -142,7 +142,7 @@ class sDSR(nn.Module):
         No anomaly simulation; deployable for evaluation.
 
         Args:
-            x: (B, 3, n_mels, T) Mel spectrogram
+            x: (B, 1, n_mels, T) Mel spectrogram
             return_intermediates: if True, return (M_out, X_general, X_specific)
 
         Returns:
