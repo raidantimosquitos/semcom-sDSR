@@ -235,7 +235,7 @@ class MixNoiseStrategy:
 
 
 # ---------------------------------------------------------------------------
-# 2. SpectromorphicMaskStrategy — paper-aligned (band + time-segments / Perlin)
+# 2. SpectromorphicMaskStrategy (replaces LatentAlignedBandStrategy)
 # ---------------------------------------------------------------------------
 
 class SpectromorphicMaskStrategy:
@@ -274,7 +274,7 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.5,
+        perlin_prob: float = 0.2,
         full_time_prob: float = 0.7,
         max_band_frac: float = 0.15,
         max_segments: int = 5,
@@ -354,40 +354,6 @@ AudioSpecificStrategy = SpectromorphicMaskStrategy
 
 
 # ---------------------------------------------------------------------------
-# 3. Machine-specific strategies
-# ---------------------------------------------------------------------------
-
-_MACHINE_STRATEGY_CLASSES: dict[str, str] = {
-    "fan":          "src.utils.anomalies.machine_specific.fan.FanAnomalyStrategy",
-    "pump":         "src.utils.anomalies.machine_specific.pump.PumpAnomalyStrategy",
-    "slider":       "src.utils.anomalies.machine_specific.slider.SliderAnomalyStrategy",
-    "toycar":       "src.utils.anomalies.machine_specific.toycar.ToyCarAnomalyStrategy",
-    "toyconveyor":  "src.utils.anomalies.machine_specific.toyconveyor.ToyConveyorAnomalyStrategy",
-    "valve":        "src.utils.anomalies.machine_specific.valve.ValveAnomalyStrategy",
-}
-
-
-def _load_machine_strategy(
-    machine_type: str,
-    spectrogram_shape: tuple[int, int],
-    n_mels: int,
-    T: int,
-) -> object | None:
-    """Lazily instantiate the machine-specific strategy class, or return None if unavailable."""
-    key = machine_type.lower()
-    if key not in _MACHINE_STRATEGY_CLASSES:
-        return None
-    module_path, cls_name = _MACHINE_STRATEGY_CLASSES[key].rsplit(".", 1)
-    try:
-        import importlib
-        mod = importlib.import_module(module_path)
-        cls = getattr(mod, cls_name)
-        return cls(spectrogram_shape=spectrogram_shape, n_mels=n_mels, T=T)
-    except Exception:
-        return None
-
-
-# ---------------------------------------------------------------------------
 # 4. AnomalyMapGenerator — unified entry point
 # ---------------------------------------------------------------------------
 
@@ -401,43 +367,28 @@ class AnomalyMapGenerator:
         "audio_specific"   – SpectromorphicMaskStrategy (recommended; includes
                              Perlin internally so a separate "both" mode is
                              no longer needed)
-        "machine_specific" – per-machine-type strategy (falls back to audio_specific)
-
-    Legacy names "both" and "machine_both" are accepted and silently mapped
-    to "audio_specific" and "machine_specific" respectively.
 
     When force_anomaly=False, each sample independently receives a zero mask
     with probability zero_mask_prob.
     """
-
-    _LEGACY_MAP: dict[str, str] = {
-        "both": "audio_specific",
-        "machine_both": "machine_specific",
-    }
 
     def __init__(
         self,
         strategy: Literal[
             "perlin",
             "mix",
-            "audio_specific",
-            "machine_specific",
-            "both",
-            "machine_both",
+            "audio_specific"
         ],
         spectrogram_shape: tuple[int, int],
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
         zero_mask_prob: float = 0.5,
-        machine_type: str | None = None,
     ) -> None:
-        strategy = self._LEGACY_MAP.get(strategy, strategy)  # type: ignore[arg-type]
         self.strategy_name = strategy
         self.spectrogram_shape = spectrogram_shape
         self.q_shape = q_shape or spectrogram_shape
         self.zero_mask_prob = zero_mask_prob
-        self.machine_type = machine_type
 
         _n_mels = n_mels or spectrogram_shape[0]
         _T = T or spectrogram_shape[1]
@@ -457,15 +408,7 @@ class AnomalyMapGenerator:
             if strategy == "audio_specific"
             else None
         )
-        self._machine_strategy = None
-        if strategy == "machine_specific" and machine_type is not None:
-            self._machine_strategy = _load_machine_strategy(
-                machine_type, spectrogram_shape, _n_mels, _T
-            )
         self._fallback = AudioSpecificStrategy(spectrogram_shape, self.q_shape, _n_mels, _T)
-
-    def _get_machine_or_fallback(self) -> object:
-        return self._machine_strategy if self._machine_strategy is not None else self._fallback
 
     def _generate_one(self, device: torch.device | str) -> torch.Tensor:
         """Generate a single non-zero mask (1, 1, H, W)."""
@@ -483,17 +426,12 @@ class AnomalyMapGenerator:
             assert self.audio_specific is not None
             return self.audio_specific(1, device)
 
-        if name == "machine_specific":
-            strat = self._get_machine_or_fallback()
-            return strat(1, device)  # type: ignore[operator]
-
         return self._fallback(1, device)
 
     def generate_for_training_sample(
         self,
         device: torch.device | str,
         force_anomaly: bool = True,
-        machine_type: str | None = None,
     ) -> torch.Tensor:
         """Generate one mask for a single training sample (convenience wrapper)."""
         if force_anomaly:
@@ -505,7 +443,6 @@ class AnomalyMapGenerator:
         batch_size: int,
         device: torch.device | str,
         force_anomaly: bool = False,
-        machine_types: Sequence[str] | None = None,
     ) -> torch.Tensor:
         """
         Generate batch of anomaly masks.
@@ -514,8 +451,6 @@ class AnomalyMapGenerator:
             batch_size: number of masks
             device: torch device
             force_anomaly: if True, always generate real masks (skip zero_mask_prob)
-            machine_types: per-sample machine types (ignored; use AnomalyMapGenerator
-                           per machine type for per-type control)
 
         Returns:
             M: (B, 1, n_mels, T) binary mask

@@ -280,7 +280,7 @@ class AudDSRAnomTrainDataset(Dataset):
         self,
         base_dataset: DCASE2020Task2LogMelDataset,
         strategy: Literal[
-            "perlin", "mix", "audio_specific", "machine_specific", "both", "machine_both"
+            "perlin", "mix", "audio_specific"
         ] = "audio_specific",
         zero_mask_prob: float = 0.5,
         adversarial_dataset: Dataset | None = None,
@@ -334,7 +334,6 @@ class AudDSRAnomTrainDataset(Dataset):
                 mask = self._mask_generator.generate_for_training_sample(
                     device="cpu",
                     force_anomaly=True,
-                    machine_type=mt_key,
                 )
                 has_anomaly = 1.0
         return {
