@@ -2,7 +2,7 @@
 Generic anomaly generation: replace masked feature vectors with codebook samples.
 
 Two sampling regimes (selected per-sample):
-  * **Distant** (default): skip closest 5 % of codebook, sample from top-k nearest
+  * **Distant** (default): skip closest 2.5 % of codebook, sample from top-k nearest
     controlled by ``strength`` — produces clearly out-of-distribution replacements.
   * **Neighbor**: sample from ranks 2–``neighbor_k`` closest codebook entries
     (skip only the identity match) — produces subtle, near-in-distribution
@@ -35,7 +35,7 @@ def generate_fake_anomalies_distant(
 
     For each sample in the batch, with probability ``neighbor_prob`` the
     *neighbor* regime is used (ranks 2..``neighbor_k``); otherwise the
-    original *distant* regime is used (skip closest 5 %, sample up to
+    original *distant* regime is used (skip closest 2.5 %, sample up to
     ``strength`` fraction of codebook).
 
     Args:
@@ -82,7 +82,7 @@ def generate_fake_anomalies_distant(
             pct = strength[k].item()
             topk = max(1, min(int(pct * N) + 1, N - 1))
             _, topk_indices = torch.topk(distances, topk, dim=1, largest=False)
-            skip = int(N * 0.05)
+            skip = int(N * 0.025)
             topk_indices = topk_indices[:, skip:]
 
         topk_n = topk_indices.shape[1]

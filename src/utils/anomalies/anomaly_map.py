@@ -235,22 +235,37 @@ class MixNoiseStrategy:
 
 
 # ---------------------------------------------------------------------------
-# 2. SpectromorphicMaskStrategy (replaces LatentAlignedBandStrategy)
+# 2. SpectromorphicMaskStrategy — paper-aligned (band + time-segments / Perlin)
 # ---------------------------------------------------------------------------
 
 class SpectromorphicMaskStrategy:
     """
-    Mask generator tailored to DCASE2020 Task 2 latent-space anomaly patterns.
+    Anomaly mask generation following the AudDSR paper approach.
 
-    Four sub-strategies sampled per-item at runtime:
+    Two processes mixed per-item:
 
-      A  full_band    (~50 %)  persistent frequency-band shift; dominant pattern
-      B  multi_band   (~20 %)  several simultaneous thin bands; fan/slider IDs
-      C  diffuse_rect (~15 %)  large contiguous rectangle; pump-id02/valve scatter
-      D  perlin       (~15 %)  blob-shaped noise for regularisation
+      1. **Band + time segments** (``1 - perlin_prob``):
+         One frequency band of random width is chosen, then 1-N disjoint time
+         segments within that band are marked as anomalous.  Most of the time
+         a single segment covers the full duration (dominant real pattern);
+         occasionally 2-5 shorter segments are used for variety.
+
+      2. **Perlin noise** (``perlin_prob``):
+         Thresholded and rotated Perlin noise for blob-shaped regularisation
+         that prevents overfitting to rectangular masks.
 
     All masks are binary, shape (1, 1, n_mels, T) at spectrogram resolution.
     Callers project to fine/coarse grids with avg_pool + (> 0) threshold.
+
+    Args:
+        n_mels: spectrogram height (128)
+        T: spectrogram width (320)
+        perlin_prob: probability of choosing Perlin mode per item
+        full_time_prob: within band mode, probability that a single segment
+            covers 85-100 % of the time axis (vs. multiple shorter segments)
+        max_band_frac: maximum band width as a fraction of n_mels
+        max_segments: maximum number of disjoint time segments when not
+            using full-time mode
     """
 
     def __init__(
@@ -259,7 +274,10 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        weights: tuple[float, float, float, float] = (0.50, 0.20, 0.15, 0.15),
+        perlin_prob: float = 0.5,
+        full_time_prob: float = 0.7,
+        max_band_frac: float = 0.15,
+        max_segments: int = 5,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -269,65 +287,38 @@ class SpectromorphicMaskStrategy:
             self.n_mels = n_mels or 128
             self.T = T or 320
         self.q_shape = q_shape or (self.n_mels, self.T)
-        total = sum(weights)
-        self.weights = [w / total for w in weights]
+        self.perlin_prob = perlin_prob
+        self.full_time_prob = full_time_prob
+        self.max_band_width = max(1, int(self.n_mels * max_band_frac))
+        self.max_segments = max(1, max_segments)
 
-    # -- A: full_band ----------------------------------------------------------
+    # -- band + time segments --------------------------------------------------
 
-    def _full_band(self) -> np.ndarray:
-        """1-3 frequency bands, each spanning 85-100% of the time axis."""
-        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
-        n_bands = random.randint(1, 3)
-        for _ in range(n_bands):
-            width = random.randint(1, max(1, int(self.n_mels * 0.10)))
-            f0 = random.randint(0, self.n_mels - width)
+    def _band_time_segments(self) -> np.ndarray:
+        n_mels, T = self.n_mels, self.T
+        mask = np.zeros((n_mels, T), dtype=np.float32)
+
+        band_w = random.randint(1, self.max_band_width)
+        f0 = random.randint(0, n_mels - band_w)
+
+        if random.random() < self.full_time_prob:
             coverage = random.uniform(0.85, 1.0)
-            t_len = max(1, int(self.T * coverage))
-            t0 = random.randint(0, self.T - t_len)
-            mask[f0 : f0 + width, t0 : t0 + t_len] = 1.0
+            t_len = max(1, int(T * coverage))
+            t0 = random.randint(0, max(0, T - t_len))
+            mask[f0 : f0 + band_w, t0 : t0 + t_len] = 1.0
+        else:
+            n_seg = random.randint(2, self.max_segments)
+            seg_lo = max(1, T // 10)
+            seg_hi = max(seg_lo, T // 3)
+            segments = _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi)
+            for t0, t1 in segments:
+                mask[f0 : f0 + band_w, t0:t1] = 1.0
+
         return mask
 
-    # -- B: multi_band ---------------------------------------------------------
-
-    def _multi_band(self) -> np.ndarray:
-        """2-5 thin (1-4 row) non-overlapping frequency bands, all full-width."""
-        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
-        n_bands = random.randint(2, 5)
-        occupied: list[range] = []
-        attempts = 0
-        placed = 0
-        while placed < n_bands and attempts < 30:
-            attempts += 1
-            width = random.randint(1, max(1, int(self.n_mels * 0.04)))
-            f0 = random.randint(0, self.n_mels - width)
-            rng = range(f0, f0 + width)
-            if any(not set(rng).isdisjoint(set(o)) for o in occupied):
-                continue
-            occupied.append(rng)
-            mask[f0 : f0 + width, :] = 1.0
-            placed += 1
-        return mask
-
-    # -- C: diffuse_rect -------------------------------------------------------
-
-    def _diffuse_rect(self) -> np.ndarray:
-        """1-2 large rectangular blobs covering 20-60% of each axis."""
-        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
-        n_rects = random.randint(1, 2)
-        for _ in range(n_rects):
-            h_frac = random.uniform(0.20, 0.60)
-            w_frac = random.uniform(0.20, 0.60)
-            h = max(1, int(self.n_mels * h_frac))
-            w = max(1, int(self.T * w_frac))
-            f0 = random.randint(0, self.n_mels - h)
-            t0 = random.randint(0, self.T - w)
-            mask[f0 : f0 + h, t0 : t0 + w] = 1.0
-        return mask
-
-    # -- D: perlin -------------------------------------------------------------
+    # -- perlin ----------------------------------------------------------------
 
     def _perlin(self) -> np.ndarray:
-        """Thresholded Perlin noise (blob-shaped), optionally rotated."""
         res_y = 2 ** random.randint(1, 5)
         res_x = 2 ** random.randint(1, 5)
         noise = rand_perlin_2d_np((self.n_mels, self.T), (res_y, res_x))
@@ -344,16 +335,12 @@ class SpectromorphicMaskStrategy:
         batch_size: int,
         device: torch.device | str,
     ) -> torch.Tensor:
-        strategies = [
-            self._full_band,
-            self._multi_band,
-            self._diffuse_rect,
-            self._perlin,
-        ]
         masks = []
         for _ in range(batch_size):
-            fn = random.choices(strategies, weights=self.weights, k=1)[0]
-            m = fn()
+            if random.random() < self.perlin_prob:
+                m = self._perlin()
+            else:
+                m = self._band_time_segments()
             masks.append(torch.from_numpy(m).unsqueeze(0).unsqueeze(0))
         M = torch.cat(masks, dim=0).to(device)
         if self.q_shape != (self.n_mels, self.T):
