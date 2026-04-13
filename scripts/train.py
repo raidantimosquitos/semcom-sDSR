@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     s2.add_argument(
         "--anomaly_strategy",
         type=str,
-        default="both",
+        default="audio_specific",
         choices=[
             "perlin",
             "mix",
@@ -95,7 +95,7 @@ def parse_args() -> argparse.Namespace:
             "both",
             "machine_both",
         ],
-        help="Synthetic anomaly mask: perlin; mix (smoothed field + bursts + quantile); audio_specific; machine_specific; both (20%% Perlin vs 80%% audio_specific); machine_both (20%% Perlin vs 80%% machine_specific)",
+        help="Synthetic anomaly mask: audio_specific (recommended, includes Perlin internally); perlin; mix; machine_specific. Legacy names 'both'/'machine_both' map to audio_specific/machine_specific.",
     )
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
     s2.add_argument(
@@ -371,7 +371,7 @@ def run_full(args: argparse.Namespace) -> None:
         lambda_recon=10.0,
         lambda_focal=1.0,
         lambda_sub=1.0,
-        anomaly_strategy="both",
+        anomaly_strategy="audio_specific",
         anomaly_sampling="distant",
         anomaly_inj_distribution=args.anomaly_inj_distribution,
         machine_id=None,

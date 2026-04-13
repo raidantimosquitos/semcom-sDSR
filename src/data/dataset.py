@@ -281,7 +281,7 @@ class AudDSRAnomTrainDataset(Dataset):
         base_dataset: DCASE2020Task2LogMelDataset,
         strategy: Literal[
             "perlin", "mix", "audio_specific", "machine_specific", "both", "machine_both"
-        ] = "both",
+        ] = "audio_specific",
         zero_mask_prob: float = 0.5,
         adversarial_dataset: Dataset | None = None,
     ) -> None:

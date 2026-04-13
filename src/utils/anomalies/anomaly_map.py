@@ -5,14 +5,16 @@ Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 
 1. PerlinNoiseStrategy            – threshold/binarize Perlin noise (generic fallback)
 2. MixNoiseStrategy               – smoothed random field + Poisson bursts, quantile cut
-3. LatentAlignedBandStrategy      – full-width horizontal bands aligned to VQ-VAE latent
-                                    grid (replaces AudioSpecificStrategy)
+3. SpectromorphicMaskStrategy     – four sub-strategies sampled per-item: full_band,
+                                    multi_band, diffuse_rect, perlin (replaces
+                                    LatentAlignedBandStrategy; includes Perlin internally)
 4. MachineSpecificStrategy        – per-machine-type mask derived from DCASE2020 Task 2
                                     spectrogram analysis (fan / pump / slider / toycar /
                                     toyconveyor / valve)
 
 AnomalyMapGenerator selects between strategies at call time.
-``AudioSpecificStrategy`` is kept as an alias for backward compatibility.
+``AudioSpecificStrategy`` and ``LatentAlignedBandStrategy`` are kept as aliases
+for backward compatibility.
 """
 
 from __future__ import annotations
@@ -233,152 +235,135 @@ class MixNoiseStrategy:
 
 
 # ---------------------------------------------------------------------------
-# 2. Latent-aligned band strategy (replaces AudioSpecificStrategy)
+# 2. SpectromorphicMaskStrategy (replaces LatentAlignedBandStrategy)
 # ---------------------------------------------------------------------------
 
-class LatentAlignedBandStrategy:
+class SpectromorphicMaskStrategy:
     """
-    Full-width horizontal band masks whose boundaries align with the fine-level
-    VQ-VAE latent grid so that avg_pool2d + binarisation produces clean
-    per-row masks in latent space.
+    Mask generator tailored to DCASE2020 Task 2 latent-space anomaly patterns.
 
-    Designed from empirical analysis of real DCASE2020 Task 2 anomaly geometry
-    in quantised feature maps (||E[q|anom] - E[q|norm]||_2):
+    Four sub-strategies sampled per-item at runtime:
 
-      * All six machine types exhibit full-duration horizontal frequency bands
-        as the dominant anomaly shape in both fine and coarse latent grids.
-      * Band count, width and position vary across machines and IDs but the
-        geometry is universal.
-      * Valve is an outlier — anomalies are broadband / diffuse with low
-        amplitude across most of the frequency axis.  A dedicated diffuse
-        mode covers this case.
+      A  full_band    (~50 %)  persistent frequency-band shift; dominant pattern
+      B  multi_band   (~20 %)  several simultaneous thin bands; fan/slider IDs
+      C  diffuse_rect (~15 %)  large contiguous rectangle; pump-id02/valve scatter
+      D  perlin       (~15 %)  blob-shaped noise for regularisation
 
-    Parameters are specified in *fine latent rows* (1 row = ``latent_h_stride``
-    mel bins) so that masks downsample cleanly.
+    All masks are binary, shape (1, 1, n_mels, T) at spectrogram resolution.
+    Callers project to fine/coarse grids with avg_pool + (> 0) threshold.
     """
-
-    # Geometric band-width weights: P(w=1)=0.50, P(w=2)=0.25, P(w=3)=0.15, P(w=4)=0.10
-    _BAND_WIDTH_WEIGHTS = (0.50, 0.25, 0.15, 0.10)
-    # Weighted band-count: P(n=1)=0.55, P(n=2)=0.30, P(n=3)=0.15
-    _BAND_COUNT_WEIGHTS = (0.55, 0.30, 0.15)
 
     def __init__(
         self,
-        spectrogram_shape: tuple[int, int],
+        spectrogram_shape: tuple[int, int] | None = None,
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        latent_h_stride: int = 4,
-        min_band_sep_rows: int = 2,
-        full_time_prob: float = 0.70,
-        min_time_frac: float = 0.85,
-        max_time_frac: float = 1.0,
-        diffuse_prob: float = 0.05,
-        diffuse_min_coverage: float = 0.30,
-        diffuse_max_coverage: float = 0.60,
+        weights: tuple[float, float, float, float] = (0.50, 0.20, 0.15, 0.15),
+        **_kwargs: object,
     ) -> None:
-        self.spectrogram_shape = spectrogram_shape
-        self.q_shape = q_shape or spectrogram_shape
-        self.n_mels = n_mels or spectrogram_shape[0]
-        self.T = T or spectrogram_shape[1]
-        self.stride = max(1, latent_h_stride)
-        self.n_latent_rows = self.n_mels // self.stride
+        if spectrogram_shape is not None:
+            self.n_mels = n_mels or spectrogram_shape[0]
+            self.T = T or spectrogram_shape[1]
+        else:
+            self.n_mels = n_mels or 128
+            self.T = T or 320
+        self.q_shape = q_shape or (self.n_mels, self.T)
+        total = sum(weights)
+        self.weights = [w / total for w in weights]
 
-        self.min_band_sep_rows = max(0, min_band_sep_rows)
+    # -- A: full_band ----------------------------------------------------------
 
-        self.full_time_prob = full_time_prob
-        self.min_time_frac = min_time_frac
-        self.max_time_frac = max_time_frac
-
-        self.diffuse_prob = diffuse_prob
-        self.diffuse_min_cov = diffuse_min_coverage
-        self.diffuse_max_cov = diffuse_max_coverage
-
-    @staticmethod
-    def _weighted_choice(weights: tuple[float, ...]) -> int:
-        """Return 1-based index sampled from *weights* (unnormalised ok)."""
-        r = random.random() * sum(weights)
-        cumul = 0.0
-        for i, w in enumerate(weights):
-            cumul += w
-            if r <= cumul:
-                return i + 1
-        return len(weights)
-
-    def _sample_band_width(self) -> int:
-        return self._weighted_choice(self._BAND_WIDTH_WEIGHTS)
-
-    def _sample_band_count(self) -> int:
-        return self._weighted_choice(self._BAND_COUNT_WEIGHTS)
-
-    def _place_bands(self, n_bands: int) -> list[tuple[int, int]]:
-        """Sample ``n_bands`` non-overlapping band intervals in latent rows."""
-        total = self.n_latent_rows
-        bands: list[tuple[int, int]] = []
+    def _full_band(self) -> np.ndarray:
+        """1-3 frequency bands, each spanning 85-100% of the time axis."""
+        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
+        n_bands = random.randint(1, 3)
         for _ in range(n_bands):
-            placed = False
-            w = min(self._sample_band_width(), total)
-            for _ in range(300):
-                r0 = random.randint(0, max(0, total - w))
-                r1 = r0 + w
-                too_close = any(
-                    not (r1 + self.min_band_sep_rows <= s or r0 >= e + self.min_band_sep_rows)
-                    for s, e in bands
-                )
-                if too_close:
-                    continue
-                bands.append((r0, r1))
-                placed = True
-                break
-            if not placed:
-                break
-        return bands
+            width = random.randint(1, max(1, int(self.n_mels * 0.10)))
+            f0 = random.randint(0, self.n_mels - width)
+            coverage = random.uniform(0.85, 1.0)
+            t_len = max(1, int(self.T * coverage))
+            t0 = random.randint(0, self.T - t_len)
+            mask[f0 : f0 + width, t0 : t0 + t_len] = 1.0
+        return mask
 
-    def _time_extent(self) -> tuple[int, int]:
-        T = self.T
-        if random.random() < self.full_time_prob:
-            return 0, T
-        frac = random.uniform(self.min_time_frac, self.max_time_frac)
-        t_len = max(1, int(T * frac))
-        t0 = random.randint(0, max(0, T - t_len))
-        return t0, t0 + t_len
+    # -- B: multi_band ---------------------------------------------------------
 
-    def _single_mask_numpy(self) -> np.ndarray:
-        n_mels, T, stride = self.n_mels, self.T, self.stride
-        M = np.zeros((n_mels, T), dtype=np.float32)
+    def _multi_band(self) -> np.ndarray:
+        """2-5 thin (1-4 row) non-overlapping frequency bands, all full-width."""
+        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
+        n_bands = random.randint(2, 5)
+        occupied: list[range] = []
+        attempts = 0
+        placed = 0
+        while placed < n_bands and attempts < 30:
+            attempts += 1
+            width = random.randint(1, max(1, int(self.n_mels * 0.04)))
+            f0 = random.randint(0, self.n_mels - width)
+            rng = range(f0, f0 + width)
+            if any(not set(rng).isdisjoint(set(o)) for o in occupied):
+                continue
+            occupied.append(rng)
+            mask[f0 : f0 + width, :] = 1.0
+            placed += 1
+        return mask
 
-        if random.random() < self.diffuse_prob:
-            cov = random.uniform(self.diffuse_min_cov, self.diffuse_max_cov)
-            n_rows = max(1, int(self.n_latent_rows * cov))
-            rows = random.sample(range(self.n_latent_rows), min(n_rows, self.n_latent_rows))
-            t0, t1 = self._time_extent()
-            for r in rows:
-                mel_lo = r * stride
-                mel_hi = min(n_mels, mel_lo + stride)
-                M[mel_lo:mel_hi, t0:t1] = 1.0
-            return M
+    # -- C: diffuse_rect -------------------------------------------------------
 
-        n_bands = self._sample_band_count()
-        bands = self._place_bands(n_bands)
-        for r0, r1 in bands:
-            mel_lo = r0 * stride
-            mel_hi = min(n_mels, r1 * stride)
-            t0, t1 = self._time_extent()
-            M[mel_lo:mel_hi, t0:t1] = 1.0
-        return M
+    def _diffuse_rect(self) -> np.ndarray:
+        """1-2 large rectangular blobs covering 20-60% of each axis."""
+        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
+        n_rects = random.randint(1, 2)
+        for _ in range(n_rects):
+            h_frac = random.uniform(0.20, 0.60)
+            w_frac = random.uniform(0.20, 0.60)
+            h = max(1, int(self.n_mels * h_frac))
+            w = max(1, int(self.T * w_frac))
+            f0 = random.randint(0, self.n_mels - h)
+            t0 = random.randint(0, self.T - w)
+            mask[f0 : f0 + h, t0 : t0 + w] = 1.0
+        return mask
 
-    def __call__(self, batch_size: int, device: torch.device | str) -> torch.Tensor:
-        masks = [
-            torch.from_numpy(self._single_mask_numpy()).unsqueeze(0).unsqueeze(0)
-            for _ in range(batch_size)
+    # -- D: perlin -------------------------------------------------------------
+
+    def _perlin(self) -> np.ndarray:
+        """Thresholded Perlin noise (blob-shaped), optionally rotated."""
+        res_y = 2 ** random.randint(1, 5)
+        res_x = 2 ** random.randint(1, 5)
+        noise = rand_perlin_2d_np((self.n_mels, self.T), (res_y, res_x))
+        angle = random.uniform(-90.0, 90.0)
+        noise = ndimage_rotate(noise, angle, reshape=False, order=1,
+                               mode="constant", cval=0.0)
+        threshold = random.uniform(0.3, 0.6)
+        return (noise > threshold).astype(np.float32)
+
+    # -- public interface ------------------------------------------------------
+
+    def __call__(
+        self,
+        batch_size: int,
+        device: torch.device | str,
+    ) -> torch.Tensor:
+        strategies = [
+            self._full_band,
+            self._multi_band,
+            self._diffuse_rect,
+            self._perlin,
         ]
+        masks = []
+        for _ in range(batch_size):
+            fn = random.choices(strategies, weights=self.weights, k=1)[0]
+            m = fn()
+            masks.append(torch.from_numpy(m).unsqueeze(0).unsqueeze(0))
         M = torch.cat(masks, dim=0).to(device)
-        if self.q_shape != self.spectrogram_shape:
+        if self.q_shape != (self.n_mels, self.T):
             M = F.interpolate(M, size=self.q_shape, mode="nearest")
         return M
 
 
-AudioSpecificStrategy = LatentAlignedBandStrategy
+# Backward-compatible aliases
+LatentAlignedBandStrategy = SpectromorphicMaskStrategy
+AudioSpecificStrategy = SpectromorphicMaskStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -426,14 +411,22 @@ class AnomalyMapGenerator:
     strategy options:
         "perlin"           – Perlin noise only
         "mix"              – smoothed field + burst mix, quantile threshold
-        "audio_specific"   – latent-aligned horizontal bands
+        "audio_specific"   – SpectromorphicMaskStrategy (recommended; includes
+                             Perlin internally so a separate "both" mode is
+                             no longer needed)
         "machine_specific" – per-machine-type strategy (falls back to audio_specific)
-        "both"             – 5% Perlin, 95% latent-aligned bands (recommended)
-        "machine_both"     – 5% Perlin, 95% machine_specific
+
+    Legacy names "both" and "machine_both" are accepted and silently mapped
+    to "audio_specific" and "machine_specific" respectively.
 
     When force_anomaly=False, each sample independently receives a zero mask
     with probability zero_mask_prob.
     """
+
+    _LEGACY_MAP: dict[str, str] = {
+        "both": "audio_specific",
+        "machine_both": "machine_specific",
+    }
 
     def __init__(
         self,
@@ -452,9 +445,9 @@ class AnomalyMapGenerator:
         zero_mask_prob: float = 0.5,
         machine_type: str | None = None,
     ) -> None:
+        strategy = self._LEGACY_MAP.get(strategy, strategy)  # type: ignore[arg-type]
         self.strategy_name = strategy
         self.spectrogram_shape = spectrogram_shape
-        # q_shape kept for backward compat but masks are generated at spectrogram_shape
         self.q_shape = q_shape or spectrogram_shape
         self.zero_mask_prob = zero_mask_prob
         self.machine_type = machine_type
@@ -464,7 +457,7 @@ class AnomalyMapGenerator:
 
         self.perlin = (
             PerlinNoiseStrategy(spectrogram_shape, self.q_shape)
-            if strategy in ("perlin", "both", "machine_both")
+            if strategy == "perlin"
             else None
         )
         self.mix = (
@@ -474,16 +467,14 @@ class AnomalyMapGenerator:
         )
         self.audio_specific = (
             AudioSpecificStrategy(spectrogram_shape, self.q_shape, _n_mels, _T)
-            if strategy in ("audio_specific", "both")
+            if strategy == "audio_specific"
             else None
         )
-        # Machine-specific strategy (may be None if machine_type not recognised)
         self._machine_strategy = None
-        if strategy in ("machine_specific", "machine_both") and machine_type is not None:
+        if strategy == "machine_specific" and machine_type is not None:
             self._machine_strategy = _load_machine_strategy(
                 machine_type, spectrogram_shape, _n_mels, _T
             )
-        # Always keep a generic audio_specific as fallback
         self._fallback = AudioSpecificStrategy(spectrogram_shape, self.q_shape, _n_mels, _T)
 
     def _get_machine_or_fallback(self) -> object:
@@ -509,23 +500,6 @@ class AnomalyMapGenerator:
             strat = self._get_machine_or_fallback()
             return strat(1, device)  # type: ignore[operator]
 
-        if name == "both":
-            # 5% Perlin, 95% audio_specific
-            if random.random() < 0.05:
-                assert self.perlin is not None
-                return self.perlin(1, device)
-            assert self.audio_specific is not None
-            return self.audio_specific(1, device)
-
-        if name == "machine_both":
-            # 5% Perlin, 95% machine-specific
-            if random.random() < 0.05:
-                assert self.perlin is not None
-                return self.perlin(1, device)
-            strat = self._get_machine_or_fallback()
-            return strat(1, device)  # type: ignore[operator]
-
-        # Fallback
         return self._fallback(1, device)
 
     def generate_for_training_sample(
