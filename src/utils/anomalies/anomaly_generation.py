@@ -27,7 +27,7 @@ def generate_fake_anomalies_distant(
     codebook: torch.Tensor,
     mask: torch.Tensor,
     strength: torch.Tensor | float,
-    neighbor_prob: float = 0.4,
+    neighbor_prob: float = 0.05,
     neighbor_k: int = _NEIGHBOR_K_DEFAULT,
 ) -> torch.Tensor:
     """

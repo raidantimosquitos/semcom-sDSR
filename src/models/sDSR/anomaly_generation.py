@@ -27,6 +27,12 @@ def _match_mask_size(mask: torch.Tensor, target: tuple[int, int]) -> torch.Tenso
         mask = mask[:, :, :H, :W].contiguous()
     return mask
 
+def _sample_strength(batch_size: int, device: torch.device) -> torch.Tensor:
+    u = torch.rand(batch_size, device=device)
+    # 70% moderate, 30% distant
+    moderate = torch.rand(batch_size, device=device) * 0.45 + 0.25
+    distant = torch.rand(batch_size, device=device) * 0.3 + 0.7
+    return torch.where(u < 0.7, moderate, distant)
 
 class AnomalyGeneration(nn.Module):
     """
@@ -99,8 +105,9 @@ class AnomalyGeneration(nn.Module):
             q_coarse_a = generate_fake_anomalies_uniform(q_coarse, cb_coarse, M_coarse)
         else:
             z_c = z_coarse if z_coarse is not None else q_coarse
+            strength_coarse = _sample_strength(q_coarse.shape[0], q_coarse.device)
             q_coarse_a = generate_fake_anomalies_distant(
-                z_c, q_coarse, cb_coarse, M_coarse, strength_coarse, neighbor_prob=0.3
+                z_c, q_coarse, cb_coarse, M_coarse, strength_coarse, neighbor_prob=0.05
             )
 
         if not augment_fine:
@@ -109,7 +116,8 @@ class AnomalyGeneration(nn.Module):
             q_fine_a = generate_fake_anomalies_uniform(q_fine, cb_fine, M_fine)
         else:
             z_f = z_fine if z_fine is not None else q_fine
+            strength_fine = _sample_strength(q_fine.shape[0], q_fine.device)
             q_fine_a = generate_fake_anomalies_distant(
-                z_f, q_fine, cb_fine, M_fine, strength_fine, neighbor_prob=0.3
+                z_f, q_fine, cb_fine, M_fine, strength_fine, neighbor_prob=0.05
             )
         return q_fine_a, q_coarse_a
