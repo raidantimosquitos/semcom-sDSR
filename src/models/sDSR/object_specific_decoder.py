@@ -85,12 +85,7 @@ class ObjectSpecificDecoder(nn.Module):
             assert self._subspace_coarse is not None and self._subspace_fine is not None
             recon_feat_coarse, q_coarse_r, _ = self._subspace_coarse(q_coarse, vq_coarse)
             recon_feat_fine, q_fine_r, _ = self._subspace_fine(q_fine, vq_fine)
-            # Detach re-quantized features so L_recon does not backprop into the
-            # subspace UNet — only L_sub should train it (prevents gradient conflict
-            # that causes L_sub to increase over training).
-            x_s = self.spectrogram_reconstruction_network(
-                q_coarse_r.detach(), q_fine_r.detach()
-            )
+            x_s = self.spectrogram_reconstruction_network(q_coarse_r, q_fine_r)
             if return_aux:
                 aux["recon_feat_coarse"] = recon_feat_coarse
                 aux["recon_feat_fine"] = recon_feat_fine

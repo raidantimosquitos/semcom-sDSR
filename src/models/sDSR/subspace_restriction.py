@@ -68,7 +68,9 @@ class FeatureEncoder(nn.Module):
 
 
 class FeatureDecoder(nn.Module):
-    """Decoder for SubspaceRestrictionNetwork: 2 ups with skip connections, same spatial as input."""
+    """Decoder for SubspaceRestrictionNetwork: 2 ups from bottleneck only (no skip
+    connections).  The information bottleneck forces the network to learn the clean
+    subspace rather than memorising local corrections for synthetic anomalies."""
 
     def __init__(self, base_width: int, out_channels: int) -> None:
         super().__init__()
@@ -80,7 +82,7 @@ class FeatureDecoder(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.db2 = nn.Sequential(
-            nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, padding=1),
+            nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
@@ -94,7 +96,7 @@ class FeatureDecoder(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.db3 = nn.Sequential(
-            nn.Conv2d(base_width*2, base_width, kernel_size=3, padding=1),
+            nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
             norm(base_width),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
@@ -102,24 +104,15 @@ class FeatureDecoder(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.fin_out = nn.Conv2d(base_width, out_channels, kernel_size=3, padding=1)
-        nn.init.zeros_(self.fin_out.weight)
-        if self.fin_out.bias is not None:
-            nn.init.zeros_(self.fin_out.bias)
 
-    def forward(
-        self,
-        b1: torch.Tensor,
-        b2: torch.Tensor,
-        b3: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, b3: torch.Tensor) -> torch.Tensor:
         up2 = self.up2(b3)
-        db2 = self.db2(torch.cat([up2, b2], dim=1))
+        db2 = self.db2(up2)
 
         up3 = self.up3(db2)
-        db3 = self.db3(torch.cat([up3, b1], dim=1))
+        db3 = self.db3(up3)
 
-        out = self.fin_out(db3)
-        return out
+        return self.fin_out(db3)
 
 
 class SubspaceRestrictionNetwork(nn.Module):
@@ -139,8 +132,8 @@ class SubspaceRestrictionNetwork(nn.Module):
         self.decoder = FeatureDecoder(base_width, out_channels=out_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b1, b2, b3 = self.encoder(x)
-        return self.decoder(b1, b2, b3)
+        _b1, _b2, b3 = self.encoder(x)
+        return self.decoder(b3)
 
 
 class SubspaceRestrictionModule(nn.Module):
@@ -172,7 +165,7 @@ class SubspaceRestrictionModule(nn.Module):
             quantized: quantized(F̃) for feeding to Object Specific Decoder.
             loss_vq: VQ commitment loss (can be ignored in total loss).
         """
-        feat = self._unet(x) + x
+        feat = self._unet(x)
         loss_vq, quantized, _perp, _enc = quantization(feat)
         return feat, quantized, loss_vq
 
