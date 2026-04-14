@@ -276,7 +276,7 @@ class SpectromorphicMaskStrategy:
         T: int | None = None,
         perlin_prob: float = 0.0,
         full_time_prob: float = 0.3,
-        max_band_frac: float = 0.15,
+        max_band_frac: float = 0.1,
         max_segments: int = 5,
         **_kwargs: object,
     ) -> None:
