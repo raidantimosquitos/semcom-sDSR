@@ -29,12 +29,7 @@ class FeatureEncoder(nn.Module):
             norm(base_width),
             nn.ReLU(inplace=True),
         )
-        # self.mp1 = nn.MaxPool2d(2)
-        self.mp1 = nn.Sequential(
-            nn.Conv2d(base_width, base_width, kernel_size=3, stride=2, padding=1),
-            norm(base_width),
-            nn.ReLU(inplace=True),
-        )
+        self.mp1 = nn.MaxPool2d(2)
         self.block2 = nn.Sequential(
             nn.Conv2d(base_width, base_width * 2, kernel_size=3, padding=1),
             norm(base_width * 2),
@@ -43,12 +38,7 @@ class FeatureEncoder(nn.Module):
             norm(base_width * 2),
             nn.ReLU(inplace=True),
         )
-        # self.mp2 = nn.MaxPool2d(2)
-        self.mp2 = nn.Sequential(
-            nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, stride=2, padding=1),
-            norm(base_width * 2),
-            nn.ReLU(inplace=True),
-        )
+        self.mp2 = nn.MaxPool2d(2)
         self.block3 = nn.Sequential(
             nn.Conv2d(base_width * 2, base_width * 4, kernel_size=3, padding=1),
             norm(base_width * 4),

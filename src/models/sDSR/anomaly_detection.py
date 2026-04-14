@@ -87,6 +87,13 @@ class _UnetEncoder(nn.Module):
             norm(base_width * 4),
             nn.ReLU(inplace=True),
         )
+        self.block4 = nn.Sequential(
+            nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
+            norm(base_width * 4),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
+            norm(base_width * 4),
+            nn.ReLU(inplace=True))
 
     def forward(
         self, x: torch.Tensor
@@ -95,9 +102,10 @@ class _UnetEncoder(nn.Module):
         mp1 = self.mp1(b1)
         b2 = self.block2(mp1)
         mp2 = self.mp2(b2)
-        b3_skip = self.block3(mp2)
-        btn = self.mp3(b3_skip)
-        return b1, b2, b3_skip, btn
+        b3 = self.block3(mp2)
+        mp3 = self.mp3(b3)
+        b4 = self.block4(mp3)
+        return b1, b2, b3, b4
 
 
 class _UnetDecoder(nn.Module):
@@ -152,16 +160,20 @@ class _UnetDecoder(nn.Module):
         self,
         b1: torch.Tensor,
         b2: torch.Tensor,
-        b3_skip: torch.Tensor,
-        btn: torch.Tensor,
+        b3: torch.Tensor,
+        b4: torch.Tensor,
     ) -> torch.Tensor:
-        up1 = self.up1(btn)
-        cat1 = torch.cat([up1, b3_skip], dim=1)
+        up1 = self.up1(b4)
+        cat1 = torch.cat((up1, b3), dim=1)
         db1 = self.db1(cat1)
+
         up2 = self.up2(db1)
-        cat2 = torch.cat([up2, b2], dim=1)
+        cat2 = torch.cat((up2, b2), dim=1)
         db2 = self.db2(cat2)
+
         up3 = self.up3(db2)
-        cat3 = torch.cat([up3, b1], dim=1)
+        cat3 = torch.cat((up3, b1), dim=1)
         db3 = self.db3(cat3)
-        return self.fin_out(db3)
+
+        out = self.fin_out(db3)
+        return out
