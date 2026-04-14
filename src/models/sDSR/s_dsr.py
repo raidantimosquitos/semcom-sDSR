@@ -23,12 +23,12 @@ from .anomaly_detection import AnomalyDetectionModule
 
 # Per-machine-type codebook sampling presets (derived from L2 distance maps)
 SAMPLING_PRESETS: dict[str, dict] = {
-    "pump":         {"neighbor_prob": 0.05, "anomaly_strength_min": 0.1, "anomaly_strength_max": 1.0},
-    "slider":       {"neighbor_prob": 0.05, "anomaly_strength_min": 0.1, "anomaly_strength_max": 1.0},
-    "valve":        {"neighbor_prob": 0.10, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.7},
+    "pump":         {"neighbor_prob": 0.05, "anomaly_strength_min": 0.2, "anomaly_strength_max": 1.0},
+    "slider":       {"neighbor_prob": 0.05, "anomaly_strength_min": 0.2, "anomaly_strength_max": 1.0},
+    "valve":        {"neighbor_prob": 0.10, "anomaly_strength_min": 0.2, "anomaly_strength_max": 0.7},
     "ToyCar":       {"neighbor_prob": 0.15, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.6},
     "ToyConveyor":  {"neighbor_prob": 0.15, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.5},
-    "fan":          {"neighbor_prob": 0.10, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.8},
+    "fan":          {"neighbor_prob": 0.10, "anomaly_strength_min": 0.2, "anomaly_strength_max": 0.8},
 }
 
 
@@ -42,7 +42,7 @@ class sDSRConfig:
     n_mels: int = 128
     T: int = 320
     anomaly_sampling: Literal["distant", "uniform"] = "distant"
-    anomaly_strength_min: float = 0.1
+    anomaly_strength_min: float = 0.2
     anomaly_strength_max: float = 1.0
     neighbor_prob: float = 0.05
     use_subspace_restriction: bool = True
