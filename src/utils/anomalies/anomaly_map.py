@@ -235,6 +235,20 @@ class MixNoiseStrategy:
 
 
 # ---------------------------------------------------------------------------
+# Per-machine-type mask geometry presets (derived from L2 distance maps)
+# ---------------------------------------------------------------------------
+
+MASK_PRESETS: dict[str, dict] = {
+    "pump":         {"full_time_prob": 0.5, "max_band_frac": 0.20, "num_bands_range": (1, 3), "perlin_prob": 0.0},
+    "slider":       {"full_time_prob": 0.4, "max_band_frac": 0.12, "num_bands_range": (1, 2), "perlin_prob": 0.0},
+    "valve":        {"full_time_prob": 0.3, "max_band_frac": 0.15, "num_bands_range": (1, 2), "perlin_prob": 0.0},
+    "ToyCar":       {"full_time_prob": 0.4, "max_band_frac": 0.10, "num_bands_range": (1, 2), "perlin_prob": 0.0},
+    "ToyConveyor":  {"full_time_prob": 0.5, "max_band_frac": 0.12, "num_bands_range": (2, 3), "perlin_prob": 0.0},
+    "fan":          {"full_time_prob": 0.3, "max_band_frac": 0.15, "num_bands_range": (1, 3), "perlin_prob": 0.15},
+}
+
+
+# ---------------------------------------------------------------------------
 # 2. SpectromorphicMaskStrategy (replaces LatentAlignedBandStrategy)
 # ---------------------------------------------------------------------------
 
@@ -276,10 +290,20 @@ class SpectromorphicMaskStrategy:
         T: int | None = None,
         perlin_prob: float = 0.0,
         full_time_prob: float = 0.3,
-        max_band_frac: float = 0.1,
+        max_band_frac: float = 0.15,
         max_segments: int = 5,
+        num_bands_range: tuple[int, int] = (1, 1),
+        machine_type: str | None = None,
         **_kwargs: object,
     ) -> None:
+        if machine_type is not None and machine_type in MASK_PRESETS:
+            preset = MASK_PRESETS[machine_type]
+            perlin_prob = preset.get("perlin_prob", perlin_prob)
+            full_time_prob = preset.get("full_time_prob", full_time_prob)
+            max_band_frac = preset.get("max_band_frac", max_band_frac)
+            max_segments = preset.get("max_segments", max_segments)
+            num_bands_range = preset.get("num_bands_range", num_bands_range)
+
         if spectrogram_shape is not None:
             self.n_mels = n_mels or spectrogram_shape[0]
             self.T = T or spectrogram_shape[1]
@@ -291,6 +315,8 @@ class SpectromorphicMaskStrategy:
         self.full_time_prob = full_time_prob
         self.max_band_width = max(1, int(self.n_mels * max_band_frac))
         self.max_segments = max(1, max_segments)
+        self.num_bands_min = max(1, num_bands_range[0])
+        self.num_bands_max = max(self.num_bands_min, num_bands_range[1])
 
     # -- band + time segments --------------------------------------------------
 
@@ -298,21 +324,23 @@ class SpectromorphicMaskStrategy:
         n_mels, T = self.n_mels, self.T
         mask = np.zeros((n_mels, T), dtype=np.float32)
 
-        band_w = random.randint(1, self.max_band_width)
-        f0 = random.randint(0, n_mels - band_w)
+        n_bands = random.randint(self.num_bands_min, self.num_bands_max)
+        for _ in range(n_bands):
+            band_w = random.randint(1, self.max_band_width)
+            f0 = random.randint(0, n_mels - band_w)
 
-        if random.random() < self.full_time_prob:
-            coverage = random.uniform(0.85, 1.0)
-            t_len = max(1, int(T * coverage))
-            t0 = random.randint(0, max(0, T - t_len))
-            mask[f0 : f0 + band_w, t0 : t0 + t_len] = 1.0
-        else:
-            n_seg = random.randint(2, self.max_segments)
-            seg_lo = max(1, T // 10)
-            seg_hi = max(seg_lo, T // 3)
-            segments = _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi)
-            for t0, t1 in segments:
-                mask[f0 : f0 + band_w, t0:t1] = 1.0
+            if random.random() < self.full_time_prob:
+                coverage = random.uniform(0.85, 1.0)
+                t_len = max(1, int(T * coverage))
+                t0 = random.randint(0, max(0, T - t_len))
+                mask[f0 : f0 + band_w, t0 : t0 + t_len] = 1.0
+            else:
+                n_seg = random.randint(2, self.max_segments)
+                seg_lo = max(1, T // 10)
+                seg_hi = max(seg_lo, T // 3)
+                segments = _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi)
+                for t0, t1 in segments:
+                    mask[f0 : f0 + band_w, t0:t1] = 1.0
 
         return mask
 
@@ -384,6 +412,7 @@ class AnomalyMapGenerator:
         n_mels: int | None = None,
         T: int | None = None,
         zero_mask_prob: float = 0.5,
+        machine_type: str | None = None,
     ) -> None:
         self.strategy_name = strategy
         self.spectrogram_shape = spectrogram_shape
@@ -404,11 +433,17 @@ class AnomalyMapGenerator:
             else None
         )
         self.audio_specific = (
-            AudioSpecificStrategy(spectrogram_shape, self.q_shape, _n_mels, _T)
+            AudioSpecificStrategy(
+                spectrogram_shape, self.q_shape, _n_mels, _T,
+                machine_type=machine_type,
+            )
             if strategy == "audio_specific"
             else None
         )
-        self._fallback = AudioSpecificStrategy(spectrogram_shape, self.q_shape, _n_mels, _T)
+        self._fallback = AudioSpecificStrategy(
+            spectrogram_shape, self.q_shape, _n_mels, _T,
+            machine_type=machine_type,
+        )
 
     def _generate_one(self, device: torch.device | str) -> torch.Tensor:
         """Generate a single non-zero mask (1, 1, H, W)."""

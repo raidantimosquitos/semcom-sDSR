@@ -284,9 +284,10 @@ class AudDSRAnomTrainDataset(Dataset):
         ] = "audio_specific",
         zero_mask_prob: float = 0.5,
         adversarial_dataset: Dataset | None = None,
+        machine_type: str | None = None,
     ) -> None:
         self.base = base_dataset
-        self.machine_type = getattr(base_dataset, "machine_type", None)
+        self.machine_type = machine_type or getattr(base_dataset, "machine_type", None)
         self.strategy = strategy
         self.zero_mask_prob = zero_mask_prob
         self.adversarial_dataset = (
@@ -305,6 +306,7 @@ class AudDSRAnomTrainDataset(Dataset):
             n_mels=n_mels,
             T=T,
             zero_mask_prob=0.0,
+            machine_type=self.machine_type,
         )
 
     def __len__(self) -> int:

@@ -158,6 +158,7 @@ def build_s_dsr(
     embedding_dim: Tuple[int, int],
     anomaly_sampling: Literal["distant", "uniform"] = "distant",
     anomaly_inj_distribution: Literal["uniform", "dsr"] = "uniform",
+    machine_type: str | None = None,
 ) -> sDSR:
     cfg = sDSRConfig(
         embedding_dim=embedding_dim,
@@ -167,6 +168,7 @@ def build_s_dsr(
         T=T,
         anomaly_sampling=anomaly_sampling,
         anomaly_inj_distribution=anomaly_inj_distribution,
+        machine_type=machine_type,
     )
     return sDSR(vq_vae, cfg)
 
@@ -255,11 +257,15 @@ def run_stage2(args: argparse.Namespace) -> None:
         if adversarial_indices:
             adversarial_dataset = Subset(q_vae_full, adversarial_indices)
 
+    # Per-machine presets only apply when training on a single machine type
+    single_machine_type = machine_types[0] if len(machine_types) == 1 else None
+
     train_dataset = AudDSRAnomTrainDataset(
         q_vae_dataset,
         strategy=args.anomaly_strategy,
         zero_mask_prob=0.5,
         adversarial_dataset=adversarial_dataset,
+        machine_type=single_machine_type,
     )
 
     # Load VQ-VAE from Stage 1 (same architecture as training; support old checkpoint keys)
@@ -288,6 +294,7 @@ def run_stage2(args: argparse.Namespace) -> None:
         embedding_dim=(embedding_dim_coarse, embedding_dim_fine),
         anomaly_sampling=args.anomaly_sampling,
         anomaly_inj_distribution=args.anomaly_inj_distribution,
+        machine_type=single_machine_type,
     )
 
     val_dataset = None

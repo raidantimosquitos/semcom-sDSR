@@ -21,6 +21,17 @@ from .anomaly_generation import AnomalyGeneration
 from .anomaly_detection import AnomalyDetectionModule
 
 
+# Per-machine-type codebook sampling presets (derived from L2 distance maps)
+SAMPLING_PRESETS: dict[str, dict] = {
+    "pump":         {"neighbor_prob": 0.05, "anomaly_strength_min": 0.1, "anomaly_strength_max": 1.0},
+    "slider":       {"neighbor_prob": 0.05, "anomaly_strength_min": 0.1, "anomaly_strength_max": 1.0},
+    "valve":        {"neighbor_prob": 0.10, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.7},
+    "ToyCar":       {"neighbor_prob": 0.15, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.6},
+    "ToyConveyor":  {"neighbor_prob": 0.15, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.5},
+    "fan":          {"neighbor_prob": 0.10, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.8},
+}
+
+
 @dataclass
 class sDSRConfig:
     """Configuration for sDSR model."""
@@ -32,11 +43,20 @@ class sDSRConfig:
     T: int = 320
     anomaly_sampling: Literal["distant", "uniform"] = "distant"
     anomaly_strength_min: float = 0.1
-    anomaly_strength_max: float = 1
+    anomaly_strength_max: float = 1.0
+    neighbor_prob: float = 0.05
     use_subspace_restriction: bool = True
     # Stage-2 latent injection: "uniform" = P(fine-only)=P(coarse-only)=P(both)=1/3;
     # "dsr" = P(both)=0.5, P(fine-only)=P(coarse-only)=0.25 (same tree as DSR use_both then use_hi/use_lo).
     anomaly_inj_distribution: Literal["uniform", "dsr"] = "dsr"
+    machine_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.machine_type is not None and self.machine_type in SAMPLING_PRESETS:
+            preset = SAMPLING_PRESETS[self.machine_type]
+            self.neighbor_prob = preset.get("neighbor_prob", self.neighbor_prob)
+            self.anomaly_strength_min = preset.get("anomaly_strength_min", self.anomaly_strength_min)
+            self.anomaly_strength_max = preset.get("anomaly_strength_max", self.anomaly_strength_max)
 
 
 class sDSR(nn.Module):
@@ -81,8 +101,10 @@ class sDSR(nn.Module):
             base_width=128,
         )
 
-        # Anomaly generation (training only): codebook replacement using dataset-provided mask
-        self._anomaly_generation = AnomalyGeneration(sampling=cfg.anomaly_sampling)
+        self._anomaly_generation = AnomalyGeneration(
+            sampling=cfg.anomaly_sampling,
+            neighbor_prob=cfg.neighbor_prob,
+        )
 
         self._freeze_stage1()
 

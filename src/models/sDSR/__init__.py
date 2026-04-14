@@ -13,7 +13,7 @@ Anomaly map utilities (AnomalyMapGenerator, etc.) live in src.utils.anomalies;
 re-exported here for convenience.
 """
 
-from .s_dsr import sDSR, sDSRConfig
+from .s_dsr import sDSR, sDSRConfig, SAMPLING_PRESETS
 from .object_specific_decoder import ObjectSpecificDecoder
 from .anomaly_detection import AnomalyDetectionModule
 from .anomaly_generation import AnomalyGeneration
@@ -31,6 +31,7 @@ from ...utils.anomalies import (
 __all__ = [
     "sDSR",
     "sDSRConfig",
+    "SAMPLING_PRESETS",
     "ObjectSpecificDecoder",
     "SubspaceRestrictionModule",
     "SubspaceRestrictionNetwork",

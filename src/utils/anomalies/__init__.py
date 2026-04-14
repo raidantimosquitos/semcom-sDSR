@@ -13,6 +13,7 @@ from .anomaly_map import (
     AnomalyMapGenerator,
     AudioSpecificStrategy,
     LatentAlignedBandStrategy,
+    MASK_PRESETS,
     SpectromorphicMaskStrategy,
 )
 from .anomaly_generation import (
@@ -24,6 +25,7 @@ __all__ = [
     "AnomalyMapGenerator",
     "AudioSpecificStrategy",
     "LatentAlignedBandStrategy",
+    "MASK_PRESETS",
     "SpectromorphicMaskStrategy",
     "generate_fake_anomalies_distant",
     "generate_fake_anomalies_uniform",
