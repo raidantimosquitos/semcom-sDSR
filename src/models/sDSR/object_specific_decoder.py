@@ -224,7 +224,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
         x = self._residual_stack(x)
 
         x = self._conv_trans_1(x)
-        x = F.silu(x)
+        x = F.relu(x)
 
         return self._conv_trans_2(x)
 
