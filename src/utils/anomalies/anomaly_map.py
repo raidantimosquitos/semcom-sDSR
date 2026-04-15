@@ -240,8 +240,8 @@ class MixNoiseStrategy:
 
 MASK_PRESETS: dict[str, dict] = {
     "pump":         {"full_time_prob": 0.5, "max_band_frac": 0.20, "max_segments": 5, "perlin_prob": 0.2},
-    "slider":       {"full_time_prob": 0.7, "max_band_frac": 0.20, "max_segments": 5, "perlin_prob": 0.2},
-    "valve":        {"full_time_prob": 0.5, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.2},
+    "slider":       {"full_time_prob": 0.7, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.2},
+    "valve":        {"full_time_prob": 0.5, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.5},
     "ToyCar":       {"full_time_prob": 0.4, "max_band_frac": 0.10, "max_segments": 5, "perlin_prob": 0.2},
     "ToyConveyor":  {"full_time_prob": 0.5, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
     "fan":          {"full_time_prob": 0.5, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.2},
