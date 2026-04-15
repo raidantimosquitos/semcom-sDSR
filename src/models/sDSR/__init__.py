@@ -16,7 +16,11 @@ re-exported here for convenience.
 from .s_dsr import sDSR, sDSRConfig, SAMPLING_PRESETS
 from .object_specific_decoder import ObjectSpecificDecoder
 from .anomaly_detection import AnomalyDetectionModule
-from .anomaly_generation import AnomalyGeneration
+from .anomaly_generation import (
+    AnomalyGeneration,
+    project_spec_mask_to_latent_binary,
+    upsample_latent_mask_to_spec,
+)
 from .subspace_restriction import SubspaceRestrictionModule, SubspaceRestrictionNetwork
 from .loss import FocalLoss
 
@@ -39,6 +43,8 @@ __all__ = [
     "AudioSpecificStrategy",
     "LatentAlignedBandStrategy",
     "AnomalyGeneration",
+    "project_spec_mask_to_latent_binary",
+    "upsample_latent_mask_to_spec",
     "generate_fake_anomalies_distant",
     "AnomalyDetectionModule",
     "FocalLoss",

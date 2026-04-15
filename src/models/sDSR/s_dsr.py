@@ -17,7 +17,11 @@ import torch.nn.functional as F
 from ..vq_vae.autoencoders import VQ_VAE_2Layer
 
 from .object_specific_decoder import ObjectSpecificDecoder
-from .anomaly_generation import AnomalyGeneration
+from .anomaly_generation import (
+    AnomalyGeneration,
+    project_spec_mask_to_latent_binary,
+    upsample_latent_mask_to_spec,
+)
 from .anomaly_detection import AnomalyDetectionModule
 
 
@@ -237,7 +241,9 @@ class sDSR(nn.Module):
                 m_out: (B, 2, n_mels, T) segmentation logits
                 x_g: (B, 3, n_mels, T) general reconstruction
                 x_s: (B, 3, n_mels, T) object-specific reconstruction
-                M: (B, 1, n_mels, T) anomaly map for focal loss target
+                M: (B, 1, n_mels, T) DSR-style focal target (latent-snapped mask
+                    upsampled to spectrogram resolution; see ``M_gt`` for raw mask)
+                M_gt: (B, 1, n_mels, T) original dataset mask (debugging / logging)
                 x: input (for L2 reconstruction target)
                 When subspace restriction is enabled, also:
                 recon_feat_fine, recon_feat_coarse, q_fine, q_coarse — for full-batch
@@ -309,12 +315,25 @@ class sDSR(nn.Module):
         x_specific, aux = out_dec
         m_out = self._anomaly_detection(x_specific.detach(), x_general.detach())
 
-        # GT mask for focal loss: M_gt at spectrogram shape (same as m_out spatial dims)
+        # DSR-style focal target: pool M_gt to fine/coarse latent grids (same as
+        # injection), nearest-upsample to spectrogram resolution, mix by inj_mode.
+        _, _, n_mels, T_spec = M_gt.shape
+        H_fine, W_fine = q_fine.shape[2], q_fine.shape[3]
+        H_coarse, W_coarse = q_coarse.shape[2], q_coarse.shape[3]
+        M_hi_lat = project_spec_mask_to_latent_binary(M_gt, H_fine, W_fine)
+        M_lo_lat = project_spec_mask_to_latent_binary(M_gt, H_coarse, W_coarse)
+        M_hi = upsample_latent_mask_to_spec(M_hi_lat, n_mels, T_spec)
+        M_lo = upsample_latent_mask_to_spec(M_lo_lat, n_mels, T_spec)
+        M_focal = has_anomaly * (
+            is_fine_only * M_hi + (is_coarse_only + is_both) * M_lo
+        )
+
         result = {
             "m_out": m_out,
             "x_general": x_general,
             "x_specific": x_specific,
-            "M": M_gt.float(),
+            "M": M_focal,
+            "M_gt": M_gt.float(),
             "x": x,
         }
         if "recon_feat_coarse" in aux and "recon_feat_fine" in aux:
@@ -387,11 +406,17 @@ if __name__ == "__main__":
     _print_shape("forward_train -> m_out", out["m_out"])
     _print_shape("forward_train -> x_general", out["x_general"])
     _print_shape("forward_train -> x_specific", out["x_specific"])
-    _print_shape("forward_train -> M (anomaly map)", out["M"])
+    _print_shape("forward_train -> M (DSR-style focal target)", out["M"])
+    _print_shape("forward_train -> M_gt (raw mask)", out["M_gt"])
     _print_shape("forward_train -> x (input)", out["x"])
     print("-" * 50)
 
     assert out["m_out"].shape == (2, 2, 128, 320)
     assert out["x_specific"].shape == (2, 1, 128, 320)
-    assert out["M"].shape == (2, 1, 128, 320), "M (loss target) must be spectrogram shape"
+    assert out["M"].shape == (2, 1, 128, 320), "M (focal target) must be spectrogram shape"
+    assert out["M_gt"].shape == (2, 1, 128, 320)
+    uniq = _torch.unique(out["M"])
+    assert bool((_torch.isin(uniq, _torch.tensor([0.0, 1.0], device=device))).all()), (
+        "M focal target should be binary for binary M_gt"
+    )
     print("sDSR smoke test passed.")

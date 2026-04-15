@@ -27,6 +27,66 @@ def _match_mask_size(mask: torch.Tensor, target: tuple[int, int]) -> torch.Tenso
         mask = mask[:, :, :H, :W].contiguous()
     return mask
 
+
+def spec_to_latent_pool_stride(
+    H_spec: int,
+    W_spec: int,
+    H_lat: int,
+    W_lat: int,
+) -> tuple[int, int]:
+    """Kernel/stride for pooling a spectrogram-shaped mask onto a latent grid."""
+    return (max(1, H_spec // H_lat), max(1, W_spec // W_lat))
+
+
+def project_spec_mask_to_latent_binary(
+    M: torch.Tensor,
+    H_lat: int,
+    W_lat: int,
+) -> torch.Tensor:
+    """
+    Pool ``M`` from spectrogram resolution to ``(H_lat, W_lat)``, then binarize.
+
+    Same rule as :meth:`AnomalyGeneration.forward`: avg_pool over each latent
+    footprint, pad/crop to exact latent shape, then ``> 0`` so any active spec
+    pixel marks the latent cell.
+
+    Args:
+        M: (B, 1, H_spec, W_spec) mask at spectrogram resolution
+        H_lat, W_lat: target latent height and width
+
+    Returns:
+        (B, 1, H_lat, W_lat) float in ``{0.0, 1.0}``
+    """
+    M_float = M.float()
+    H_spec, W_spec = M_float.shape[2], M_float.shape[3]
+    stride = spec_to_latent_pool_stride(H_spec, W_spec, H_lat, W_lat)
+    M_lat = F.avg_pool2d(M_float, kernel_size=stride, stride=stride)
+    if M_lat.shape[2] != H_lat or M_lat.shape[3] != W_lat:
+        M_lat = _match_mask_size(M_lat, (H_lat, W_lat))
+    return (M_lat > 0).float()
+
+
+def upsample_latent_mask_to_spec(
+    M_lat: torch.Tensor,
+    n_mels: int,
+    T: int,
+) -> torch.Tensor:
+    """
+    Nearest upsample a latent mask to spectrogram size (piecewise-constant blocks).
+
+    Matches DSR-style focal supervision: latent cell values are expanded to
+    full-resolution targets without soft blending between cells.
+
+    Args:
+        M_lat: (B, 1, H_lat, W_lat)
+        n_mels, T: target spectrogram height and width
+
+    Returns:
+        (B, 1, n_mels, T)
+    """
+    return F.interpolate(M_lat, size=(n_mels, T), mode="nearest")
+
+
 class AnomalyGeneration(nn.Module):
     """
     Augment (q_fine, q_coarse) with synthetic anomalies using VQ codebook sampling.
@@ -76,22 +136,10 @@ class AnomalyGeneration(nn.Module):
         """
         cb_fine = vq_fine._embedding.weight
         cb_coarse = vq_coarse._embedding.weight
-        M_float = M.float()
-        # Any-active projection: max-pool so any latent cell with ≥1 active spec pixel is flagged
-        H_spec, W_spec = M_float.shape[2], M_float.shape[3]
         H_fine, W_fine = q_fine.shape[2], q_fine.shape[3]
         H_coarse, W_coarse = q_coarse.shape[2], q_coarse.shape[3]
-        stride_fine = (max(1, H_spec // H_fine), max(1, W_spec // W_fine))
-        stride_coarse = (max(1, H_spec // H_coarse), max(1, W_spec // W_coarse))
-        M_fine = F.avg_pool2d(M_float, kernel_size=stride_fine, stride=stride_fine)
-        M_coarse = F.avg_pool2d(M_float, kernel_size=stride_coarse, stride=stride_coarse)
-        if M_fine.shape[2] != H_fine or M_fine.shape[3] != W_fine:
-            M_fine = _match_mask_size(M_fine, (H_fine, W_fine))
-        if M_coarse.shape[2] != H_coarse or M_coarse.shape[3] != W_coarse:
-            M_coarse = _match_mask_size(M_coarse, (H_coarse, W_coarse))
-
-        M_fine = (M_fine > 0).float()
-        M_coarse = (M_coarse > 0).float()
+        M_fine = project_spec_mask_to_latent_binary(M, H_fine, W_fine)
+        M_coarse = project_spec_mask_to_latent_binary(M, H_coarse, W_coarse)
 
         if not augment_coarse:
             q_coarse_a = q_coarse

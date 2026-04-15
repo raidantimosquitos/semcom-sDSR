@@ -29,7 +29,7 @@ class Stage2Trainer(BaseTrainer):
     Trainer for Stage 2 (sDSR anomaly detection).
 
     Model must implement forward_train(x, M_gt) returning dict with:
-        m_out, x_s, M, x
+        m_out, x_s, M (focal target; latent-snapped), x
     Only trainable params (object_decoder, anomaly_detection) are optimized.
     """
 
