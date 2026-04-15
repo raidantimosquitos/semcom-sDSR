@@ -99,7 +99,6 @@ class Stage2Trainer(BaseTrainer):
         self._val_dataset = val_dataset
         self._val_every = val_every
         self._val_batch_size = val_batch_size
-        self.best_val_pauc: float = 0.0
         self.best_val_auc: float = 0.0
         # Previous best-val checkpoint path per metric (deleted when a new best is saved).
         self._val_best_ckpt_paths: dict[str, Path] = {}
@@ -288,9 +287,8 @@ class Stage2Trainer(BaseTrainer):
             mean_pauc = avg["pauc"]
             self._tee(
                 f"  [val@{self.global_step}] average AUC={mean_auc:.4f} pAUC={mean_pauc:.4f}  "
-                f"(best: AUC={self.best_val_auc:.4f} pAUC={self.best_val_pauc:.4f})"
+                f"(best AUC={self.best_val_auc:.4f})"
             )
-            self._save_val_best(mean_pauc, "best_val_pauc", "best_pauc", "pAUC")
             self._save_val_best(mean_auc, "best_val_auc", "best_auc", "AUC")
 
         self.model.train()
