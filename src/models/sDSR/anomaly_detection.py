@@ -41,8 +41,8 @@ class AnomalyDetectionModule(nn.Module):
             logits: (B, 2, n_mels, T) segmentation logits [normal, anomaly]
         """
         x = torch.cat([x_specific, x_general], dim=1)
-        b1, b2, b3_skip, btn = self.unet_enc(x)
-        return self.unet_dec(b1, b2, b3_skip, btn)
+        b1, b2, b3, b4 = self.unet_enc(x)
+        return self.unet_dec(b1, b2, b3, b4)
 
 class _UnetEncoder(nn.Module):
     def __init__(self, in_channels: int, base_width: int) -> None:

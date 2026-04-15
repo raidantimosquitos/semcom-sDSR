@@ -70,7 +70,7 @@ for machine_type in "${MACHINE_TYPES[@]}"; do
       --batch_size "$BATCH_SIZE" \
       --anomaly_sampling "distant" \
       --anomaly_strategy "$anomaly_strategy" \
-      --val_every 500
+      --val_every 2000
 
   done
 done
