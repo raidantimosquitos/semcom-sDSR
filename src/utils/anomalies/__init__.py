@@ -5,7 +5,8 @@ Anomaly simulation utilities for AudDSR training.
 - SpectromorphicMaskStrategy: four sub-strategies (full_band, multi_band,
   diffuse_rect, perlin) sampled per-item
 - AudioSpecificStrategy / LatentAlignedBandStrategy: backward-compatible aliases
-- generate_fake_anomalies_distant: codebook-based feature replacement (distant + neighbor)
+- generate_fake_anomalies_distant: codebook-based feature replacement (distant +
+  neighbor); distant mode skips a configurable nearest fraction (default 5 %)
 - generate_fake_anomalies_uniform: uniform codebook sampling for masked positions
 """
 

@@ -95,8 +95,9 @@ class AnomalyGeneration(nn.Module):
     :class:`sDSR.forward_train` then applies fine-only, coarse-only, or both,
     per anomaly sample.
 
-    sampling: "distant" = similarity-ordered subset (skip closest 5%, strength
-    controls distance); "uniform" = draw uniformly from full codebook (no z/strength).
+    sampling: "distant" = similarity-ordered subset (skip closest codebook fraction:
+    3% coarse, 5% fine; strength controls range); "uniform" = draw uniformly from
+    full codebook (no z/strength).
     """
 
     def __init__(self, sampling: str = "distant", neighbor_prob: float = 0.05) -> None:
@@ -150,6 +151,7 @@ class AnomalyGeneration(nn.Module):
             q_coarse_a = generate_fake_anomalies_distant(
                 z_c, q_coarse, cb_coarse, M_coarse, strength_coarse,
                 neighbor_prob=self.neighbor_prob,
+                closest_skip_frac=0.03,
             )
 
         if not augment_fine:
@@ -161,5 +163,6 @@ class AnomalyGeneration(nn.Module):
             q_fine_a = generate_fake_anomalies_distant(
                 z_f, q_fine, cb_fine, M_fine, strength_fine,
                 neighbor_prob=self.neighbor_prob,
+                closest_skip_frac=0.05,
             )
         return q_fine_a, q_coarse_a

@@ -2,8 +2,9 @@
 Generic anomaly generation: replace masked feature vectors with codebook samples.
 
 Two sampling regimes (selected per-sample):
-  * **Distant** (default): skip closest 5 % of codebook, sample from top-k nearest
-    controlled by ``strength`` — produces clearly out-of-distribution replacements.
+  * **Distant** (default): skip the closest ``closest_skip_frac`` of the codebook
+    (default 5 %), then sample from the top-k nearest controlled by ``strength``
+    — produces clearly out-of-distribution replacements.
   * **Neighbor**: sample from ranks 2–``neighbor_k`` closest codebook entries
     (skip only the identity match) — produces subtle, near-in-distribution
     replacements that mimic the faint spectral shifts seen in real DCASE anomalies.
@@ -29,14 +30,15 @@ def generate_fake_anomalies_distant(
     strength: torch.Tensor | float,
     neighbor_prob: float = 0.05,
     neighbor_k: int = _NEIGHBOR_K_DEFAULT,
+    closest_skip_frac: float = 0.05,
 ) -> torch.Tensor:
     """
     Replace feature vectors in mask regions with codebook samples.
 
     For each sample in the batch, with probability ``neighbor_prob`` the
     *neighbor* regime is used (ranks 2..``neighbor_k``); otherwise the
-    original *distant* regime is used (skip closest 5 %, sample up to
-    ``strength`` fraction of codebook).
+    original *distant* regime is used (skip closest ``closest_skip_frac`` of
+    codebook by rank, default 5 %; sample up to ``strength`` fraction of codebook).
 
     Args:
         z: (B, emb_dim, H, W) continuous features for distance computation
@@ -46,6 +48,8 @@ def generate_fake_anomalies_distant(
         strength: (B,) or scalar; fraction controlling distant-mode range
         neighbor_prob: probability of using neighbor mode per sample
         neighbor_k: number of nearest entries to consider in neighbor mode
+        closest_skip_frac: in distant mode, fraction of nearest codebook entries
+            to exclude before sampling (ignored in neighbor mode)
 
     Returns:
         Augmented embeddings (B, emb_dim, H, W)
@@ -82,7 +86,7 @@ def generate_fake_anomalies_distant(
             pct = strength[k].item()
             topk = max(1, min(int(pct * N) + 1, N - 1))
             _, topk_indices = torch.topk(distances, topk, dim=1, largest=False)
-            skip = int(N * 0.05)
+            skip = int(N * closest_skip_frac)
             topk_indices = topk_indices[:, skip:]
 
         topk_n = topk_indices.shape[1]

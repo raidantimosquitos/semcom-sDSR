@@ -27,12 +27,12 @@ from .anomaly_detection import AnomalyDetectionModule
 
 # Per-machine-type codebook sampling presets (derived from L2 distance maps)
 SAMPLING_PRESETS: dict[str, dict] = {
-    "pump":         {"neighbor_prob": 0.05, "anomaly_strength_min": 0.05, "anomaly_strength_max": 1.0},
-    "slider":       {"neighbor_prob": 0.05, "anomaly_strength_min": 0.05, "anomaly_strength_max": 1.0},
-    "valve":        {"neighbor_prob": 0.05, "anomaly_strength_min": 0.05, "anomaly_strength_max": 1.0},
-    "ToyCar":       {"neighbor_prob": 0.05, "anomaly_strength_min": 0.05, "anomaly_strength_max": 1.0},
-    "ToyConveyor":  {"neighbor_prob": 0.05, "anomaly_strength_min": 0.05, "anomaly_strength_max": 1.0},
-    "fan":          {"neighbor_prob": 0.05, "anomaly_strength_min": 0.05, "anomaly_strength_max": 1.0},
+    "pump":         {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.05, 0.99), "anomaly_strength_coarse": (0.05, 0.98)},
+    "slider":       {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.05, 0.99), "anomaly_strength_coarse": (0.05, 0.98)},
+    "valve":        {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.05, 0.99), "anomaly_strength_coarse": (0.05, 0.98)},
+    "ToyCar":       {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.05, 0.99), "anomaly_strength_coarse": (0.05, 0.98)},
+    "ToyConveyor":  {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.05, 0.99), "anomaly_strength_coarse": (0.05, 0.98)},
+    "fan":          {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.05, 0.99), "anomaly_strength_coarse": (0.05, 0.98)},
 }
 
 
@@ -46,8 +46,8 @@ class sDSRConfig:
     n_mels: int = 128
     T: int = 320
     anomaly_sampling: Literal["distant", "uniform"] = "distant"
-    anomaly_strength_min: float = 0.2
-    anomaly_strength_max: float = 1.0
+    anomaly_strength_fine: Tuple[float, float] = (0.3, 0.99)
+    anomaly_strength_coarse: Tuple[float, float] = (0.25, 0.98)
     neighbor_prob: float = 0.05
     use_subspace_restriction: bool = True
     # Stage-2 latent injection: "uniform" = P(fine-only)=P(coarse-only)=P(both)=1/3;
@@ -59,8 +59,8 @@ class sDSRConfig:
         if self.machine_type is not None and self.machine_type in SAMPLING_PRESETS:
             preset = SAMPLING_PRESETS[self.machine_type]
             self.neighbor_prob = preset.get("neighbor_prob", self.neighbor_prob)
-            self.anomaly_strength_min = preset.get("anomaly_strength_min", self.anomaly_strength_min)
-            self.anomaly_strength_max = preset.get("anomaly_strength_max", self.anomaly_strength_max)
+            self.anomaly_strength_fine = preset.get("anomaly_strength_fine", self.anomaly_strength_fine)
+            self.anomaly_strength_coarse = preset.get("anomaly_strength_coarse", self.anomaly_strength_coarse)
 
 
 class sDSR(nn.Module):
@@ -257,12 +257,12 @@ class sDSR(nn.Module):
         vq_coarse = self._vq_vae._vq_coarse
 
         strength_fine = (
-            torch.rand(batch_size, device=device) * (self.config.anomaly_strength_max - self.config.anomaly_strength_min)
-            + self.config.anomaly_strength_min
+            torch.rand(batch_size, device=device) * (self.config.anomaly_strength_fine[1] - self.config.anomaly_strength_fine[0])
+            + self.config.anomaly_strength_fine[0]
         )
         strength_coarse = (
-            torch.rand(batch_size, device=device) * (self.config.anomaly_strength_max - self.config.anomaly_strength_min)
-            + self.config.anomaly_strength_min
+            torch.rand(batch_size, device=device) * (self.config.anomaly_strength_coarse[1] - self.config.anomaly_strength_coarse[0])
+            + self.config.anomaly_strength_coarse[0]
         )
         # Single spectrogram mask M_gt → projected to fine and coarse in AnomalyGeneration (spatially coherent)
         q_fine_a, q_coarse_a = self._anomaly_generation(
