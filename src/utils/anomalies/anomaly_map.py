@@ -239,12 +239,12 @@ class MixNoiseStrategy:
 # ---------------------------------------------------------------------------
 
 MASK_PRESETS: dict[str, dict] = {
-    "pump":         {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
-    "slider":       {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
-    "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
-    "ToyCar":       {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
-    "ToyConveyor":  {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
-    "fan":          {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
+    "pump":         {"full_time_prob": 0.2, "max_band_frac": 0.50, "max_segments": 5, "perlin_prob": 0.2},
+    "slider":       {"full_time_prob": 0.2, "max_band_frac": 0.50, "max_segments": 5, "perlin_prob": 0.2},
+    "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.50, "max_segments": 5, "perlin_prob": 0.2},
+    "ToyCar":       {"full_time_prob": 0.2, "max_band_frac": 0.50, "max_segments": 5, "perlin_prob": 0.2},
+    "ToyConveyor":  {"full_time_prob": 0.2, "max_band_frac": 0.50, "max_segments": 5, "perlin_prob": 0.2},
+    "fan":          {"full_time_prob": 0.2, "max_band_frac": 0.50, "max_segments": 5, "perlin_prob": 0.2},
 }
 
 
@@ -320,7 +320,7 @@ class SpectromorphicMaskStrategy:
         n_mels, T = self.n_mels, self.T
         mask = np.zeros((n_mels, T), dtype=np.float32)
 
-        band_w = random.randint(1, self.max_band_width)
+        band_w = random.randint(4, self.max_band_width)
         f0 = random.randint(0, n_mels - band_w)
 
         if random.random() < self.full_time_prob:
