@@ -58,6 +58,7 @@ class Stage2Trainer(BaseTrainer):
         val_batch_size: int = 32,
     ) -> None:
         self.machine_type = machine_type
+        self.machine_id = machine_id
         self.lambda_recon = lambda_recon
         self.lambda_focal = lambda_focal
         self.lambda_sub = lambda_sub
@@ -261,19 +262,24 @@ class Stage2Trainer(BaseTrainer):
         from .evaluator import AnomalyEvaluator
 
         self.model.eval()
+        val_id = self.machine_id
         evaluator = AnomalyEvaluator(
             model=self.model,
             test_dataset=self._val_dataset,
             device=str(self.device),
             batch_size=self._val_batch_size,
             train_score_stats=None,
+            subset_machine_id=val_id,
         )
         results = evaluator.evaluate()
 
         for run_name, ids in results.items():
-            self._tee(f"  [val@{self.global_step}] {run_name}:")
+            tag = f" (machine_id={val_id})" if val_id else ""
+            self._tee(f"  [val@{self.global_step}] {run_name}{tag}:")
             for k, v in ids.items():
                 if isinstance(v, dict):
+                    if val_id and k == "average":
+                        continue
                     self._tee(f"    {k}: AUC={v['auc']:.4f} pAUC={v['pauc']:.4f}")
 
         avg = None
@@ -285,17 +291,26 @@ class Stage2Trainer(BaseTrainer):
         if avg is not None:
             mean_auc = avg["auc"]
             mean_pauc = avg["pauc"]
+            label = f"machine_id={val_id}" if val_id else "average"
             self._tee(
-                f"  [val@{self.global_step}] average AUC={mean_auc:.4f} pAUC={mean_pauc:.4f}  "
+                f"  [val@{self.global_step}] val metric ({label}) AUC={mean_auc:.4f} pAUC={mean_pauc:.4f}  "
                 f"(best AUC={self.best_val_auc:.4f})"
             )
-            self._save_val_best(mean_auc, "best_val_auc", "best_auc", "AUC")
+            if val_id and not math.isfinite(mean_auc):
+                self._tee(
+                    f"  [val@{self.global_step}] warning: no test samples for machine_id={val_id!r}; "
+                    "skipping val-best checkpoint update"
+                )
+            elif math.isfinite(mean_auc):
+                self._save_val_best(mean_auc, "best_val_auc", "best_auc", "AUC")
 
         self.model.train()
 
     def _save_val_best(
         self, value: float, attr: str, suffix: str, label: str,
     ) -> None:
+        if not math.isfinite(value):
+            return
         prev = getattr(self, attr)
         if value <= prev:
             return

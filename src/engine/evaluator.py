@@ -39,6 +39,10 @@ class AnomalyEvaluator:
 
     Model must implement forward(x) returning M_out (B, 2, H, W) where
     channel 1 is the anomaly logit.
+
+    If ``subset_machine_id`` is set, only clips with that DCASE machine_id are
+    scored; per-ID entries and ``average`` reflect that subset (used for Stage 2
+    val-best when training on one ID).
     """
 
     def __init__(
@@ -50,6 +54,7 @@ class AnomalyEvaluator:
         batch_size: int = 32,
         train_score_stats: dict[str, tuple[float, float]] | None = None,
         train_score_stats_fallback: tuple[float, float] | None = None,
+        subset_machine_id: str | None = None,
     ) -> None:
         self.model = model.to(device)
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -63,6 +68,7 @@ class AnomalyEvaluator:
         self.machine_type = getattr(test_dataset, "machine_type", "unknown")
         self.train_score_stats = train_score_stats
         self.train_score_stats_fallback = train_score_stats_fallback
+        self.subset_machine_id = subset_machine_id
 
     def _anomaly_scores(self, m_out: torch.Tensor) -> torch.Tensor:
         """
@@ -93,6 +99,8 @@ class AnomalyEvaluator:
                 sc_mean = self._anomaly_scores(m_out)
                 for i in range(x.shape[0]):
                     mid = machine_ids[i] if isinstance(machine_ids[i], str) else str(machine_ids[i])
+                    if self.subset_machine_id is not None and mid != self.subset_machine_id:
+                        continue
                     label = int(labels[i].item())
                     score = sc_mean[i].item()
                     if self.train_score_stats is not None:
@@ -119,9 +127,17 @@ class AnomalyEvaluator:
 
         ids = [k for k in result[self.machine_type].keys() if k != "average"]
         n = len(ids)
-        result[self.machine_type]["average"] = {
-            "auc": sum(result[self.machine_type][mid]["auc"] for mid in ids) / n if n else float("nan"),
-            "pauc": sum(result[self.machine_type][mid]["pauc"] for mid in ids) / n if n else float("nan"),
-        }
+        if self.subset_machine_id is not None and n == 1:
+            # Single-ID run: "average" matches that ID (used for val-best checkpointing).
+            only = ids[0]
+            result[self.machine_type]["average"] = {
+                "auc": result[self.machine_type][only]["auc"],
+                "pauc": result[self.machine_type][only]["pauc"],
+            }
+        else:
+            result[self.machine_type]["average"] = {
+                "auc": sum(result[self.machine_type][mid]["auc"] for mid in ids) / n if n else float("nan"),
+                "pauc": sum(result[self.machine_type][mid]["pauc"] for mid in ids) / n if n else float("nan"),
+            }
 
         return result

@@ -27,7 +27,7 @@ if [[ -n "${STAGE1_CKPT:-}" ]]; then
 fi
 
 # All 6 DCASE2020 Task 2 machine types for stage2
-MACHINE_TYPES=(slider valve fan)
+MACHINE_TYPES=(ToyCar ToyConveyor fan pump slider valve)
 
 # Anomaly mask strategies to train stage2 with
 ANOMALY_STRATEGIES=(audio_specific)

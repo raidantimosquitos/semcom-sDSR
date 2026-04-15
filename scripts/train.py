@@ -74,7 +74,8 @@ def parse_args() -> argparse.Namespace:
         "--machine_id",
         type=str,
         default=None,
-        help="If set, train on this machine_id only (single-type only); other IDs of the same type used as adversarial samples (mask all 1s). Not used for joint multi-type training.",
+        help="If set, train on this machine_id only (single-type only); other IDs of the same type used as adversarial samples (mask all 1s). "
+        "When --val_every > 0, validation AUC/pAUC and best-val checkpoints are computed on this machine_id only. Not used for joint multi-type training.",
     )
     s2.add_argument("--batch_size", type=int, default=16, help="Batch size (default: 16)")
     s2.add_argument("--n_iter", type=int, default=10000)

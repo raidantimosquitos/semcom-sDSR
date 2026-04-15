@@ -239,12 +239,12 @@ class MixNoiseStrategy:
 # ---------------------------------------------------------------------------
 
 MASK_PRESETS: dict[str, dict] = {
-    "pump":         {"full_time_prob": 0.5, "max_band_frac": 0.20, "max_segments": 5, "perlin_prob": 0.2},
-    "slider":       {"full_time_prob": 0.0, "max_band_frac": 0.25, "max_segments": 5, "perlin_prob": 0.2},
-    "valve":        {"full_time_prob": 0.0, "max_band_frac": 0.25, "max_segments": 5, "perlin_prob": 0.2},
-    "ToyCar":       {"full_time_prob": 0.4, "max_band_frac": 0.10, "max_segments": 5, "perlin_prob": 0.2},
-    "ToyConveyor":  {"full_time_prob": 0.5, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
-    "fan":          {"full_time_prob": 0.5, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.2},
+    "pump":         {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
+    "slider":       {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
+    "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
+    "ToyCar":       {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
+    "ToyConveyor":  {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
+    "fan":          {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.2},
 }
 
 
@@ -329,9 +329,9 @@ class SpectromorphicMaskStrategy:
             t0 = random.randint(0, max(0, T - t_len))
             mask[f0 : f0 + band_w, t0 : t0 + t_len] = 1.0
         else:
-            n_seg = random.randint(2, self.max_segments)
-            seg_lo = max(1, T // 10)
-            seg_hi = max(seg_lo, T // 3)
+            n_seg = random.randint(1, self.max_segments)
+            seg_lo = max(1, T // 20)
+            seg_hi = max(seg_lo, T // 2)
             segments = _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi)
             for t0, t1 in segments:
                 mask[f0 : f0 + band_w, t0:t1] = 1.0

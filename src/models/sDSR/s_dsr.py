@@ -23,12 +23,12 @@ from .anomaly_detection import AnomalyDetectionModule
 
 # Per-machine-type codebook sampling presets (derived from L2 distance maps)
 SAMPLING_PRESETS: dict[str, dict] = {
-    "pump":         {"neighbor_prob": 0.05, "anomaly_strength_min": 0.2, "anomaly_strength_max": 1.0},
-    "slider":       {"neighbor_prob": 0.05, "anomaly_strength_min": 0.2, "anomaly_strength_max": 1.0},
-    "valve":        {"neighbor_prob": 0.10, "anomaly_strength_min": 0.2, "anomaly_strength_max": 0.7},
-    "ToyCar":       {"neighbor_prob": 0.15, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.6},
-    "ToyConveyor":  {"neighbor_prob": 0.15, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.5},
-    "fan":          {"neighbor_prob": 0.10, "anomaly_strength_min": 0.2, "anomaly_strength_max": 0.8},
+    "pump":         {"neighbor_prob": 0.05, "anomaly_strength_min": 0.1, "anomaly_strength_max": 1.0},
+    "slider":       {"neighbor_prob": 0.08, "anomaly_strength_min": 0.2, "anomaly_strength_max": 0.90},
+    "valve":        {"neighbor_prob": 0.12, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.65},
+    "ToyCar":       {"neighbor_prob": 0.18, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.55},
+    "ToyConveyor":  {"neighbor_prob": 0.18, "anomaly_strength_min": 0.1, "anomaly_strength_max": 0.55},
+    "fan":          {"neighbor_prob": 0.10, "anomaly_strength_min": 0.2, "anomaly_strength_max": 0.90},
 }
 
 
