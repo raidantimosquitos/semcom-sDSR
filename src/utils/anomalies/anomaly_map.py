@@ -239,12 +239,12 @@ class MixNoiseStrategy:
 # ---------------------------------------------------------------------------
 
 MASK_PRESETS: dict[str, dict] = {
-    "pump":         {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
-    "slider":       {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
-    "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
-    "ToyCar":       {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
-    "ToyConveyor":  {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
-    "fan":          {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
+    "pump":         {"full_time_prob": 0.4, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.4},
+    "slider":       {"full_time_prob": 0.4, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.4},
+    "valve":        {"full_time_prob": 0.4, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.4},
+    "ToyCar":       {"full_time_prob": 0.4, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.4},
+    "ToyConveyor":  {"full_time_prob": 0.4, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.4},
+    "fan":          {"full_time_prob": 0.4, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.4},
 }
 
 
@@ -288,10 +288,10 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.0,
+        perlin_prob: float = 0.4,
         full_time_prob: float = 0.3,
         max_band_frac: float = 0.1,
-        max_segments: int = 5,
+        max_segments: int = 8,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -323,7 +323,7 @@ class SpectromorphicMaskStrategy:
         else:
             n_seg = random.randint(2, self.max_segments)
             seg_lo = max(1, T // 20)
-            seg_hi = max(seg_lo, T // 3)
+            seg_hi = max(seg_lo, T // 4)
             segments = _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi)
             for t0, t1 in segments:
                 mask[f0 : f0 + band_w, t0:t1] = 1.0
@@ -333,12 +333,12 @@ class SpectromorphicMaskStrategy:
     # -- perlin ----------------------------------------------------------------
 
     def _perlin(self) -> np.ndarray:
-        res_y = 2 ** random.randint(5, 7)
-        res_x = 2 ** random.randint(1, 3)
+        res_y = 2 ** random.randint(3, 4)
+        res_x = 2 ** random.randint(1, 2)
         noise = rand_perlin_2d_np((self.n_mels, self.T), (res_y, res_x))
-        angle = random.uniform(-90.0, 90.0)
-        noise = ndimage_rotate(noise, angle, reshape=False, order=1,
-                               mode="constant", cval=0.0)
+        # angle = random.uniform(-90.0, 90.0)
+        # noise = ndimage_rotate(noise, angle, reshape=False, order=1,
+        #                       mode="constant", cval=0.0)
         threshold = random.uniform(0.3, 0.6)
         return (noise > threshold).astype(np.float32)
 
