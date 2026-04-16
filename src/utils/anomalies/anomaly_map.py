@@ -244,7 +244,7 @@ MASK_PRESETS: dict[str, dict] = {
     "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.2},
     "ToyCar":       {"full_time_prob": 1.0, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.2},
     "ToyConveyor":  {"full_time_prob": 1.0, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.2},
-    "fan":          {"full_time_prob": 0.85, "max_band_frac": 0.10, "max_segments": 4, "perlin_prob": 0.12},
+    "fan":          {"full_time_prob": 0.85, "max_band_frac": 0.05, "max_segments": 4, "perlin_prob": 0.12},
 }
 
 
@@ -303,7 +303,7 @@ class SpectromorphicMaskStrategy:
         self.q_shape = q_shape or (self.n_mels, self.T)
         self.perlin_prob = perlin_prob
         self.full_time_prob = full_time_prob
-        self.max_band_width = max(6, int(self.n_mels * max_band_frac))
+        self.max_band_width = max(1, int(self.n_mels * max_band_frac))
         self.max_segments = max(1, max_segments)
 
     # -- band + time segments --------------------------------------------------
@@ -312,7 +312,7 @@ class SpectromorphicMaskStrategy:
         n_mels, T = self.n_mels, self.T
         mask = np.zeros((n_mels, T), dtype=np.float32)
 
-        band_w = random.randint(4, self.max_band_width)
+        band_w = random.randint(1, self.max_band_width)
         f0 = random.randint(0, n_mels - band_w)
 
         if random.random() < self.full_time_prob:
