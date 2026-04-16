@@ -239,7 +239,7 @@ class MixNoiseStrategy:
 # ---------------------------------------------------------------------------
 
 MASK_PRESETS: dict[str, dict] = {
-    "pump":         {"full_time_prob": 0.5, "max_band_frac": 0.08, "max_segments": 6, "perlin_prob": 0.2},
+    "pump":         {"full_time_prob": 0.90, "max_band_frac": 0.12, "max_segments": 4, "perlin_prob": 0.2},
     "slider":       {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.2},
     "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 8, "perlin_prob": 0.2},
     "ToyCar":       {"full_time_prob": 0.75, "max_band_frac": 0.10, "max_segments": 8, "perlin_prob": 0.2},
