@@ -244,7 +244,7 @@ MASK_PRESETS: dict[str, dict] = {
     "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.12},
     "ToyCar":       {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.12},
     "ToyConveyor":  {"full_time_prob": 0.2, "max_band_frac": 0.02, "max_segments": 5, "perlin_prob": 0.12},
-    "fan":          {"full_time_prob": 0.85, "max_band_frac": 0.02, "max_segments": 4, "perlin_prob": 0.1},
+    "fan":          {"full_time_prob": 0.5, "max_band_frac": 0.05, "max_segments": 4, "perlin_prob": 0.1},
 }
 
 
@@ -312,28 +312,36 @@ class SpectromorphicMaskStrategy:
         n_mels, T = self.n_mels, self.T
         mask = np.zeros((n_mels, T), dtype=np.float32)
 
-        band_w = random.randint(4, self.max_band_width)
-        f0 = random.randint(0, n_mels - band_w)
+        n_bands = 1 if random.random() < 0.7 else random.randint(2, 3)
+        for _ in range(n_bands):
+            band_w = random.randint(4, self.max_band_width)
+            f0 = random.randint(0, n_mels - band_w)
 
-        if random.random() < self.full_time_prob:
-            coverage = random.uniform(0.85, 1.0)
-            t_len = max(1, int(T * coverage))
-            t0 = random.randint(0, max(0, T - t_len))
-            mask[f0 : f0 + band_w, t0 : t0 + t_len] = 1.0
-        else:
-            n_seg = random.randint(2, self.max_segments)
-            seg_lo = max(1, T // 20)
-            seg_hi = max(seg_lo, T // 4)
-            segments = _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi)
-            for t0, t1 in segments:
-                mask[f0 : f0 + band_w, t0:t1] = 1.0
+            if random.random() < self.full_time_prob:
+                coverage = random.uniform(0.85, 1.0)
+                t_len = max(1, int(T * coverage))
+                t0 = random.randint(0, max(0, T - t_len))
+                mask[f0 : f0 + band_w, t0 : t0 + t_len] = 1.0
+            else:
+                n_seg = random.randint(2, self.max_segments)
+                seg_lo = max(1, T // 20)
+                seg_hi = max(seg_lo, T // 4)
+                segments = _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi)
+                for t0, t1 in segments:
+                    if random.random() < 0.15:
+                        mask[:, t0:t1] = 1.0
+                    else:
+                        mask[f0 : f0 + band_w, t0:t1] = 1.0
+        
+        mask = gaussian_filter(mask, sigma=(0.5, 1.5))
+        mask = (mask > 0.3).astype(np.float32)
 
         return mask
 
     # -- perlin ----------------------------------------------------------------
 
     def _perlin(self) -> np.ndarray:
-        res_y = 2 ** random.randint(3, 4)
+        res_y = 2 ** random.randint(4, 6)
         res_x = 2 ** random.randint(1, 2)
         noise = rand_perlin_2d_np((self.n_mels, self.T), (res_y, res_x))
         # angle = random.uniform(-90.0, 90.0)
