@@ -239,12 +239,12 @@ class MixNoiseStrategy:
 # ---------------------------------------------------------------------------
 
 MASK_PRESETS: dict[str, dict] = {
-    "pump":         {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.1},
-    "slider":       {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.1},
-    "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.1},
-    "ToyCar":       {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.1},
-    "ToyConveyor":  {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.1},
-    "fan":          {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.1},
+    "pump":         {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
+    "slider":       {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
+    "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
+    "ToyCar":       {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
+    "ToyConveyor":  {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
+    "fan":          {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.4},
 }
 
 
