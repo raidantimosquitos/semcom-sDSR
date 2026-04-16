@@ -102,7 +102,7 @@ class sDSR(nn.Module):
         self._anomaly_detection = AnomalyDetectionModule(
             in_channels=2,
             out_channels=2,
-            base_width=64,
+            base_width=128,
         )
 
         self._anomaly_generation = AnomalyGeneration(
