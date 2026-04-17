@@ -237,15 +237,15 @@ class SpectromorphicMaskStrategy:
         Binary mask concentrated in 1–3 frequency bands over consecutive time frames.
         """
         n_mels, T = self.n_mels, self.T
-        target_coverage = random.uniform(0.3, 0.6)
+        target_coverage = random.uniform(0.05, 0.2)
         target_area = target_coverage * n_mels * T
         mask = np.zeros((n_mels, T), dtype=np.float32)
 
-        n_bands = random.randint(1, 3)
+        n_bands = random.randint(1, 8)
         bands: list[tuple[int, int]] = []
         for _ in range(n_bands):
             bw_lo = max(1, n_mels // 10)
-            bw_hi = max(bw_lo, max(2, n_mels // 3))
+            bw_hi = max(bw_lo, max(2, n_mels // 20))
             bw_hi = min(bw_hi, n_mels)
             bw = random.randint(bw_lo, bw_hi)
             start_f = random.randint(0, n_mels - bw)
