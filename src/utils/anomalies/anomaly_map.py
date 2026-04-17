@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import random
 from typing import Literal, Sequence
+import math
 
 import numpy as np
 import torch
@@ -29,47 +30,66 @@ from scipy.ndimage import gaussian_filter, rotate as ndimage_rotate
 
 from .perlin import rand_perlin_2d_np
 
-# ---------------------------------------------------------------------------
-# Helpers for disjoint time-segment sampling (used by machine-specific
-# strategies that need them)
-# ---------------------------------------------------------------------------
+def _sample_disjoint_time_segments(n_seg: int, T: int, seg_len_lo: int, seg_len_hi: int) -> list[tuple[int, int]]:
+    """
+    Sample up to *n_seg* disjoint integer intervals in [0, T) with no retry loops.
 
-def _intervals_overlap(a0: int, a1: int, b0: int, b1: int) -> bool:
-    return not (a1 <= b0 or b1 <= a0)
-
-
-def _sample_disjoint_time_segments(
-    n_seg: int,
-    T: int,
-    seg_len_lo: int,
-    seg_len_hi: int,
-    max_tries: int = 400,
-) -> list[tuple[int, int]]:
+    Algorithm
+    ---------
+    1. Draw lengths from a random mixture of uniform and log-uniform
+       distributions — log-uniform biases toward shorter segments while still
+       allowing long ones, so a single call naturally produces a spread of sizes.
+    2. Greedily drop trailing segments until the total fits in T (no rejection
+       needed: at most one linear scan of the length array).
+    3. Distribute the remaining space T − Σlengths into n_seg+1 non-negative
+       integer gaps via a single Dirichlet draw.  Concatenating
+       [gap₀ | seg₀ | gap₁ | seg₁ | … | gapₙ] always yields valid, disjoint
+       intervals — no overlap check, no retries.
+    4. Compute all starts/ends with two cumsums (fully vectorised).
+    """
     if T <= 4:
         return [(0, T)]
+
     lo = max(1, min(seg_len_lo, T))
-    hi = min(seg_len_hi, T)
-    if hi < lo:
-        lo, hi = hi, lo
-    intervals: list[tuple[int, int]] = []
-    for _ in range(n_seg):
-        placed = False
-        for _ in range(max_tries):
-            seg_len = random.randint(lo, hi)
-            if seg_len > T:
-                continue
-            t_start = random.randint(0, T - seg_len)
-            t_end = t_start + seg_len
-            if any(_intervals_overlap(t_start, t_end, s, e) for s, e in intervals):
-                continue
-            intervals.append((t_start, t_end))
-            placed = True
-            break
-        if not placed:
-            break
-    if not intervals:
-        return [(0, min(hi, T))]
-    return intervals
+    hi = min(max(lo, seg_len_hi), T)
+
+    # ── 1. length sampling with scale variety ────────────────────────────────
+    if hi > lo and random.random() < 0.5:
+        # log-uniform: P(length) ∝ 1/length — natural variety across scales
+        raw = np.exp(np.random.uniform(math.log(lo), math.log(hi), n_seg))
+        lengths = np.clip(np.round(raw).astype(int), lo, hi)
+    else:
+        lengths = np.random.randint(lo, hi + 1, size=n_seg)
+
+    # ── 2. trim to fit (no gaps reserved; segments may be adjacent) ──────────
+    cum = np.cumsum(lengths)
+    over = cum > T
+    if over.any():
+        n_fit = int(np.argmax(over))   # first index where cumulative sum > T
+        if n_fit == 0:
+            # Even the first segment alone is too long — clip and return one
+            return [(0, min(int(lengths[0]), T))]
+        lengths = lengths[:n_fit]
+        n_seg = n_fit
+
+    total = int(lengths.sum())
+    remaining = T - total   # guaranteed ≥ 0
+
+    # ── 3. gap placement via Dirichlet (one draw → n_seg+1 non-negative gaps) ─
+    raw_gaps = np.random.dirichlet(np.ones(n_seg + 1)) * remaining
+    gaps = raw_gaps.astype(int)
+    gaps[-1] += remaining - int(gaps.sum())   # absorb integer-rounding residual
+
+    # ── 4. vectorised starts/ends ─────────────────────────────────────────────
+    # starts[i] = gaps[0]
+    #           + Σ lengths[0..i-1]   (how much prior segments consume)
+    #           + Σ gaps[1..i]        (inner gaps before segment i)
+    cum_lengths    = np.concatenate([[0], np.cumsum(lengths[:-1])])    # (n_seg,)
+    cum_inner_gaps = np.concatenate([[0], np.cumsum(gaps[1:n_seg])])   # (n_seg,)
+    starts = gaps[0] + cum_lengths + cum_inner_gaps
+    ends   = starts + lengths
+
+    return list(zip(starts.tolist(), ends.tolist()))
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +264,7 @@ MASK_PRESETS: dict[str, dict] = {
     "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.12},
     "ToyCar":       {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.12},
     "ToyConveyor":  {"full_time_prob": 0.2, "max_band_frac": 0.02, "max_segments": 5, "perlin_prob": 0.12},
-    "fan":          {"full_time_prob": 0.5, "max_band_frac": 0.05, "max_segments": 4, "perlin_prob": 0.1},
+    "fan":          {"full_time_prob": 0.5, "max_band_frac": 0.05, "max_segments": 20, "perlin_prob": 0.1},
 }
 
 
@@ -265,7 +285,7 @@ class SpectromorphicMaskStrategy:
          occasionally 2-5 shorter segments are used for variety.
 
       2. **Perlin noise** (``perlin_prob``):
-         Thresholded and rotated Perlin noise for blob-shaped regularisation
+         Thresholded Perlin noise for blob-shaped regularisation
          that prevents overfitting to rectangular masks.
 
     All masks are binary, shape (1, 1, n_mels, T) at spectrogram resolution.
@@ -313,6 +333,11 @@ class SpectromorphicMaskStrategy:
         mask = np.zeros((n_mels, T), dtype=np.float32)
 
         n_bands = 1 if random.random() < 0.7 else random.randint(2, 3)
+
+        # Per-mask full-row probability — varies so some masks are mostly
+        # band-confined, others have more horizontal streaks.
+        full_row_prob = random.uniform(0.05, 0.30)
+
         for _ in range(n_bands):
             band_w = random.randint(4, self.max_band_width)
             f0 = random.randint(0, n_mels - band_w)
@@ -324,18 +349,34 @@ class SpectromorphicMaskStrategy:
                 mask[f0 : f0 + band_w, t0 : t0 + t_len] = 1.0
             else:
                 n_seg = random.randint(2, self.max_segments)
-                seg_lo = max(1, T // 20)
-                seg_hi = max(seg_lo, T // 4)
+
+                # Three length-scale regimes chosen per band.
+                # "Short" produces many tight blips; "long" produces a few
+                # wide blocks; "medium" is the previous behaviour.
+                regime = random.random()
+                if regime < 0.40:                                    # many short
+                    seg_lo = max(1, T // 32)
+                    seg_hi = max(2, T // 8)
+                elif regime < 0.75:                                  # medium
+                    seg_lo = max(1, T // 16)
+                    seg_hi = max(2, T // 4)
+                else:                                                # few long
+                    seg_lo = max(1, T // 8)
+                    seg_hi = max(2, T // 2)
+                    n_seg  = min(n_seg, 3)   # long segments saturate quickly
+
                 segments = _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi)
-                for t0, t1 in segments:
-                    if random.random() < 0.15:
+
+                # Vectorise the full-row coin flips across all segments at once
+                is_full_row = np.random.random(len(segments)) < full_row_prob
+                for (t0, t1), full_row in zip(segments, is_full_row):
+                    if full_row:
                         mask[:, t0:t1] = 1.0
                     else:
                         mask[f0 : f0 + band_w, t0:t1] = 1.0
-        
+
         mask = gaussian_filter(mask, sigma=(0.5, 1.5))
         mask = (mask > 0.3).astype(np.float32)
-
         return mask
 
     # -- perlin ----------------------------------------------------------------
