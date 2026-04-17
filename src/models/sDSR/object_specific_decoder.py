@@ -145,7 +145,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
         self._bottleneck_conv = nn.Conv2d(in_channels * 4, in_channels * 2, kernel_size=1)
 
         self._upblock1 = nn.Sequential(
-            nn.ConvTranspose2d(in_channels, in_channels, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(in_channels*2, in_channels, kernel_size=3, stride=2, padding=1),
             nn.ReLU(inplace=True),
         )
         self._upblock2 = nn.Sequential(
