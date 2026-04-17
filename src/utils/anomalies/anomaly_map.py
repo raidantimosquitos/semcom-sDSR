@@ -5,12 +5,9 @@ Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 
 1. PerlinNoiseStrategy            – threshold/binarize Perlin noise (generic fallback)
 2. MixNoiseStrategy               – smoothed random field + Poisson bursts, quantile cut
-3. SpectromorphicMaskStrategy     – four sub-strategies sampled per-item: full_band,
-                                    multi_band, diffuse_rect, perlin (replaces
-                                    LatentAlignedBandStrategy; includes Perlin internally)
-4. MachineSpecificStrategy        – per-machine-type mask derived from DCASE2020 Task 2
-                                    spectrogram analysis (fan / pump / slider / toycar /
-                                    toyconveyor / valve)
+3. SpectromorphicMaskStrategy     – band-limited time rectangles with random coverage,
+                                    mixed with thresholded Perlin noise (replaces
+                                    LatentAlignedBandStrategy)
 
 AnomalyMapGenerator selects between strategies at call time.
 ``AudioSpecificStrategy`` and ``LatentAlignedBandStrategy`` are kept as aliases
@@ -20,8 +17,7 @@ for backward compatibility.
 from __future__ import annotations
 
 import random
-from typing import Literal, Sequence
-import math
+from typing import Literal
 
 import numpy as np
 import torch
@@ -29,67 +25,6 @@ import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter, rotate as ndimage_rotate
 
 from .perlin import rand_perlin_2d_np
-
-def _sample_disjoint_time_segments(n_seg: int, T: int, seg_len_lo: int, seg_len_hi: int) -> list[tuple[int, int]]:
-    """
-    Sample up to *n_seg* disjoint integer intervals in [0, T) with no retry loops.
-
-    Algorithm
-    ---------
-    1. Draw lengths from a random mixture of uniform and log-uniform
-       distributions — log-uniform biases toward shorter segments while still
-       allowing long ones, so a single call naturally produces a spread of sizes.
-    2. Greedily drop trailing segments until the total fits in T (no rejection
-       needed: at most one linear scan of the length array).
-    3. Distribute the remaining space T − Σlengths into n_seg+1 non-negative
-       integer gaps via a single Dirichlet draw.  Concatenating
-       [gap₀ | seg₀ | gap₁ | seg₁ | … | gapₙ] always yields valid, disjoint
-       intervals — no overlap check, no retries.
-    4. Compute all starts/ends with two cumsums (fully vectorised).
-    """
-    if T <= 4:
-        return [(0, T)]
-
-    lo = max(1, min(seg_len_lo, T))
-    hi = min(max(lo, seg_len_hi), T)
-
-    # ── 1. length sampling with scale variety ────────────────────────────────
-    if hi > lo and random.random() < 0.5:
-        # log-uniform: P(length) ∝ 1/length — natural variety across scales
-        raw = np.exp(np.random.uniform(math.log(lo), math.log(hi), n_seg))
-        lengths = np.clip(np.round(raw).astype(int), lo, hi)
-    else:
-        lengths = np.random.randint(lo, hi + 1, size=n_seg)
-
-    # ── 2. trim to fit (no gaps reserved; segments may be adjacent) ──────────
-    cum = np.cumsum(lengths)
-    over = cum > T
-    if over.any():
-        n_fit = int(np.argmax(over))   # first index where cumulative sum > T
-        if n_fit == 0:
-            # Even the first segment alone is too long — clip and return one
-            return [(0, min(int(lengths[0]), T))]
-        lengths = lengths[:n_fit]
-        n_seg = n_fit
-
-    total = int(lengths.sum())
-    remaining = T - total   # guaranteed ≥ 0
-
-    # ── 3. gap placement via Dirichlet (one draw → n_seg+1 non-negative gaps) ─
-    raw_gaps = np.random.dirichlet(np.ones(n_seg + 1)) * remaining
-    gaps = raw_gaps.astype(int)
-    gaps[-1] += remaining - int(gaps.sum())   # absorb integer-rounding residual
-
-    # ── 4. vectorised starts/ends ─────────────────────────────────────────────
-    # starts[i] = gaps[0]
-    #           + Σ lengths[0..i-1]   (how much prior segments consume)
-    #           + Σ gaps[1..i]        (inner gaps before segment i)
-    cum_lengths    = np.concatenate([[0], np.cumsum(lengths[:-1])])    # (n_seg,)
-    cum_inner_gaps = np.concatenate([[0], np.cumsum(gaps[1:n_seg])])   # (n_seg,)
-    starts = gaps[0] + cum_lengths + cum_inner_gaps
-    ends   = starts + lengths
-
-    return list(zip(starts.tolist(), ends.tolist()))
 
 
 # ---------------------------------------------------------------------------
@@ -255,51 +190,28 @@ class MixNoiseStrategy:
 
 
 # ---------------------------------------------------------------------------
-# Per-machine-type mask geometry presets (derived from L2 distance maps)
-# ---------------------------------------------------------------------------
-
-MASK_PRESETS: dict[str, dict] = {
-    "pump":         {"full_time_prob": 0.85, "max_band_frac": 0.02, "max_segments": 4, "perlin_prob": 0.1},
-    "slider":       {"full_time_prob": 0.2, "max_band_frac": 0.15, "max_segments": 5, "perlin_prob": 0.12},
-    "valve":        {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.12},
-    "ToyCar":       {"full_time_prob": 0.2, "max_band_frac": 0.12, "max_segments": 5, "perlin_prob": 0.12},
-    "ToyConveyor":  {"full_time_prob": 0.2, "max_band_frac": 0.02, "max_segments": 5, "perlin_prob": 0.12},
-    "fan":          {"full_time_prob": 0.5, "max_band_frac": 0.05, "max_segments": 20, "perlin_prob": 0.1},
-}
-
-
-# ---------------------------------------------------------------------------
 # 2. SpectromorphicMaskStrategy (replaces LatentAlignedBandStrategy)
 # ---------------------------------------------------------------------------
 
 class SpectromorphicMaskStrategy:
     """
-    Anomaly mask generation following the AudDSR paper approach.
+    Synthetic anomaly masks for spectrograms.
 
-    Two processes mixed per-item:
+    Each sample is either:
 
-      1. **Band + time segments** (``1 - perlin_prob``):
-         One frequency band of random width is chosen, then 1-N disjoint time
-         segments within that band are marked as anomalous.  Most of the time
-         a single segment covers the full duration (dominant real pattern);
-         occasionally 2-5 shorter segments are used for variety.
+      1. **Band + time segments** (probability ``1 - perlin_prob``): pick 1–3
+         mel bands, then repeatedly stamp consecutive time chunks inside those
+         bands until a random coverage target (30–60 % of the grid) is reached
+         (capped at 500 iterations).
 
-      2. **Perlin noise** (``perlin_prob``):
-         Thresholded Perlin noise for blob-shaped regularisation
-         that prevents overfitting to rectangular masks.
+      2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
+         for blob-shaped masks.
 
-    All masks are binary, shape (1, 1, n_mels, T) at spectrogram resolution.
-    Callers project to fine/coarse grids with avg_pool + (> 0) threshold.
+    Output is binary, shape ``(1, 1, n_mels, T)``. Callers may downsample with
+    ``F.interpolate`` when ``q_shape`` differs from spectrogram resolution.
 
     Args:
-        n_mels: spectrogram height (128)
-        T: spectrogram width (320)
-        perlin_prob: probability of choosing Perlin mode per item
-        full_time_prob: within band mode, probability that a single segment
-            covers 85-100 % of the time axis (vs. multiple shorter segments)
-        max_band_frac: maximum band width as a fraction of n_mels
-        max_segments: maximum number of disjoint time segments when not
-            using full-time mode
+        perlin_prob: probability of choosing the Perlin branch per mask.
     """
 
     def __init__(
@@ -309,9 +221,6 @@ class SpectromorphicMaskStrategy:
         n_mels: int | None = None,
         T: int | None = None,
         perlin_prob: float = 0.4,
-        full_time_prob: float = 0.3,
-        max_band_frac: float = 0.1,
-        max_segments: int = 8,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -322,61 +231,41 @@ class SpectromorphicMaskStrategy:
             self.T = T or 320
         self.q_shape = q_shape or (self.n_mels, self.T)
         self.perlin_prob = perlin_prob
-        self.full_time_prob = full_time_prob
-        self.max_band_width = max(4, int(self.n_mels * max_band_frac))
-        self.max_segments = max(1, max_segments)
-
-    # -- band + time segments --------------------------------------------------
 
     def _band_time_segments(self) -> np.ndarray:
+        """
+        Binary mask concentrated in 1–3 frequency bands over consecutive time frames.
+        """
         n_mels, T = self.n_mels, self.T
+        target_coverage = random.uniform(0.3, 0.6)
+        target_area = target_coverage * n_mels * T
         mask = np.zeros((n_mels, T), dtype=np.float32)
 
-        n_bands = 1 if random.random() < 0.7 else random.randint(2, 3)
-
-        # Per-mask full-row probability — varies so some masks are mostly
-        # band-confined, others have more horizontal streaks.
-        full_row_prob = random.uniform(0.05, 0.30)
-
+        n_bands = random.randint(1, 3)
+        bands: list[tuple[int, int]] = []
         for _ in range(n_bands):
-            band_w = random.randint(4, self.max_band_width)
-            f0 = random.randint(0, n_mels - band_w)
+            bw_lo = max(1, n_mels // 10)
+            bw_hi = max(bw_lo, max(2, n_mels // 3))
+            bw_hi = min(bw_hi, n_mels)
+            bw = random.randint(bw_lo, bw_hi)
+            start_f = random.randint(0, n_mels - bw)
+            bands.append((start_f, start_f + bw))
 
-            if random.random() < self.full_time_prob:
-                coverage = random.uniform(0.85, 1.0)
-                t_len = max(1, int(T * coverage))
-                t0 = random.randint(0, max(0, T - t_len))
-                mask[f0 : f0 + band_w, t0 : t0 + t_len] = 1.0
-            else:
-                n_seg = random.randint(2, self.max_segments)
+        max_attempts = 500
+        attempts = 0
 
-                # Three length-scale regimes chosen per band.
-                # "Short" produces many tight blips; "long" produces a few
-                # wide blocks; "medium" is the previous behaviour.
-                regime = random.random()
-                if regime < 0.40:                                    # many short
-                    seg_lo = max(1, T // 32)
-                    seg_hi = max(2, T // 8)
-                elif regime < 0.75:                                  # medium
-                    seg_lo = max(1, T // 16)
-                    seg_hi = max(2, T // 4)
-                else:                                                # few long
-                    seg_lo = max(1, T // 8)
-                    seg_hi = max(2, T // 2)
-                    n_seg  = min(n_seg, 3)   # long segments saturate quickly
+        while mask.sum() < target_area and attempts < max_attempts:
+            band_start, band_end = random.choice(bands)
 
-                segments = _sample_disjoint_time_segments(n_seg, T, seg_lo, seg_hi)
+            t_len_lo = max(1, T // 20)
+            t_len_hi = max(t_len_lo, max(2, T // 5))
+            t_len_hi = min(t_len_hi, T)
+            t_len = random.randint(t_len_lo, t_len_hi)
+            t_start = random.randint(0, T - t_len)
 
-                # Vectorise the full-row coin flips across all segments at once
-                is_full_row = np.random.random(len(segments)) < full_row_prob
-                for (t0, t1), full_row in zip(segments, is_full_row):
-                    if full_row:
-                        mask[:, t0:t1] = 1.0
-                    else:
-                        mask[f0 : f0 + band_w, t0:t1] = 1.0
+            mask[band_start:band_end, t_start : t_start + t_len] = 1.0
+            attempts += 1
 
-        mask = gaussian_filter(mask, sigma=(0.5, 1.5))
-        mask = (mask > 0.3).astype(np.float32)
         return mask
 
     # -- perlin ----------------------------------------------------------------
@@ -447,7 +336,6 @@ class AnomalyMapGenerator:
         n_mels: int | None = None,
         T: int | None = None,
         zero_mask_prob: float = 0.5,
-        machine_type: str | None = None,
     ) -> None:
         self.strategy_name = strategy
         self.spectrogram_shape = spectrogram_shape
@@ -470,14 +358,12 @@ class AnomalyMapGenerator:
         self.audio_specific = (
             AudioSpecificStrategy(
                 spectrogram_shape, self.q_shape, _n_mels, _T,
-                machine_type=machine_type,
             )
             if strategy == "audio_specific"
             else None
         )
         self._fallback = AudioSpecificStrategy(
             spectrogram_shape, self.q_shape, _n_mels, _T,
-            machine_type=machine_type,
         )
 
     def _generate_one(self, device: torch.device | str) -> torch.Tensor:

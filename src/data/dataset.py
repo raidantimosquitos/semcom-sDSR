@@ -306,7 +306,6 @@ class AudDSRAnomTrainDataset(Dataset):
             n_mels=n_mels,
             T=T,
             zero_mask_prob=0.0,
-            machine_type=self.machine_type,
         )
 
     def __len__(self) -> int:
