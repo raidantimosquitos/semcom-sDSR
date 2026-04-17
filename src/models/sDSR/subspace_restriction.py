@@ -121,7 +121,7 @@ class SubspaceRestrictionNetwork(nn.Module):
         super().__init__()
         self.encoder = FeatureEncoder(in_channels, base_width)
         self.decoder = FeatureDecoder(base_width, out_channels=out_channels)
-        self.residual_stack = ResidualStack(base_width, base_width, 2, base_width//2)
+        self.residual_stack = ResidualStack(in_channels*2, in_channels*2, 2, in_channels//2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         _, _, b3 = self.encoder(x)
