@@ -125,7 +125,7 @@ class SubspaceRestrictionNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         _, _, b3 = self.encoder(x)
-        # b3 = self.residual_stack(b3)
+        b3 = self.residual_stack(b3)
         return self.decoder(b3)
 
 
