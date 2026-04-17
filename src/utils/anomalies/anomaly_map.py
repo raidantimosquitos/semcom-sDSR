@@ -244,8 +244,8 @@ class SpectromorphicMaskStrategy:
         n_bands = random.randint(1, 3)
         bands: list[tuple[int, int]] = []
         for _ in range(n_bands):
-            bw_lo = max(1, n_mels // 10)
-            bw_hi = max(bw_lo, max(2, n_mels // 20))
+            bw_lo = max(1, n_mels // 40)
+            bw_hi = max(bw_lo, max(2, n_mels // 10))
             bw_hi = min(bw_hi, n_mels)
             bw = random.randint(bw_lo, bw_hi)
             start_f = random.randint(0, n_mels - bw)

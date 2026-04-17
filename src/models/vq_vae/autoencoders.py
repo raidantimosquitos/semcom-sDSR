@@ -102,7 +102,7 @@ class VQ_VAE_2Layer(nn.Module):
 
         # Vector quantizers
         self._vq_coarse = VectorQuantizerEMA(
-            num_embeddings_coarse, self.embedding_dim_coarse, commitment_cost, decay
+            num_embeddings_coarse, self.embedding_dim_coarse, commitment_cost + 0.25*commitment_cost, decay
         )
         self._vq_fine = VectorQuantizerEMA(
             num_embeddings_fine, self.embedding_dim_fine, commitment_cost, decay
