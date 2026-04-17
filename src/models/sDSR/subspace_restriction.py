@@ -12,7 +12,8 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from ..vq_vae.res_blocks_2d import ResidualStack
 
 
 class FeatureEncoder(nn.Module):
@@ -120,9 +121,11 @@ class SubspaceRestrictionNetwork(nn.Module):
         super().__init__()
         self.encoder = FeatureEncoder(in_channels, base_width)
         self.decoder = FeatureDecoder(base_width, out_channels=out_channels)
+        self.residual_stack = ResidualStack(base_width, base_width, 2, base_width//2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _b1, _b2, b3 = self.encoder(x)
+        _, _, b3 = self.encoder(x)
+        # b3 = self.residual_stack(b3)
         return self.decoder(b3)
 
 
