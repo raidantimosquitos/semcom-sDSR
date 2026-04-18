@@ -5,9 +5,8 @@ Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 
 1. PerlinNoiseStrategy            – threshold/binarize Perlin noise (generic fallback)
 2. MixNoiseStrategy               – smoothed random field + Poisson bursts, quantile cut
-3. SpectromorphicMaskStrategy     – band-limited time rectangles with random coverage,
-                                    mixed with thresholded Perlin noise (replaces
-                                    LatentAlignedBandStrategy)
+3. SpectromorphicMaskStrategy     – band-limited mel union × alternating renewal
+                                    time (optional Perlin), replaces LatentAlignedBandStrategy
 
 AnomalyMapGenerator selects between strategies at call time.
 ``AudioSpecificStrategy`` and ``LatentAlignedBandStrategy`` are kept as aliases
@@ -16,6 +15,7 @@ for backward compatibility.
 
 from __future__ import annotations
 
+import math
 import random
 from typing import Literal
 
@@ -199,10 +199,12 @@ class SpectromorphicMaskStrategy:
 
     Each sample is either:
 
-      1. **Band + time segments** (probability ``1 - perlin_prob``): pick 1–3
-         mel bands, then repeatedly stamp consecutive time chunks inside those
-         bands until a random coverage target (30–60 % of the grid) is reached
-         (capped at 500 iterations).
+      1. **Band + renewal time** (probability ``1 - perlin_prob``): pick 1–3
+         mel bands (same bandwidth policy as before). Along time, activation is
+         an alternating renewal with geometric run lengths; per-mask means are
+         log-uniform in ``[1, T]``. With probability ``align_prob`` the same
+         1D track is shared across bands; otherwise each band gets an
+         independent track. Coverage is implicit (no rejection on area).
 
       2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
          for blob-shaped masks.
@@ -212,6 +214,8 @@ class SpectromorphicMaskStrategy:
 
     Args:
         perlin_prob: probability of choosing the Perlin branch per mask.
+        align_prob: on the band branch, probability of one shared time track
+            across all bands (else independent ``A_b(t)`` per band).
     """
 
     def __init__(
@@ -220,7 +224,8 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.2,
+        perlin_prob: float = 0.4,
+        align_prob: float = 0.45,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -231,16 +236,13 @@ class SpectromorphicMaskStrategy:
             self.T = T or 320
         self.q_shape = q_shape or (self.n_mels, self.T)
         self.perlin_prob = perlin_prob
+        self.align_prob = float(align_prob)
 
-    def _band_time_segments(self) -> np.ndarray:
-        """
-        Binary mask concentrated in 1–3 frequency bands over consecutive time frames.
-        """
-        n_mels, T = self.n_mels, self.T
-        target_coverage = random.uniform(0.01, 0.1)
-        target_area = target_coverage * n_mels * T
-        mask = np.zeros((n_mels, T), dtype=np.float32)
-
+    @staticmethod
+    def _pick_mel_bands(n_mels: int) -> list[tuple[int, int]]:
+        """1–3 contiguous mel intervals; bandwidth policy unchanged."""
+        if n_mels <= 0:
+            return []
         n_bands = random.randint(1, 3)
         bands: list[tuple[int, int]] = []
         for _ in range(n_bands):
@@ -250,21 +252,82 @@ class SpectromorphicMaskStrategy:
             bw = random.randint(bw_lo, bw_hi)
             start_f = random.randint(0, n_mels - bw)
             bands.append((start_f, start_f + bw))
+        return bands
 
-        max_attempts = 500
-        attempts = 0
+    def _hierarchical_renewal_params(self, T: int) -> tuple[float, float, float, float]:
+        """
+        Geometric run lengths: mean on-run ``mu_on``, mean off-run ``mu_off``,
+        each log-uniform in [1, T]. Return ``(p_on, p_off, mu_on, mu_off)`` with
+        ``p = 1/mu`` for ``np.random.geometric``.
+        """
+        Tm = max(T, 1)
+        lo = math.log(1.0)
+        hi = math.log(float(Tm))
+        mu_on = math.exp(random.uniform(lo, hi))
+        mu_off = math.exp(random.uniform(lo, hi))
+        p_on = 1.0 / max(mu_on, 1.0)
+        p_off = 1.0 / max(mu_off, 1.0)
+        eps = 1e-6
+        p_on = min(max(p_on, eps), 1.0 - eps)
+        p_off = min(max(p_off, eps), 1.0 - eps)
+        return p_on, p_off, mu_on, mu_off
 
-        while mask.sum() < target_area and attempts < max_attempts:
-            band_start, band_end = random.choice(bands)
+    @staticmethod
+    def _alternating_renewal_1d(
+        T: int,
+        p_on: float,
+        p_off: float,
+        start_on: bool,
+    ) -> np.ndarray:
+        """Binary (T,) via alternating on/off geometric runs, truncated to T."""
+        a = np.zeros(T, dtype=np.float32)
+        if T <= 0:
+            return a
+        t = 0
+        on = start_on
+        while t < T:
+            p = p_on if on else p_off
+            L = int(np.random.geometric(p))
+            L = max(1, min(L, T - t))
+            if on:
+                a[t : t + L] = 1.0
+            t += L
+            on = not on
+        return a
 
-            t_len_lo = max(1, T // 20)
-            t_len_hi = max(t_len_lo, max(2, T // 5))
-            t_len_hi = min(t_len_hi, T)
-            t_len = random.randint(t_len_lo, t_len_hi)
-            t_start = random.randint(0, T - t_len)
+    def _band_time_segments(self) -> np.ndarray:
+        """
+        Binary mask: mel union of 1–3 bands × time from alternating renewal
+        (geometric runs, hierarchical means). Aligned vs independent coupling.
+        """
+        n_mels, T = self.n_mels, self.T
+        mask = np.zeros((n_mels, T), dtype=np.float32)
+        bands = self._pick_mel_bands(n_mels)
+        if not bands:
+            return mask
 
-            mask[band_start:band_end, t_start : t_start + t_len] = 1.0
-            attempts += 1
+        aligned = random.random() < self.align_prob
+        if aligned:
+            p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
+            denom = mu_on + mu_off
+            p_start_on = (mu_on / denom) if denom > 0 else 0.5
+            track = self._alternating_renewal_1d(
+                T, p_on, p_off, random.random() < p_start_on
+            )
+            row = track.reshape(1, -1)
+            for f0, f1 in bands:
+                mask[f0:f1, :] = np.maximum(mask[f0:f1, :], row)
+        else:
+            for f0, f1 in bands:
+                p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
+                denom = mu_on + mu_off
+                p_start_on = (mu_on / denom) if denom > 0 else 0.5
+                track = self._alternating_renewal_1d(
+                    T, p_on, p_off, random.random() < p_start_on
+                )
+                mask[f0:f1, :] = np.maximum(
+                    mask[f0:f1, :], track.reshape(1, -1)
+                )
 
         return mask
 
@@ -277,7 +340,7 @@ class SpectromorphicMaskStrategy:
         # angle = random.uniform(-90.0, 90.0)
         # noise = ndimage_rotate(noise, angle, reshape=False, order=1,
         #                       mode="constant", cval=0.0)
-        threshold = random.uniform(0.3, 0.6)
+        threshold = random.uniform(0.01, 0.1)
         return (noise > threshold).astype(np.float32)
 
     # -- public interface ------------------------------------------------------

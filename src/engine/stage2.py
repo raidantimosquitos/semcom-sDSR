@@ -44,7 +44,7 @@ class Stage2Trainer(BaseTrainer):
         lambda_sub: float = 1.0,
         lr: float = 2e-4,
         lr_warmup_iters: int = 200,
-        lr_min: float = 2e-5,
+        lr_min: float = 1e-5,
         batch_size: int = 16,
         grad_clip: float | None = 1.0,
         log_every: int = 50,
