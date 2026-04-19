@@ -224,7 +224,7 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.2,
+        perlin_prob: float = 0.05,
         align_prob: float = 0.45,
         **_kwargs: object,
     ) -> None:
@@ -247,7 +247,7 @@ class SpectromorphicMaskStrategy:
         bands: list[tuple[int, int]] = []
         for _ in range(n_bands):
             bw_lo = max(1, n_mels // 80)
-            bw_hi = max(bw_lo, max(2, n_mels // 20))
+            bw_hi = max(bw_lo, max(2, n_mels // 6))
             bw_hi = min(bw_hi, n_mels)
             bw = random.randint(bw_lo, bw_hi)
             start_f = random.randint(0, n_mels - bw)
