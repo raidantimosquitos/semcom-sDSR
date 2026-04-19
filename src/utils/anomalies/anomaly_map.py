@@ -204,7 +204,7 @@ class SpectromorphicMaskStrategy:
          geometric run lengths; per-mask means are log-uniform in ``[1, T]``. 
          With probability ``align_prob`` the same 1D track is shared across 
          bands; otherwise each band gets an independent track.
-         Coverage is implicit (no rejection on area).
+         Coverage is implicit (no rejection on area). 
 
       2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
          for blob-shaped masks.
@@ -224,7 +224,7 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.4,
+        perlin_prob: float = 0.2,
         align_prob: float = 0.45,
         **_kwargs: object,
     ) -> None:
