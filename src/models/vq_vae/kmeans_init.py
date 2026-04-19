@@ -35,8 +35,9 @@ def kmeans_lloyd(
 
     Empty clusters are re-seeded from random training points each iteration.
 
-    Uses a CPU :class:`torch.Generator` only: ``torch.randperm`` requires a CPU device
-    generator even when ``x`` lives on CUDA.
+    Builds permutation indices on CPU with a CPU :class:`torch.Generator`, then moves
+    indices to ``x.device``. That avoids PyTorch inconsistencies where ``randperm(...,
+    device=cuda, generator=cpu)`` may error depending on version.
     """
     n, d = x.shape
     if n < k:
@@ -46,7 +47,7 @@ def kmeans_lloyd(
     cpu_g = torch.Generator(device="cpu")
     cpu_g.manual_seed(seed)
 
-    perm = torch.randperm(n, generator=cpu_g, device=device)[:k]
+    perm = torch.randperm(n, generator=cpu_g)[:k].to(device=device)
     centroids = x[perm].clone()
 
     assign = torch.empty(n, dtype=torch.long, device=device)
