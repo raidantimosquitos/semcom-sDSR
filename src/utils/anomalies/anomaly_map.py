@@ -224,7 +224,7 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.05,
+        perlin_prob: float = 0.4,
         align_prob: float = 0.45,
         **_kwargs: object,
     ) -> None:
@@ -334,13 +334,13 @@ class SpectromorphicMaskStrategy:
     # -- perlin ----------------------------------------------------------------
 
     def _perlin(self) -> np.ndarray:
-        res_y = 2 ** random.randint(4, 6)
-        res_x = 2 ** random.randint(1, 2)
+        res_y = 2 ** random.randint(1, 6)
+        res_x = 2 ** random.randint(1, 6)
         noise = rand_perlin_2d_np((self.n_mels, self.T), (res_y, res_x))
         # angle = random.uniform(-90.0, 90.0)
         # noise = ndimage_rotate(noise, angle, reshape=False, order=1,
         #                       mode="constant", cval=0.0)
-        threshold = random.uniform(0.01, 0.1)
+        threshold = random.uniform(0.3, 0.6)
         return (noise > threshold).astype(np.float32)
 
     # -- public interface ------------------------------------------------------
