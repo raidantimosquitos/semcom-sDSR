@@ -5,8 +5,8 @@ Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 
 1. PerlinNoiseStrategy            – threshold/binarize Perlin noise (generic fallback)
 2. MixNoiseStrategy               – smoothed random field + Poisson bursts, quantile cut
-3. SpectromorphicMaskStrategy     – band-limited mel union × alternating renewal
-                                    time (optional Perlin), replaces LatentAlignedBandStrategy
+3. SpectromorphicMaskStrategy     – one stratified mel band × renewal time
+                                    (optional Perlin), replaces LatentAlignedBandStrategy
 
 AnomalyMapGenerator selects between strategies at call time.
 ``AudioSpecificStrategy`` and ``LatentAlignedBandStrategy`` are kept as aliases
@@ -199,12 +199,13 @@ class SpectromorphicMaskStrategy:
 
     Each sample is either:
 
-      1. **Band + renewal time** (probability ``1 - perlin_prob``): pick 1–3
-         mel bands. Along time, activation is an alternating renewal with 
-         geometric run lengths; per-mask means are log-uniform in ``[1, T]``. 
-         With probability ``align_prob`` the same 1D track is shared across 
-         bands; otherwise each band gets an independent track.
-         Coverage is implicit (no rejection on area). 
+      1. **Band + renewal time** (probability ``1 - perlin_prob``): exactly one
+         contiguous mel band. The band is **stratified by mel**: each mask picks
+         one stratum (low / mid / high mel when ``mel_n_strata=3``), then a
+         start position and width so the band intersects that stratum (with
+         fallback if impossible). Time activation is alternating renewal with
+         geometric run lengths; per-mask means are log-uniform in ``[1, T]``.
+         Coverage is implicit (no rejection on area).
 
       2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
          for blob-shaped masks.
@@ -214,8 +215,9 @@ class SpectromorphicMaskStrategy:
 
     Args:
         perlin_prob: probability of choosing the Perlin branch per mask.
-        align_prob: on the band branch, probability of one shared time track
-            across all bands (else independent ``A_b(t)`` per band).
+        mel_n_strata: number of contiguous mel partitions for stratified band
+            placement (e.g. ``3`` → low / mid / high). ``1`` disables stratification
+            (uniform mel start as before).
     """
 
     def __init__(
@@ -224,8 +226,8 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.4,
-        align_prob: float = 0.45,
+        perlin_prob: float = 0.2,
+        mel_n_strata: int = 3,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -236,23 +238,51 @@ class SpectromorphicMaskStrategy:
             self.T = T or 320
         self.q_shape = q_shape or (self.n_mels, self.T)
         self.perlin_prob = perlin_prob
-        self.align_prob = float(align_prob)
+        self.mel_n_strata = max(1, int(mel_n_strata))
 
     @staticmethod
-    def _pick_mel_bands(n_mels: int) -> list[tuple[int, int]]:
-        """1–3 contiguous mel intervals; bandwidth policy unchanged."""
+    def _mel_stratum_bounds(n_mels: int, n_strata: int, s: int) -> tuple[int, int]:
+        """Half-open mel index interval [L, R) for stratum ``s``."""
+        L = s * n_mels // n_strata
+        R = (s + 1) * n_mels // n_strata
+        return L, R
+
+    def _pick_single_stratified_mel_band(self) -> list[tuple[int, int]]:
+        """
+        One contiguous band ``[start_f, start_f + bw)`` intersecting a randomly
+        chosen mel stratum. Bandwidth policy unchanged; if no valid ``start_f``,
+        retry a few times then fall back to uniform start on ``[0, n_mels-bw]``.
+        """
+        n_mels = self.n_mels
+        n_strata = self.mel_n_strata
         if n_mels <= 0:
             return []
-        n_bands = random.randint(1, 1)
-        bands: list[tuple[int, int]] = []
-        for _ in range(n_bands):
-            bw_lo = max(1, n_mels // 80)
-            bw_hi = max(bw_lo, max(2, n_mels // 6))
-            bw_hi = min(bw_hi, n_mels)
+
+        bw_lo = max(1, n_mels // 80)
+        bw_hi = max(bw_lo, max(2, n_mels // 6))
+        bw_hi = min(bw_hi, n_mels)
+
+        if n_strata <= 1:
             bw = random.randint(bw_lo, bw_hi)
             start_f = random.randint(0, n_mels - bw)
-            bands.append((start_f, start_f + bw))
-        return bands
+            return [(start_f, start_f + bw)]
+
+        for _ in range(24):
+            bw = random.randint(bw_lo, bw_hi)
+            s = random.randint(0, n_strata - 1)
+            L_s, R_s = self._mel_stratum_bounds(n_mels, n_strata, s)
+            if R_s <= L_s:
+                continue
+            # [start_f, start_f + bw) intersects [L_s, R_s) iff start_f < R_s and start_f + bw > L_s
+            lo = max(0, L_s - bw + 1)
+            hi = min(n_mels - bw, R_s - 1)
+            if lo <= hi:
+                start_f = random.randint(lo, hi)
+                return [(start_f, start_f + bw)]
+
+        bw = random.randint(bw_lo, bw_hi)
+        start_f = random.randint(0, n_mels - bw)
+        return [(start_f, start_f + bw)]
 
     def _hierarchical_renewal_params(self, T: int) -> tuple[float, float, float, float]:
         """
@@ -297,38 +327,23 @@ class SpectromorphicMaskStrategy:
 
     def _band_time_segments(self) -> np.ndarray:
         """
-        Binary mask: mel union of 1–3 bands × time from alternating renewal
-        (geometric runs, hierarchical means). Aligned vs independent coupling.
+        Binary mask: one stratified mel band × time from alternating renewal
+        (geometric runs, hierarchical means).
         """
         n_mels, T = self.n_mels, self.T
         mask = np.zeros((n_mels, T), dtype=np.float32)
-        bands = self._pick_mel_bands(n_mels)
+        bands = self._pick_single_stratified_mel_band()
         if not bands:
             return mask
 
-        aligned = random.random() < self.align_prob
-        if aligned:
-            p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
-            denom = mu_on + mu_off
-            p_start_on = (mu_on / denom) if denom > 0 else 0.5
-            track = self._alternating_renewal_1d(
-                T, p_on, p_off, random.random() < p_start_on
-            )
-            row = track.reshape(1, -1)
-            for f0, f1 in bands:
-                mask[f0:f1, :] = np.maximum(mask[f0:f1, :], row)
-        else:
-            for f0, f1 in bands:
-                p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
-                denom = mu_on + mu_off
-                p_start_on = (mu_on / denom) if denom > 0 else 0.5
-                track = self._alternating_renewal_1d(
-                    T, p_on, p_off, random.random() < p_start_on
-                )
-                mask[f0:f1, :] = np.maximum(
-                    mask[f0:f1, :], track.reshape(1, -1)
-                )
-
+        f0, f1 = bands[0]
+        p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
+        denom = mu_on + mu_off
+        p_start_on = (mu_on / denom) if denom > 0 else 0.5
+        track = self._alternating_renewal_1d(
+            T, p_on, p_off, random.random() < p_start_on
+        )
+        mask[f0:f1, :] = track.reshape(1, -1)
         return mask
 
     # -- perlin ----------------------------------------------------------------
