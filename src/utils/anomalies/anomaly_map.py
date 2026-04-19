@@ -200,11 +200,11 @@ class SpectromorphicMaskStrategy:
     Each sample is either:
 
       1. **Band + renewal time** (probability ``1 - perlin_prob``): pick 1–3
-         mel bands (same bandwidth policy as before). Along time, activation is
-         an alternating renewal with geometric run lengths; per-mask means are
-         log-uniform in ``[1, T]``. With probability ``align_prob`` the same
-         1D track is shared across bands; otherwise each band gets an
-         independent track. Coverage is implicit (no rejection on area).
+         mel bands. Along time, activation is an alternating renewal with 
+         geometric run lengths; per-mask means are log-uniform in ``[1, T]``. 
+         With probability ``align_prob`` the same 1D track is shared across 
+         bands; otherwise each band gets an independent track.
+         Coverage is implicit (no rejection on area).
 
       2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
          for blob-shaped masks.
