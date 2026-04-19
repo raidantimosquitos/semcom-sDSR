@@ -28,21 +28,25 @@ def kmeans_lloyd(
     k: int,
     *,
     n_iter: int = 15,
-    generator: torch.Generator | None = None,
+    seed: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Lloyd's algorithm on rows of ``x`` (N, D). Returns centroids (k, D) and counts (k,).
 
     Empty clusters are re-seeded from random training points each iteration.
+
+    Uses a CPU :class:`torch.Generator` only: ``torch.randperm`` requires a CPU device
+    generator even when ``x`` lives on CUDA.
     """
     n, d = x.shape
     if n < k:
         raise ValueError(f"need at least k={k} samples, got n={n}")
     device = x.device
     dtype = x.dtype
-    g = generator or torch.Generator(device=device)
+    cpu_g = torch.Generator(device="cpu")
+    cpu_g.manual_seed(seed)
 
-    perm = torch.randperm(n, generator=g, device=device)[:k]
+    perm = torch.randperm(n, generator=cpu_g, device=device)[:k]
     centroids = x[perm].clone()
 
     assign = torch.empty(n, dtype=torch.long, device=device)
@@ -68,9 +72,8 @@ def kmeans_lloyd(
                 0,
                 n,
                 (empty_idx.numel(),),
-                device=device,
-                generator=g,
-            )
+                generator=cpu_g,
+            ).to(device)
             centroids[empty_idx] = x[rnd]
             counts[empty_idx] = 1.0
 
@@ -140,8 +143,8 @@ def init_vqvae_codebooks_from_loader(
         seed: RNG seed for subsampling and k-means init.
     """
     device_t = torch.device(device) if isinstance(device, str) else device
-    g = torch.Generator(device=device_t)
-    g.manual_seed(seed)
+    subsample_g = torch.Generator(device="cpu")
+    subsample_g.manual_seed(int(seed))
 
     was_training = model.training
     model.eval()
@@ -166,7 +169,9 @@ def init_vqvae_codebooks_from_loader(
             raise RuntimeError("no data collected for k-means init")
         x_all = torch.cat(chunks, dim=0)
         if x_all.shape[0] > max_samples:
-            idx = torch.randperm(x_all.shape[0], generator=g)[:max_samples]
+            idx = torch.randperm(
+                x_all.shape[0], generator=subsample_g
+            )[:max_samples]
             x_all = x_all[idx]
         return x_all.to(device_t)
 
@@ -174,7 +179,7 @@ def init_vqvae_codebooks_from_loader(
     Xc = gather_rows(_collect_z_coarse)
     k_c = model._vq_coarse._num_embeddings
     centroids_c, counts_c = kmeans_lloyd(
-        Xc, k_c, n_iter=kmeans_iters, generator=g
+        Xc, k_c, n_iter=kmeans_iters, seed=int(seed)
     )
     model._vq_coarse.init_from_centroids(centroids_c, counts_c)
 
@@ -182,7 +187,7 @@ def init_vqvae_codebooks_from_loader(
     Xf = gather_rows(_collect_z_fine)
     k_f = model._vq_fine._num_embeddings
     centroids_f, counts_f = kmeans_lloyd(
-        Xf, k_f, n_iter=kmeans_iters, generator=g
+        Xf, k_f, n_iter=kmeans_iters, seed=int(seed) + 10_007
     )
     model._vq_fine.init_from_centroids(centroids_f, counts_f)
 
@@ -202,11 +207,8 @@ def init_single_quantizer_from_tensor(
 
     Convenience when you already have tensors (e.g. saved activations).
     """
-    device = latents_flat.device
-    g = torch.Generator(device=device)
-    g.manual_seed(seed)
     k = vq._num_embeddings
     centroids, counts = kmeans_lloyd(
-        latents_flat.float(), k, n_iter=kmeans_iters, generator=g
+        latents_flat.float(), k, n_iter=kmeans_iters, seed=int(seed)
     )
     vq.init_from_centroids(centroids, counts)
