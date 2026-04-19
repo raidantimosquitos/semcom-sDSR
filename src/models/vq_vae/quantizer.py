@@ -41,6 +41,46 @@ class VectorQuantizerEMA(nn.Module):
         self._ema_w = nn.Parameter(torch.empty(num_embeddings, embedding_dim))
         self._ema_w.data.normal_()
 
+    def init_from_centroids(
+        self,
+        centroids: torch.Tensor,
+        cluster_counts: torch.Tensor | None = None,
+    ) -> None:
+        """
+        Replace codebook and EMA buffers so they stay consistent with
+        ``embedding = _ema_w / cluster_counts`` (matches forward training updates).
+
+        Use after k-means (or similar) on pre-quantized latents. ``centroids`` must be
+        (num_embeddings, embedding_dim). If ``cluster_counts`` is None, all clusters get
+        unit mass (pure embedding reset). Otherwise ``cluster_counts`` is (K,) positive.
+        """
+        if centroids.shape != (
+            self._num_embeddings,
+            self._embedding_dim,
+        ):
+            raise ValueError(
+                f"centroids shape {tuple(centroids.shape)} != "
+                f"({self._num_embeddings}, {self._embedding_dim})"
+            )
+        device = self._embedding.weight.device
+        c = centroids.to(device=device, dtype=torch.float32)
+        if cluster_counts is None:
+            ones = torch.ones(
+                self._num_embeddings, device=device, dtype=torch.float32
+            )
+            self._ema_cluster_size.copy_(ones)
+            self._ema_w.data.copy_(c)
+        else:
+            if cluster_counts.shape != (self._num_embeddings,):
+                raise ValueError(
+                    f"cluster_counts shape {tuple(cluster_counts.shape)} != "
+                    f"({self._num_embeddings},)"
+                )
+            n = cluster_counts.to(device=device, dtype=torch.float32).clamp(min=1e-5)
+            self._ema_cluster_size.copy_(n)
+            self._ema_w.data.copy_(c * n.unsqueeze(1))
+        self._embedding.weight.data.copy_(c)
+
     def forward(
         self, inputs: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

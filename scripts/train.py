@@ -58,6 +58,26 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--commitment_cost", type=float, default=0.25)
     s1.add_argument("--decay", type=float, default=0.99)
     s1.add_argument("--lambda_recon", type=float, default=1.0)
+    s1.add_argument("--lr_warmup_iters", type=int, default=1000, help="Linear LR warmup length; k-means init runs at this step when enabled")
+    s1.add_argument(
+        "--kmeans_init_after_warmup",
+        action="store_true",
+        help="After lr_warmup_iters, re-init both VQ codebooks via k-means on collected latents",
+    )
+    s1.add_argument("--kmeans_max_samples", type=int, default=500_000, help="Max latent vectors per codebook for k-means")
+    s1.add_argument("--kmeans_iters", type=int, default=15, help="Lloyd k-means iterations")
+    s1.add_argument("--kmeans_seed", type=int, default=0, help="RNG seed for k-means / subsampling")
+    s1.add_argument(
+        "--kmeans_max_batches",
+        type=int,
+        default=None,
+        help="Optional cap on training-loader batches scanned for k-means (default: no cap)",
+    )
+    s1.add_argument(
+        "--kmeans_reset_adam",
+        action="store_true",
+        help="Clear Adam optimizer state for VQ modules after k-means init",
+    )
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     s1.add_argument("--include_test", action="store_true", help="Include test data in stage1 training")
 
@@ -207,12 +227,20 @@ def run_stage1(args: argparse.Namespace) -> None:
         machine_type=run_name,
         lambda_recon=args.lambda_recon,
         lr=args.lr,
+        lr_warmup_iters=args.lr_warmup_iters,
+        total_steps=args.n_iter,
         batch_size=args.batch_size,
         log_every=args.log_every,
         ckpt_every=args.ckpt_every,
         ckpt_dir=args.ckpt_dir,
         use_amp=not args.no_amp,
         device=args.device,
+        kmeans_init_after_warmup=args.kmeans_init_after_warmup,
+        kmeans_max_samples=args.kmeans_max_samples,
+        kmeans_iters=args.kmeans_iters,
+        kmeans_seed=args.kmeans_seed,
+        kmeans_max_batches=args.kmeans_max_batches,
+        kmeans_reset_adam=args.kmeans_reset_adam,
     )
     trainer.train(n_iterations=args.n_iter, resume_from=args.resume)
 
@@ -352,7 +380,23 @@ def run_full(args: argparse.Namespace) -> None:
         n_iter=args.stage1_iter,
         lr=2e-4,
         lambda_recon=1.0,
+        lr_warmup_iters=1000,
+        kmeans_init_after_warmup=False,
+        kmeans_max_samples=500_000,
+        kmeans_iters=15,
+        kmeans_seed=0,
+        kmeans_max_batches=None,
+        kmeans_reset_adam=False,
         resume=None,
+        include_test=False,
+        num_embeddings_coarse=512,
+        num_embeddings_fine=1024,
+        embedding_dim_coarse=128,
+        embedding_dim_fine=128,
+        hidden_channels_coarse=256,
+        hidden_channels_fine=128,
+        commitment_cost=0.25,
+        decay=0.99,
     )
     run_stage1(stage1_args)
 
