@@ -30,8 +30,8 @@ SAMPLING_PRESETS: dict[str, dict] = {
     "pump":         {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
     "slider":       {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
     "valve":        {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
-    "ToyCar":       {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.2, 0.55), "anomaly_strength_coarse": (0.2, 0.53)},
-    "ToyConveyor":  {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.2, 0.55), "anomaly_strength_coarse": (0.2, 0.53)},
+    "ToyCar":       {"neighbor_prob": 0.30, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
+    "ToyConveyor":  {"neighbor_prob": 0.30, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
     "fan":          {"neighbor_prob": 0.30, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
 }
 
