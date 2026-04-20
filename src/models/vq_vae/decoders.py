@@ -7,10 +7,8 @@ BatchNorm, ReLU, ReZero ResidualStack. Coarse decoder outputs embed_dim; fine de
 
 from __future__ import annotations
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from math import log2
 
 from .res_blocks_2d import ResidualStack
 
@@ -30,7 +28,7 @@ class DecoderFine(nn.Module):
             stride=1,
             padding=1,
         )
-        
+
         self._residual_stack = ResidualStack(
             in_channels=num_hiddens,
             num_hiddens=num_hiddens,

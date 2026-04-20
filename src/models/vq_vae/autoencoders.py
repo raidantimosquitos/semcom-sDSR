@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Tuple
 
 from .quantizer import VectorQuantizerEMA
@@ -99,15 +100,6 @@ class VQ_VAE_2Layer(nn.Module):
             self.hidden_channels_fine + self.hidden_channels_fine, self.embedding_dim_fine, kernel_size=1, stride=1
         )
 
-        # 2x spatial: coarse grid (e.g. 16x40) -> fine VQ grid (e.g. 32x80); must match EncoderCoarse stride-2 from fine.
-        self._upscaler_coarse = nn.ConvTranspose2d(
-            in_channels=self.embedding_dim_coarse,
-            out_channels=self.embedding_dim_coarse,
-            kernel_size=4,
-            stride=2,
-            padding=1,
-        )  
-
         # Vector quantizers
         self._vq_coarse = VectorQuantizerEMA(
             num_embeddings_coarse, self.embedding_dim_coarse, commitment_cost, decay
@@ -155,7 +147,7 @@ class VQ_VAE_2Layer(nn.Module):
         loss_fine, quantized_fine, perplexity_fine, _ = self._vq_fine(z_fine)
 
         # Upscale coarse quantized to fine grid and decode jointly
-        quantized_coarse_up = self._upscaler_coarse(quantized_coarse)
+        quantized_coarse_up = F.interpolate(quantized_coarse, size=quantized_fine.shape[-2:], mode="bilinear", align_corners=False)
         quant_joined = torch.cat([quantized_coarse_up, quantized_fine], dim=1)
         recon = self._decoder_fine(quant_joined)
 
@@ -286,7 +278,7 @@ class VQ_VAE_2Layer(nn.Module):
         Returns:
             X_G: (B, 1, n_mels, T) reconstructed spectrogram
         """
-        quantized_coarse_up = self._upscaler_coarse(q_coarse)
+        quantized_coarse_up = F.interpolate(q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False)
         quant_joined = torch.cat([quantized_coarse_up, q_fine], dim=1)
         return self._decoder_fine(quant_joined)
 
