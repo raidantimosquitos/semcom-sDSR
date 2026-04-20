@@ -261,7 +261,7 @@ class SpectromorphicMaskStrategy:
         bw_hi = max(bw_lo, max(2, n_mels // 32))
         if random.random() < 0.1:
             bw_hi = max(bw_hi, n_mels // 8)
-            
+
         bw_hi = min(bw_hi, n_mels)
 
         if n_strata <= 1:
@@ -295,8 +295,10 @@ class SpectromorphicMaskStrategy:
         Tm = max(T, 1)
         lo = math.log(1.0)
         hi = math.log(float(Tm))
-        mu_on = math.exp(random.uniform(lo, hi))
-        mu_off = math.exp(random.uniform(lo, hi))
+        # mu_on = math.exp(random.uniform(lo, hi))
+        mu_on = math.exp(random.uniform(math.log(50), math.log(T)))
+        # mu_off = math.exp(random.uniform(lo, hi))
+        mu_off = math.exp(random.uniform(math.log(1), math.log(10)))
         p_on = 1.0 / max(mu_on, 1.0)
         p_off = 1.0 / max(mu_off, 1.0)
         eps = 1e-6
