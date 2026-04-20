@@ -225,7 +225,7 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.2,
+        perlin_prob: float = 0.05,
         mel_n_strata: int = 3,
         **_kwargs: object,
     ) -> None:

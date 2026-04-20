@@ -22,7 +22,7 @@ class FeatureEncoder(nn.Module):
     def __init__(self, in_channels: int, base_width: int) -> None:
         super().__init__()
         norm = nn.InstanceNorm2d
-        self.block1 = nn.Sequential(
+        self._block1 = nn.Sequential(
             nn.Conv2d(in_channels, base_width, kernel_size=3, padding=1),
             norm(base_width),
             nn.ReLU(inplace=True),
@@ -30,18 +30,26 @@ class FeatureEncoder(nn.Module):
             norm(base_width),
             nn.ReLU(inplace=True),
         )
-        self.mp1 = nn.MaxPool2d(2)
-        self.block2 = nn.Sequential(
-            nn.Conv2d(base_width, base_width * 2, kernel_size=3, padding=1),
+        self._mp1 = nn.Sequential(
+            nn.Conv2d(base_width, base_width * 2, kernel_size=3, stride=2, padding=1),
+            norm(base_width * 2),
+            nn.ReLU(inplace=True),
+        )
+        self._block2 = nn.Sequential(
+            nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
         )
-        self.mp2 = nn.MaxPool2d(2)
-        self.block3 = nn.Sequential(
-            nn.Conv2d(base_width * 2, base_width * 4, kernel_size=3, padding=1),
+        self._mp2 = nn.Sequential(
+            nn.Conv2d(base_width * 2, base_width * 4, kernel_size=3, stride=2, padding=1),
+            norm(base_width * 4),
+            nn.ReLU(inplace=True),
+        )
+        self._block3 = nn.Sequential(
+            nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
             norm(base_width * 4),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
@@ -50,11 +58,11 @@ class FeatureEncoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        b1 = self.block1(x)
-        mp1 = self.mp1(b1)
-        b2 = self.block2(mp1)
-        mp2 = self.mp2(b2)
-        b3 = self.block3(mp2)
+        b1 = self._block1(x)
+        mp1 = self._mp1(b1)
+        b2 = self._block2(mp1)
+        mp2 = self._mp2(b2)
+        b3 = self._block3(mp2)
         return b1, b2, b3
 
 
@@ -66,13 +74,12 @@ class FeatureDecoder(nn.Module):
     def __init__(self, base_width: int, out_channels: int) -> None:
         super().__init__()
         norm = nn.InstanceNorm2d
-        self.up2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
-            nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, padding=1),
+        self._up2 = nn.Sequential(
+            nn.ConvTranspose2d(base_width * 4, base_width * 2, kernel_size=4, stride=2, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
         )
-        self.db2 = nn.Sequential(
+        self._db2 = nn.Sequential(
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
@@ -80,13 +87,12 @@ class FeatureDecoder(nn.Module):
             norm(base_width * 2),
             nn.ReLU(inplace=True),
         )
-        self.up3 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
-            nn.Conv2d(base_width * 2, base_width, kernel_size=3, padding=1),
+        self._up3 = nn.Sequential(
+            nn.ConvTranspose2d(base_width * 2, base_width, kernel_size=4, stride=2, padding=1),
             norm(base_width),
             nn.ReLU(inplace=True),
         )
-        self.db3 = nn.Sequential(
+        self._db3 = nn.Sequential(
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
             norm(base_width),
             nn.ReLU(inplace=True),
@@ -94,16 +100,16 @@ class FeatureDecoder(nn.Module):
             norm(base_width),
             nn.ReLU(inplace=True),
         )
-        self.fin_out = nn.Conv2d(base_width, out_channels, kernel_size=3, padding=1)
+        self._fin_out = nn.Conv2d(base_width, out_channels, kernel_size=3, padding=1)
 
     def forward(self, b3: torch.Tensor) -> torch.Tensor:
-        up2 = self.up2(b3)
-        db2 = self.db2(up2)
+        up2 = self._up2(b3)
+        db2 = self._db2(up2)
 
-        up3 = self.up3(db2)
-        db3 = self.db3(up3)
+        up3 = self._up3(db2)
+        db3 = self._db3(up3)
 
-        return self.fin_out(db3)
+        return self._fin_out(db3)
 
 
 class SubspaceRestrictionNetwork(nn.Module):
@@ -119,14 +125,14 @@ class SubspaceRestrictionNetwork(nn.Module):
         base_width: int = 64,
     ) -> None:
         super().__init__()
-        self.encoder = FeatureEncoder(in_channels, base_width)
-        self.decoder = FeatureDecoder(base_width, out_channels=out_channels)
+        self._encoder = FeatureEncoder(in_channels, base_width)
+        self._decoder = FeatureDecoder(base_width, out_channels=out_channels)
         # self.residual_stack = ResidualStack(in_channels*2, in_channels*2, 2, in_channels//2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _, _, b3 = self.encoder(x)
+        _, _, b3 = self._encoder(x)
         # b3 = self.residual_stack(b3)
-        return self.decoder(b3)
+        return self._decoder(b3)
 
 
 class SubspaceRestrictionModule(nn.Module):

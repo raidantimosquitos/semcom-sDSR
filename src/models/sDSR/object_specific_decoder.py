@@ -101,7 +101,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
     """
     Feedforward encoder-decoder: [Q_coarse_upsampled, Q_fine] -> spectrogram (1 ch).
 
-    Encoder: two conv blocks with MaxPool (2x down each) -> 4x down total.
+    Encoder: two conv blocks with stride-2 conv downsampling (2x each) -> 4x down total.
     Bottleneck compresses to ``in_channels`` channels.
     Decoder: two ConvTranspose2d stages (no skip connections -- forces an
     information bottleneck so the network cannot leak anomaly detail),
@@ -130,7 +130,11 @@ class SpectrogramReconstructionNetwork(nn.Module):
             norm_layer(in_channels * 2),
             nn.ReLU(inplace=True),
         )
-        self._mp1 = nn.MaxPool2d(2)
+        self._mp1 = nn.Sequential(
+            nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, stride=2, padding=1),
+            norm_layer(in_channels * 2),
+            nn.ReLU(inplace=True),
+        )
 
         self._block2 = nn.Sequential(
             nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, padding=1),
@@ -140,7 +144,11 @@ class SpectrogramReconstructionNetwork(nn.Module):
             norm_layer(in_channels * 4),
             nn.ReLU(inplace=True),
         )
-        self._mp2 = nn.MaxPool2d(2)
+        self._mp2 = nn.Sequential(
+            nn.Conv2d(in_channels * 4, in_channels * 4, kernel_size=3, stride=2, padding=1),
+            norm_layer(in_channels * 4),
+            nn.ReLU(inplace=True),
+        )
 
         self._bottleneck_conv = nn.Conv2d(in_channels * 4, in_channels, kernel_size=1)
 

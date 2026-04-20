@@ -8,7 +8,7 @@ from .res_blocks_2d import ResidualStack
 class EncoderFine(nn.Module):
     """
     Downsampling: 4x in frequency, 4x in time.
-    Input (n_mels, T) -> output (n_mels//2, T//4), e.g. (128, 320) -> (32, 80).
+    Input (n_mels, T) -> output (n_mels//4, T//4), e.g. (128, 320) -> (32, 80).
     """
     def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
         super(EncoderFine, self).__init__()
@@ -54,7 +54,7 @@ class EncoderFine(nn.Module):
 class EncoderCoarse(nn.Module):
     """
     Downsampling: 2x in frequency, 2x in time (from fine grid).
-    Input (n_mels//2, T//4) -> output (n_mels//8, T//16), e.g. (64, 80) -> (16, 20).
+    Input (n_mels//4, T//4) -> output (n_mels//8, T//8), e.g. (32, 80) -> (16, 40).
     """
     def __init__(self, in_channels, num_hiddens, num_residual_layers, num_residual_hiddens):
         super(EncoderCoarse, self).__init__()
