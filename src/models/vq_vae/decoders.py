@@ -74,12 +74,9 @@ class DecoderCoarse(nn.Module):
                                              num_residual_layers=num_residual_layers,
                                              num_residual_hiddens=num_residual_hiddens)
 
-        self._conv_trans_1 =  nn.ConvTranspose2d(
-            in_channels=num_hiddens,
-            out_channels=out_channels,
-            kernel_size=4,
-            stride=2,
-            padding=1,
+        self._conv_trans_1 =  nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+            nn.Conv2d(num_hiddens, out_channels, kernel_size=3, stride=1, padding=1),
         )
 
     def forward(self, inputs):

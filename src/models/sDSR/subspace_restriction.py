@@ -75,7 +75,8 @@ class FeatureDecoder(nn.Module):
         super().__init__()
         norm = nn.InstanceNorm2d
         self._up2 = nn.Sequential(
-            nn.ConvTranspose2d(base_width * 4, base_width * 2, kernel_size=4, stride=2, padding=1),
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+            nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, stride=1, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
         )
@@ -88,7 +89,8 @@ class FeatureDecoder(nn.Module):
             nn.ReLU(inplace=True),
         )
         self._up3 = nn.Sequential(
-            nn.ConvTranspose2d(base_width * 2, base_width, kernel_size=4, stride=2, padding=1),
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+            nn.Conv2d(base_width * 2, base_width, kernel_size=3, stride=1, padding=1),
             norm(base_width),
             nn.ReLU(inplace=True),
         )
