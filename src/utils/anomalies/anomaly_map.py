@@ -257,8 +257,11 @@ class SpectromorphicMaskStrategy:
         if n_mels <= 0:
             return []
 
-        bw_lo = max(1, n_mels // 80)
-        bw_hi = max(bw_lo, max(2, n_mels // 20))
+        bw_lo = 1
+        bw_hi = max(bw_lo, max(2, n_mels // 32))
+        if random.random() < 0.1:
+            bw_hi = max(bw_hi, n_mels // 8)
+            
         bw_hi = min(bw_hi, n_mels)
 
         if n_strata <= 1:
@@ -346,8 +349,8 @@ class SpectromorphicMaskStrategy:
         return mask
 
     def _perlin(self) -> np.ndarray:
-        res_y = 2 ** random.randint(1, 6)
-        res_x = 2 ** random.randint(1, 6)
+        res_y = 2 ** random.randint(1, 4)
+        res_x = 2 ** random.randint(2, 5)
         noise = rand_perlin_2d_np((self.n_mels, self.T), (res_y, res_x))
         threshold = random.uniform(0.3, 0.6)
         return (noise > threshold).astype(np.float32)
