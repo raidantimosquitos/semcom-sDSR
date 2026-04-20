@@ -206,6 +206,9 @@ class SpectromorphicMaskStrategy:
          a start position and width so the band intersects that stratum (with
          fallback if impossible). Time activation is alternating renewal with
          geometric run lengths; per-mask means are log-uniform in ``[1, T]``.
+         Each **on** (marked) run and each **off** run is at least
+         ``min_temporal_marked_run`` and ``min_temporal_unmarked_gap`` frames
+         when time remains (shorter at the end of the axis if ``T`` is small).
 
       2. **Wideband periodic bursts** (probability ``periodic_wideband_prob``,
          typically small): all mel bins on for short temporal segments that
@@ -231,6 +234,11 @@ class SpectromorphicMaskStrategy:
             ``P`` is clamped to at least ``L + 1`` so bursts do not always overlap.
         period_jitter_max: max absolute frames added to ``P`` each step (``0`` =
             strict period). Step is clamped to at least ``L`` so time advances.
+        min_temporal_marked_run: minimum consecutive marked frames in the band
+            renewal process, and minimum burst length in the periodic wideband
+            mode (capped by ``T``).
+        min_temporal_unmarked_gap: minimum consecutive unmarked frames between
+            on-runs in the renewal process (capped by remaining time).
         mel_n_strata: number of contiguous mel partitions for stratified band
             placement (e.g. ``3`` → low / mid / high). ``1`` disables stratification
             (uniform mel start as before).
@@ -247,6 +255,8 @@ class SpectromorphicMaskStrategy:
         burst_len_frac: tuple[float, float] = (0.02, 0.07),
         period_frac: tuple[float, float] = (0.05, 0.22),
         period_jitter_max: int = 0,
+        min_temporal_marked_run: int = 8,
+        min_temporal_unmarked_gap: int = 8,
         mel_n_strata: int = 3,
         **_kwargs: object,
     ) -> None:
@@ -267,6 +277,8 @@ class SpectromorphicMaskStrategy:
         lo_p, hi_p = period_frac
         self._period_frac = (min(lo_p, hi_p), max(lo_p, hi_p))
         self.period_jitter_max = max(0, int(period_jitter_max))
+        self.min_temporal_marked_run = max(1, int(min_temporal_marked_run))
+        self.min_temporal_unmarked_gap = max(1, int(min_temporal_unmarked_gap))
         self.mel_n_strata = max(1, int(mel_n_strata))
 
     @staticmethod
@@ -337,17 +349,32 @@ class SpectromorphicMaskStrategy:
         p_on: float,
         p_off: float,
         start_on: bool,
+        min_marked_run: int = 1,
+        min_unmarked_gap: int = 1,
     ) -> np.ndarray:
-        """Binary (T,) via alternating on/off geometric runs, truncated to T."""
+        """
+        Binary (T,) via alternating on/off geometric runs, truncated to T.
+
+        Each on-run length is at least ``min_marked_run`` and each off-run at
+        least ``min_unmarked_gap``, when ``T - t`` allows (otherwise the final
+        fragment uses the remaining frames).
+        """
         a = np.zeros(T, dtype=np.float32)
         if T <= 0:
             return a
+        m_on = max(1, min(min_marked_run, T))
+        m_off = max(1, min(min_unmarked_gap, T))
         t = 0
         on = start_on
         while t < T:
+            rem = T - t
             p = p_on if on else p_off
             L = int(np.random.geometric(p))
-            L = max(1, min(L, T - t))
+            if on:
+                L = max(m_on, L)
+            else:
+                L = max(m_off, L)
+            L = max(1, min(L, rem))
             if on:
                 a[t : t + L] = 1.0
             t += L
@@ -370,7 +397,12 @@ class SpectromorphicMaskStrategy:
         denom = mu_on + mu_off
         p_start_on = (mu_on / denom) if denom > 0 else 0.5
         track = self._alternating_renewal_1d(
-            T, p_on, p_off, random.random() < p_start_on
+            T,
+            p_on,
+            p_off,
+            random.random() < p_start_on,
+            min_marked_run=self.min_temporal_marked_run,
+            min_unmarked_gap=self.min_temporal_unmarked_gap,
         )
         mask[f0:f1, :] = track.reshape(1, -1)
         return mask
@@ -386,11 +418,12 @@ class SpectromorphicMaskStrategy:
         if T <= 0 or n_mels <= 0:
             return mask
 
+        m_mark = min(self.min_temporal_marked_run, T)
         lo_l, hi_l = self._burst_len_frac
-        L_lo = max(1, int(T * lo_l))
-        L_hi = max(L_lo, int(T * hi_l))
+        L_lo = max(m_mark, max(1, int(T * lo_l)))
+        L_hi = max(L_lo, int(T * hi_l), m_mark)
         L_hi = min(L_hi, T)
-        L = random.randint(L_lo, L_hi) if L_hi >= L_lo else max(1, min(T, L_lo))
+        L = random.randint(L_lo, L_hi) if L_hi >= L_lo else m_mark
 
         lo_p, hi_p = self._period_frac
         P_lo = max(L + 1, int(T * lo_p))
@@ -403,6 +436,7 @@ class SpectromorphicMaskStrategy:
 
         phase = random.randint(0, max(0, min(P, T) - 1))
         J = self.period_jitter_max
+        G = min(self.min_temporal_unmarked_gap, T)
 
         t = phase
         while t < T:
@@ -411,7 +445,8 @@ class SpectromorphicMaskStrategy:
             step = P
             if J > 0:
                 step = P + random.randint(-J, J)
-            step = max(L, step)
+            # At least L marked frames per burst; step − L ≥ G leaves a gap before next start
+            step = max(L + G, L, step)
             t += step
 
         return mask
