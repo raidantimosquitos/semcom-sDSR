@@ -2,8 +2,7 @@
 Anomaly simulation utilities for AudDSR training.
 
 - AnomalyMapGenerator: anomaly mask generation with strategy selection
-- SpectromorphicMaskStrategy: stratified mel band × renewal, optional wideband
-  periodic bursts, optional Perlin
+- SpectromorphicMaskStrategy: stratified mel band × renewal in time, optional Perlin
 - AudioSpecificStrategy / LatentAlignedBandStrategy: backward-compatible aliases
 - generate_fake_anomalies_distant: codebook-based feature replacement (distant +
   neighbor); distant mode skips a configurable nearest fraction (default 5 %)
