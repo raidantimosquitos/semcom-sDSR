@@ -5,8 +5,9 @@ Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 
 1. PerlinNoiseStrategy            – threshold/binarize Perlin noise (generic fallback)
 2. MixNoiseStrategy               – smoothed random field + Poisson bursts, quantile cut
-3. SpectromorphicMaskStrategy     – one stratified mel band × renewal time
-                                    (optional Perlin), replaces LatentAlignedBandStrategy
+3. SpectromorphicMaskStrategy     – stratified mel band × renewal time, optional
+                                    wideband periodic bursts (full mel × short time),
+                                    optional Perlin; replaces LatentAlignedBandStrategy
 
 AnomalyMapGenerator selects between strategies at call time.
 ``AudioSpecificStrategy`` and ``LatentAlignedBandStrategy`` are kept as aliases
@@ -197,24 +198,39 @@ class SpectromorphicMaskStrategy:
     """
     Synthetic anomaly masks for spectrograms.
 
-    Each sample is either:
+    Each sample is one of:
 
-      1. **Band + renewal time** (probability ``1 - perlin_prob``): exactly one
-         contiguous mel band. The band is **stratified by mel**: each mask picks
-         one stratum (low / mid / high mel when ``mel_n_strata=3``), then a
-         start position and width so the band intersects that stratum (with
+      1. **Band + renewal time** (default majority of non-Perlin draws): exactly
+         one contiguous mel band. The band is **stratified by mel**: each mask
+         picks one stratum (low / mid / high mel when ``mel_n_strata=3``), then
+         a start position and width so the band intersects that stratum (with
          fallback if impossible). Time activation is alternating renewal with
          geometric run lengths; per-mask means are log-uniform in ``[1, T]``.
-         Coverage is implicit (no rejection on area).
 
-      2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
+      2. **Wideband periodic bursts** (probability ``periodic_wideband_prob``,
+         typically small): all mel bins on for short temporal segments that
+         repeat with period ``P`` (and optional integer jitter on the step) to
+         mimic impulsive / cyclic wideband structure.
+
+      3. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
          for blob-shaped masks.
+
+    The three probabilities are applied in order: Perlin, then periodic
+    wideband, else single band. They should sum to at most ``1``; if they
+    exceed ``1``, ``periodic_wideband_prob`` is clipped.
 
     Output is binary, shape ``(1, 1, n_mels, T)``. Callers may downsample with
     ``F.interpolate`` when ``q_shape`` differs from spectrogram resolution.
 
     Args:
         perlin_prob: probability of choosing the Perlin branch per mask.
+        periodic_wideband_prob: probability of wideband periodic bursts (after
+            Perlin branch); remainder is single-band renewal.
+        burst_len_frac: ``(lo, hi)`` fractions of ``T`` for temporal segment length.
+        period_frac: ``(lo, hi)`` fractions of ``T`` for nominal period ``P``;
+            ``P`` is clamped to at least ``L + 1`` so bursts do not always overlap.
+        period_jitter_max: max absolute frames added to ``P`` each step (``0`` =
+            strict period). Step is clamped to at least ``L`` so time advances.
         mel_n_strata: number of contiguous mel partitions for stratified band
             placement (e.g. ``3`` → low / mid / high). ``1`` disables stratification
             (uniform mel start as before).
@@ -227,6 +243,10 @@ class SpectromorphicMaskStrategy:
         n_mels: int | None = None,
         T: int | None = None,
         perlin_prob: float = 0.2,
+        periodic_wideband_prob: float = 0.12,
+        burst_len_frac: tuple[float, float] = (0.02, 0.07),
+        period_frac: tuple[float, float] = (0.05, 0.22),
+        period_jitter_max: int = 0,
         mel_n_strata: int = 3,
         **_kwargs: object,
     ) -> None:
@@ -237,7 +257,16 @@ class SpectromorphicMaskStrategy:
             self.n_mels = n_mels or 128
             self.T = T or 320
         self.q_shape = q_shape or (self.n_mels, self.T)
-        self.perlin_prob = perlin_prob
+        self.perlin_prob = float(min(max(perlin_prob, 0.0), 1.0))
+        p_burst = float(min(max(periodic_wideband_prob, 0.0), 1.0))
+        if self.perlin_prob + p_burst > 1.0:
+            p_burst = max(0.0, 1.0 - self.perlin_prob)
+        self.periodic_wideband_prob = p_burst
+        lo_l, hi_l = burst_len_frac
+        self._burst_len_frac = (min(lo_l, hi_l), max(lo_l, hi_l))
+        lo_p, hi_p = period_frac
+        self._period_frac = (min(lo_p, hi_p), max(lo_p, hi_p))
+        self.period_jitter_max = max(0, int(period_jitter_max))
         self.mel_n_strata = max(1, int(mel_n_strata))
 
     @staticmethod
@@ -346,6 +375,47 @@ class SpectromorphicMaskStrategy:
         mask[f0:f1, :] = track.reshape(1, -1)
         return mask
 
+    def _periodic_wideband_bursts(self) -> np.ndarray:
+        """
+        Full mel extent × short time windows, repeated with nominal period ``P``
+        and random phase. Optionally jitters the step in ``[-J, J]`` (clamped so
+        time always advances by at least ``L``).
+        """
+        n_mels, T = self.n_mels, self.T
+        mask = np.zeros((n_mels, T), dtype=np.float32)
+        if T <= 0 or n_mels <= 0:
+            return mask
+
+        lo_l, hi_l = self._burst_len_frac
+        L_lo = max(1, int(T * lo_l))
+        L_hi = max(L_lo, int(T * hi_l))
+        L_hi = min(L_hi, T)
+        L = random.randint(L_lo, L_hi) if L_hi >= L_lo else max(1, min(T, L_lo))
+
+        lo_p, hi_p = self._period_frac
+        P_lo = max(L + 1, int(T * lo_p))
+        P_hi = max(P_lo, int(T * hi_p))
+        P_hi = min(P_hi, T)
+        if P_hi <= P_lo:
+            P = min(T, max(L + 1, (T + L) // 4 or L + 1))
+        else:
+            P = random.randint(P_lo, min(P_hi, T))
+
+        phase = random.randint(0, max(0, min(P, T) - 1))
+        J = self.period_jitter_max
+
+        t = phase
+        while t < T:
+            t_end = min(T, t + L)
+            mask[:, t:t_end] = 1.0
+            step = P
+            if J > 0:
+                step = P + random.randint(-J, J)
+            step = max(L, step)
+            t += step
+
+        return mask
+
     # -- perlin ----------------------------------------------------------------
 
     def _perlin(self) -> np.ndarray:
@@ -367,8 +437,11 @@ class SpectromorphicMaskStrategy:
     ) -> torch.Tensor:
         masks = []
         for _ in range(batch_size):
-            if random.random() < self.perlin_prob:
+            u = random.random()
+            if u < self.perlin_prob:
                 m = self._perlin()
+            elif u < self.perlin_prob + self.periodic_wideband_prob:
+                m = self._periodic_wideband_bursts()
             else:
                 m = self._band_time_segments()
             masks.append(torch.from_numpy(m).unsqueeze(0).unsqueeze(0))

@@ -28,8 +28,8 @@ from .anomaly_detection import AnomalyDetectionModule
 # Per-machine-type codebook sampling presets (derived from L2 distance maps)
 SAMPLING_PRESETS: dict[str, dict] = {
     "pump":         {"neighbor_prob": 0.30, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
-    "slider":       {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
-    "valve":        {"neighbor_prob": 0.05, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
+    "slider":       {"neighbor_prob": 0.30, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
+    "valve":        {"neighbor_prob": 0.30, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
     "ToyCar":       {"neighbor_prob": 0.30, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
     "ToyConveyor":  {"neighbor_prob": 0.30, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
     "fan":          {"neighbor_prob": 0.30, "anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
