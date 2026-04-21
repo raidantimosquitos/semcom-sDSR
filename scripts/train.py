@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
         p.add_argument("--log_every", type=int, default=100)
         p.add_argument("--ckpt_every", type=int, default=500)
         p.add_argument("--no_amp", action="store_true", help="Disable AMP")
+        p.add_argument(
+            "--num_workers",
+            type=int,
+            default=4,
+            help="DataLoader workers (0 = main thread only). Use 4–8 when __getitem__ is slow (e.g. mask generation).",
+        )
 
     # Stage 1: machine_type can be a list for multi-type training
     s1 = sub.choices["stage1"]
@@ -223,6 +229,7 @@ def run_stage1(args: argparse.Namespace) -> None:
         ckpt_dir=args.ckpt_dir,
         use_amp=not args.no_amp,
         device=args.device,
+        num_workers=args.num_workers,
         kmeans_init_after_warmup=args.kmeans_init_after_warmup,
         kmeans_max_samples=args.kmeans_max_samples,
         kmeans_iters=args.kmeans_iters,
@@ -349,6 +356,7 @@ def run_stage2(args: argparse.Namespace) -> None:
         device=args.device,
         val_dataset=val_dataset,
         val_every=val_every,
+        num_workers=args.num_workers,
     )
     trainer.train(n_iterations=args.n_iter, resume_from=args.resume)
 
@@ -367,6 +375,7 @@ def run_full(args: argparse.Namespace) -> None:
         log_every=args.log_every,
         ckpt_every=args.ckpt_every,
         no_amp=args.no_amp,
+        num_workers=args.num_workers,
         n_iter=args.stage1_iter,
         lr=2e-4,
         lambda_recon=1.0,
@@ -405,6 +414,7 @@ def run_full(args: argparse.Namespace) -> None:
         log_every=args.log_every,
         ckpt_every=args.ckpt_every,
         no_amp=args.no_amp,
+        num_workers=args.num_workers,
         n_iter=args.stage2_iter,
         stage1_ckpt=stage1_ckpt,
         lr=2e-4,

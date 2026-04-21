@@ -93,9 +93,19 @@ def rand_perlin_2d_np(
     at effective shape (res[0]*d[0], res[1]*d[1]) then zoom to shape for arbitrary
     spectrogram dimensions.
 
+    ``res`` components larger than ``shape`` force ``effective_shape`` wider/taller than
+    the requested spectrogram and can allocate tens of millions of cells; they are
+    clamped to ``shape`` so cost stays O(H*W).
+
     Returns:
         Noise array of shape (H, W), values roughly in [-1, 1]
     """
+    sy, sx = max(1, int(shape[0])), max(1, int(shape[1]))
+    ry = max(1, min(int(res[0]), sy))
+    rx = max(1, min(int(res[1]), sx))
+    shape = (sy, sx)
+    res = (ry, rx)
+
     d = (max(1, shape[0] // res[0]), max(1, shape[1] // res[1]))
     effective_shape = (res[0] * d[0], res[1] * d[1])
 
@@ -165,6 +175,12 @@ def rand_perlin_2d(
     same delta, d, grid, tile_grads, dot, torch.lerp.
     """
     fade_fn = fade if fade is not None else _default_fade_torch
+
+    sy, sx = max(1, int(shape[0])), max(1, int(shape[1]))
+    ry = max(1, min(int(res[0]), sy))
+    rx = max(1, min(int(res[1]), sx))
+    shape = (sy, sx)
+    res = (ry, rx)
 
     d = (max(1, shape[0] // res[0]), max(1, shape[1] // res[1]))
     effective_shape = (res[0] * d[0], res[1] * d[1])

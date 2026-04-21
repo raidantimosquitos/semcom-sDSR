@@ -56,6 +56,7 @@ class Stage2Trainer(BaseTrainer):
         val_dataset: Any | None = None,
         val_every: int = 1000,
         val_batch_size: int = 32,
+        num_workers: int = 0,
     ) -> None:
         self.machine_type = machine_type
         self.machine_id = machine_id
@@ -84,6 +85,7 @@ class Stage2Trainer(BaseTrainer):
             batch_size=batch_size,
             grad_clip=grad_clip,
             use_amp=use_amp,
+            num_workers=num_workers,
         )
 
         # Optimizer for trainable params only (object_decoder, anomaly_detection)
@@ -105,7 +107,10 @@ class Stage2Trainer(BaseTrainer):
         self._val_best_ckpt_paths: dict[str, Path] = {}
 
         n_params = sum(p.numel() for p in trainable)
-        self._tee(f"Stage2 | Device: {self.device} | AMP: {self.use_amp} | Trainable params: {n_params:,}")
+        self._tee(
+            f"Stage2 | Device: {self.device} | AMP: {self.use_amp} | "
+            f"DataLoader workers: {self.num_workers} | Trainable params: {n_params:,}"
+        )
 
     def _get_lr(self, step: int, total_steps: int) -> float:
         if step < self.lr_warmup_iters:

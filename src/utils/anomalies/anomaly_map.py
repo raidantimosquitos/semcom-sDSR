@@ -3,9 +3,9 @@ Anomaly map generation for sDSR training.
 
 Strategies (same interface: ``__call__(batch_size, device)`` → ``(B, 1, H, W)``):
 
-1. NonStationarySpectromorphicMaskStrategy – stratified mel band × renewal time,
+1. NonStationarySpectromorphicMaskStrategy – linear-Hz band (mapped to mel bins) × renewal time,
    optional Perlin (e.g. valve, slider). Aliased as ``SpectromorphicMaskStrategy``.
-2. StationarySpectromorphicMaskStrategy – stratified multi-band mel × independent
+2. StationarySpectromorphicMaskStrategy – multi-band linear-Hz (mapped to mel) × independent
    renewal time, optional Perlin (fan, pump, ToyConveyor, ToyCar).
 
 :class:`AnomalyMapGenerator` holds both and dispatches from the DCASE ``machine_type``
@@ -28,6 +28,51 @@ STATIONARY_SPECTROMORPHIC_MACHINE_TYPES: frozenset[str] = frozenset(
     {"fan", "ToyConveyor", "ToyCar"}
 )
 
+def hz_to_mel(hz: float) -> float:
+    """Mel scale (Hz) — same family as typical log-mel frontends."""
+    return 2595.0 * math.log10(1.0 + max(hz, 0.0) / 700.0)
+
+
+def hz_band_to_mel_bin_range(
+    f0_hz: float,
+    bw_hz: float,
+    n_mels: int,
+    f_min_hz: float,
+    f_max_hz: float,
+) -> tuple[int, int]:
+    """
+    Map a linear-frequency band ``[f0_hz, f0_hz + bw_hz)`` (clipped to ``[f_min_hz, f_max_hz]``)
+    to half-open mel-bin indices ``[i0, i1)`` consistent with a uniform mel partition between
+    ``f_min_hz`` and ``f_max_hz`` (same convention as spacing along the mel axis in log-mel).
+    """
+    if n_mels <= 0:
+        return 0, 0
+    f_min_hz = float(f_min_hz)
+    f_max_hz = float(f_max_hz)
+    if f_max_hz <= f_min_hz:
+        return 0, min(1, n_mels)
+
+    f_lo = max(f_min_hz, f0_hz)
+    f_hi = min(f_max_hz, f0_hz + max(bw_hz, 0.0))
+    if f_hi <= f_lo:
+        f_hi = min(f_max_hz, f_lo + 1.0)
+
+    mel_min = hz_to_mel(f_min_hz)
+    mel_max = hz_to_mel(f_max_hz)
+    span = mel_max - mel_min
+    if span <= 0:
+        return 0, min(1, n_mels)
+
+    m_lo = hz_to_mel(f_lo)
+    m_hi = hz_to_mel(f_hi)
+    i0 = (m_lo - mel_min) / span * n_mels
+    i1 = (m_hi - mel_min) / span * n_mels
+
+    start_f = int(math.floor(i0))
+    end_f = int(math.ceil(i1))
+    start_f = max(0, min(n_mels - 1, start_f))
+    end_f = max(start_f + 1, min(n_mels, end_f))
+    return start_f, end_f
 
 def default_spectromorphic_perlin(
     n_mels: int,
@@ -36,18 +81,24 @@ def default_spectromorphic_perlin(
     """
     Thresholded 2-D Perlin noise (non-stationary / stationary Perlin branch).
 
-    With high thresholds (e.g. ``random.uniform(0.7, 0.95)``) the binary mask is
-    often empty; we redraw noise + threshold until the mask has at least one pixel
-    set, up to ``max_empty_retries``, then fall back to a median split on the
-    last noise field so the result is never empty unless ``n_mels * T == 0``.
+    Perlin ``res`` is the low-frequency grid size along mel and time. It must stay
+    on the order of the spectrogram dimensions; otherwise ``rand_perlin_2d_np``
+    builds enormous intermediate grids (e.g. if ``res_x`` were ``2**(res_y+k)``
+    with ``res_y`` already a power of two, ``res_x`` could reach ``2^19``).
+
+    If the binary mask is empty after thresholding, returns the raw noise field
+    (soft fallback) so the result is still usable.
     """
     if n_mels <= 0 or T <= 0:
         return np.zeros((max(0, n_mels), max(0, T)), dtype=np.float32)
 
+    # Independent coarse scales in [2, 16] on each axis (cost ~ O(n_mels * T)).
     res_y = 2 ** random.randint(1, 4)
-    res_x = 2 ** (res_y + random.randint(1, 3))
+    res_x = 2 ** random.randint(1, 4)
+    res_y = max(2, min(res_y, n_mels))
+    res_x = max(2, min(res_x, T))
     noise = rand_perlin_2d_np((n_mels, T), (res_y, res_x))
-    threshold = random.uniform(0.6, 0.9)
+    threshold = random.uniform(0.3, 0.6)
     mask = (noise > threshold).astype(np.float32)
     if mask.sum() > 0:
         return mask
@@ -69,11 +120,10 @@ class NonStationarySpectromorphicMaskStrategy:
     Each sample is either:
 
       1. **Band + renewal time** (probability ``1 - perlin_prob``): exactly one
-         contiguous mel band. The band is **stratified by mel**: each mask picks
-         one stratum (low / mid / high mel when ``mel_n_strata=3``), then a
-         start position and width so the band intersects that stratum (with
-         fallback if impossible). Time activation is alternating renewal with
-         geometric run lengths; per-mask means are log-uniform in ``[1, T]``.
+         contiguous mel band. Band edges are sampled in **linear Hz** on
+         ``[f_min_hz, f_max_hz]``: ``bw_hz ~ Uniform(bw_min_hz, bw_max_hz)``,
+         ``f0_hz ~ Uniform(f_min_hz, f_max_hz - bw_hz)``, then mapped to mel-bin
+         indices via :func:`hz_band_to_mel_bin_range` / :func:`hz_to_mel`.
 
       2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
          for blob-shaped masks.
@@ -83,9 +133,8 @@ class NonStationarySpectromorphicMaskStrategy:
 
     Args:
         perlin_prob: probability of choosing the Perlin branch per mask.
-        mel_n_strata: number of contiguous mel partitions for stratified band
-            placement (e.g. ``3`` → low / mid / high). ``1`` disables stratification
-            (uniform mel start as before).
+        f_min_hz, f_max_hz: linear frequency range matching the mel spectrogram (Hz).
+        bw_min_hz, bw_max_hz: uniform range for band width in Hz (machine-like bands).
     """
 
     def __init__(
@@ -95,7 +144,10 @@ class NonStationarySpectromorphicMaskStrategy:
         n_mels: int | None = None,
         T: int | None = None,
         perlin_prob: float = 0.1,
-        mel_n_strata: int = 3,
+        f_min_hz: float = 0.0,
+        f_max_hz: float = 8_000.0,
+        bw_min_hz: float = 40.0,
+        bw_max_hz: float = 500.0,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -106,54 +158,34 @@ class NonStationarySpectromorphicMaskStrategy:
             self.T = T or 320
         self.q_shape = q_shape or (self.n_mels, self.T)
         self.perlin_prob = float(min(max(perlin_prob, 0.0), 1.0))
-        self.mel_n_strata = max(1, int(mel_n_strata))
+        self.f_min_hz = float(f_min_hz)
+        self.f_max_hz = float(f_max_hz)
+        self.bw_min_hz = float(max(0.0, bw_min_hz))
+        self.bw_max_hz = float(max(self.bw_min_hz, bw_max_hz))
 
-    @staticmethod
-    def _mel_stratum_bounds(n_mels: int, n_strata: int, s: int) -> tuple[int, int]:
-        """Half-open mel index interval [L, R) for stratum ``s``."""
-        L = s * n_mels // n_strata
-        R = (s + 1) * n_mels // n_strata
-        return L, R
-
-    def _pick_single_stratified_mel_band(self) -> list[tuple[int, int]]:
-        """
-        One contiguous band ``[start_f, start_f + bw)`` intersecting a randomly
-        chosen mel stratum. Bandwidth policy unchanged; if no valid ``start_f``,
-        retry a few times then fall back to uniform start on ``[0, n_mels-bw]``.
-        """
+    def _pick_single_hz_mel_band(self) -> list[tuple[int, int]]:
+        """One contiguous band ``[f0, f1)`` in mel bins from uniform Hz ``f0``, ``bw``."""
         n_mels = self.n_mels
-        n_strata = self.mel_n_strata
         if n_mels <= 0:
             return []
 
-        bw_lo = 1
-        bw_hi = max(bw_lo, max(2, n_mels // 64))
-        if random.random() < 0.1:
-            bw_hi = max(bw_hi, n_mels // 8)
+        lo, hi = self.f_min_hz, self.f_max_hz
+        span_hz = hi - lo
+        if span_hz <= 0:
+            return []
 
-        bw_hi = min(bw_hi, n_mels)
+        bw_lo = min(self.bw_min_hz, span_hz)
+        bw_hi = min(self.bw_max_hz, span_hz)
+        if bw_hi < bw_lo:
+            bw_lo, bw_hi = bw_hi, bw_lo
 
-        if n_strata <= 1:
-            bw = random.randint(bw_lo, bw_hi)
-            start_f = random.randint(0, n_mels - bw)
-            return [(start_f, start_f + bw)]
-
-        for _ in range(24):
-            bw = random.randint(bw_lo, bw_hi)
-            s = random.randint(0, n_strata - 1)
-            L_s, R_s = self._mel_stratum_bounds(n_mels, n_strata, s)
-            if R_s <= L_s:
-                continue
-            # [start_f, start_f + bw) intersects [L_s, R_s) iff start_f < R_s and start_f + bw > L_s
-            lo = max(0, L_s - bw + 1)
-            hi = min(n_mels - bw, R_s - 1)
-            if lo <= hi:
-                start_f = random.randint(lo, hi)
-                return [(start_f, start_f + bw)]
-
-        bw = random.randint(bw_lo, bw_hi)
-        start_f = random.randint(0, n_mels - bw)
-        return [(start_f, start_f + bw)]
+        for _ in range(32):
+            bw_hz = random.uniform(bw_lo, bw_hi)
+            f0_hz = random.uniform(lo, max(lo, hi - bw_hz))
+            f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, lo, hi)
+            if f1 > f0:
+                return [(f0, f1)]
+        return []
 
     def _hierarchical_renewal_params(self, T: int) -> tuple[float, float, float, float]:
         """
@@ -200,12 +232,12 @@ class NonStationarySpectromorphicMaskStrategy:
 
     def _band_time_segments(self) -> np.ndarray:
         """
-        Binary mask: one stratified mel band × time from alternating renewal
+        Binary mask: one Hz-derived mel band × time from alternating renewal
         (geometric runs, hierarchical means).
         """
         n_mels, T = self.n_mels, self.T
         mask = np.zeros((n_mels, T), dtype=np.float32)
-        bands = self._pick_single_stratified_mel_band()
+        bands = self._pick_single_hz_mel_band()
         if not bands:
             return mask
 
@@ -247,13 +279,11 @@ class StationarySpectromorphicMaskStrategy:
     Each sample is either:
 
       1. **Multi-band + renewal** (probability ``1 - perlin_prob``): one or more
-         contiguous mel bands (up to ``mel_n_bands_max``). Bands use the same
-         **stratified mel** placement as :class:`NonStationarySpectromorphicMaskStrategy`:
-         each band intersects an assigned stratum (low / mid / high when
-         ``mel_n_strata=3``). With ``mel_strata_distinct`` and enough strata, bands
-         use **distinct** strata so they spread across frequency. Each band gets an
-         **independent** alternating renewal along time (geometric ON/OFF runs).
-         Overlaps are merged with elementwise max.
+         contiguous mel bands (up to ``mel_n_bands_max``). Each band is drawn
+         independently in **linear Hz** (same rules as
+         :class:`NonStationarySpectromorphicMaskStrategy`) and mapped to mel bins.
+         Each band gets an **independent** alternating renewal along time (geometric
+         ON/OFF runs). Overlaps are merged with elementwise max.
 
       2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise.
 
@@ -267,9 +297,11 @@ class StationarySpectromorphicMaskStrategy:
         n_mels: int | None = None,
         T: int | None = None,
         perlin_prob: float = 0.3,
-        mel_n_strata: int = 3,
         mel_n_bands_max: int = 10,
-        mel_strata_distinct: bool = True,
+        f_min_hz: float = 0.0,
+        f_max_hz: float = 8_000.0,
+        bw_min_hz: float = 40.0,
+        bw_max_hz: float = 2_000.0,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -280,69 +312,47 @@ class StationarySpectromorphicMaskStrategy:
             self.T = T or 320
         self.q_shape = q_shape or (self.n_mels, self.T)
         self.perlin_prob = float(min(max(perlin_prob, 0.0), 1.0))
-        self.mel_n_strata = max(1, int(mel_n_strata))
         self.mel_n_bands_max = max(1, int(mel_n_bands_max))
-        self.mel_strata_distinct = bool(mel_strata_distinct)
+        self.f_min_hz = float(f_min_hz)
+        self.f_max_hz = float(f_max_hz)
+        self.bw_min_hz = float(max(0.0, bw_min_hz))
+        self.bw_max_hz = float(max(self.bw_min_hz, bw_max_hz))
 
-    @staticmethod
-    def _mel_stratum_bounds(n_mels: int, n_strata: int, s: int) -> tuple[int, int]:
-        L = s * n_mels // n_strata
-        R = (s + 1) * n_mels // n_strata
-        return L, R
-
-    def _band_width_bounds(self) -> tuple[int, int]:
+    def _pick_hz_mel_bands(self) -> list[tuple[int, int]]:
+        """One or more disjoint-in-definition bands in mel bins from independent Hz draws."""
         n_mels = self.n_mels
-        bw_lo = 1
-        bw_hi = max(bw_lo, max(2, n_mels // 32))
-        if random.random() < 0.8:
-            bw_hi = max(bw_hi, n_mels // 8)
-        return bw_lo, min(bw_hi, n_mels)
+        if n_mels <= 0:
+            return []
 
-    def _pick_band_intersecting_stratum(self, s: int) -> tuple[int, int] | None:
-        n_mels = self.n_mels
-        n_strata = self.mel_n_strata
-        bw_lo, bw_hi = self._band_width_bounds()
-        L_s, R_s = self._mel_stratum_bounds(n_mels, n_strata, s)
-        if R_s <= L_s:
-            return None
-        for _ in range(24):
-            bw = random.randint(bw_lo, bw_hi)
-            lo = max(0, L_s - bw + 1)
-            hi = min(n_mels - bw, R_s - 1)
-            if lo <= hi:
-                start_f = random.randint(lo, hi)
-                return (start_f, start_f + bw)
-        return None
+        lo, hi = self.f_min_hz, self.f_max_hz
+        span_hz = hi - lo
+        if span_hz <= 0:
+            return []
 
-    def _pick_band_uniform_mel(self) -> tuple[int, int]:
-        n_mels = self.n_mels
-        bw_lo, bw_hi = self._band_width_bounds()
-        bw = random.randint(bw_lo, bw_hi)
-        start_f = random.randint(0, n_mels - bw)
-        return (start_f, start_f + bw)
+        bw_lo = min(self.bw_min_hz, span_hz)
+        bw_hi = min(self.bw_max_hz, span_hz)
+        if bw_hi < bw_lo:
+            bw_lo, bw_hi = bw_hi, bw_lo
 
-    def _pick_stratified_mel_bands(self) -> list[tuple[int, int]]:
-        n_mels = self.n_mels
-        n_strata = self.mel_n_strata
         kmax = min(self.mel_n_bands_max, max(1, n_mels))
         nb = random.randint(1, kmax)
         bands: list[tuple[int, int]] = []
-
-        if n_strata <= 1:
-            for _ in range(nb):
-                bands.append(self._pick_band_uniform_mel())
-            return bands
-
-        if self.mel_strata_distinct and nb <= n_strata:
-            strata = random.sample(range(n_strata), nb)
-        else:
-            strata = [random.randint(0, n_strata - 1) for _ in range(nb)]
-
-        for s in strata:
-            b = self._pick_band_intersecting_stratum(s)
-            if b is None:
-                b = self._pick_band_uniform_mel()
-            bands.append(b)
+        for _ in range(nb):
+            for _try in range(16):
+                bw_hz = random.uniform(bw_lo, bw_hi)
+                f0_hz = random.uniform(lo, max(lo, hi - bw_hz))
+                f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, lo, hi)
+                if f1 > f0:
+                    bands.append((f0, f1))
+                    break
+        if not bands:
+            for _ in range(32):
+                bw_hz = random.uniform(bw_lo, bw_hi)
+                f0_hz = random.uniform(lo, max(lo, hi - bw_hz))
+                f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, lo, hi)
+                if f1 > f0:
+                    bands.append((f0, f1))
+                    break
         return bands
 
     def _hierarchical_renewal_params(self, T: int) -> tuple[float, float, float, float]:
@@ -383,7 +393,7 @@ class StationarySpectromorphicMaskStrategy:
     def _band_time_segments(self) -> np.ndarray:
         n_mels, T = self.n_mels, self.T
         mask = np.zeros((n_mels, T), dtype=np.float32)
-        bands = self._pick_stratified_mel_bands()
+        bands = self._pick_hz_mel_bands()
         if not bands:
             return mask
 
@@ -436,7 +446,8 @@ class AnomalyMapGenerator:
 
     Extra keyword arguments are forwarded to **both** strategy classes; each ignores
     keys it does not use (e.g. ``mel_n_bands_max`` only affects
-    :class:`StationarySpectromorphicMaskStrategy`).
+    :class:`StationarySpectromorphicMaskStrategy`). Hz band args (``f_min_hz``,
+    ``f_max_hz``, ``bw_min_hz``, ``bw_max_hz``) apply to both strategies.
     """
 
     def __init__(

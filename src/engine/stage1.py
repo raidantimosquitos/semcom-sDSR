@@ -49,6 +49,7 @@ class Stage1Trainer(BaseTrainer):
         use_amp: bool = True,
         device: str = "cuda",
         total_steps: int = 20000,
+        num_workers: int = 0,
         *,
         kmeans_init_after_warmup: bool = False,
         kmeans_max_samples: int = 500_000,
@@ -87,6 +88,7 @@ class Stage1Trainer(BaseTrainer):
             batch_size=batch_size,
             grad_clip=grad_clip,
             use_amp=use_amp,
+            num_workers=num_workers,
         )
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
@@ -95,7 +97,10 @@ class Stage1Trainer(BaseTrainer):
         self._last_ckpt_path: Path | None = None
 
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        self._tee(f"Stage1 | Device: {self.device} | AMP: {self.use_amp} | Params: {n_params:,}")
+        self._tee(
+            f"Stage1 | Device: {self.device} | AMP: {self.use_amp} | "
+            f"DataLoader workers: {self.num_workers} | Params: {n_params:,}"
+        )
         if self.kmeans_init_after_warmup:
             self._tee(
                 f"Stage1 | K-means codebook init: after warmup step "

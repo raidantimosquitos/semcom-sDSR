@@ -47,6 +47,7 @@ class BaseTrainer(ABC):
         batch_size: int = 64,
         grad_clip: float | None = 1.0,
         use_amp: bool = True,
+        num_workers: int = 0,
     ) -> None:
         self.ckpt_dir = Path(ckpt_dir)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -57,16 +58,19 @@ class BaseTrainer(ABC):
         self.grad_clip = grad_clip
         self.use_amp = use_amp and torch.cuda.is_available()
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        self.num_workers = num_workers
 
         self.model = model.to(self.device)
-        self.loader = DataLoader(
-            dataset,
+        loader_kw: dict[str, Any] = dict(
             batch_size=batch_size,
             shuffle=True,
-            num_workers=0,
+            num_workers=num_workers,
             pin_memory=self.device.type == "cuda",
             drop_last=True,
         )
+        if num_workers > 0:
+            loader_kw["persistent_workers"] = True
+        self.loader = DataLoader(dataset, **loader_kw)
         self.global_step = 0
         self._data_iter = iter(self.loader)
         self._last_avg: dict[str, float] | None = None
