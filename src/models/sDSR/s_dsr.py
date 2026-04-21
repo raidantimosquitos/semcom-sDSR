@@ -358,14 +358,14 @@ if __name__ == "__main__":
 
     device = "cuda" if _torch.cuda.is_available() else "cpu"
     vq = VQ_VAE_2Layer(
-        hidden_channels=(256, 64),
+        hidden_channels=(128, 128),
         num_residual_layers=2,
-        num_embeddings=(4096, 4096),
-        embedding_dim=(256, 64),
+        num_embeddings=(1024, 512),
+        embedding_dim=(128, 128),
         commitment_cost=0.25,
         decay=0.99,
     )
-    cfg = sDSRConfig(n_mels=128, T=320, embedding_dim=(256, 64), hidden_channels=(256, 64))
+    cfg = sDSRConfig(n_mels=128, T=320, embedding_dim=(128, 128), hidden_channels=(128, 128))
     model = sDSR(vq, cfg).to(device)
     x = _torch.randn(2, 1, 128, 320, device=device)
 

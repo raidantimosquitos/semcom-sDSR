@@ -30,26 +30,28 @@ class FeatureEncoder(nn.Module):
             norm(base_width),
             nn.ReLU(inplace=True),
         )
-        self._mp1 = nn.Sequential(
-            nn.Conv2d(base_width, base_width * 2, kernel_size=3, stride=2, padding=1),
-            norm(base_width * 2),
-            nn.ReLU(inplace=True),
-        )
+        self._mp1 = nn.MaxPool2d(2)
+        # self._mp1 = nn.Sequential(
+        #     nn.Conv2d(base_width, base_width * 2, kernel_size=3, stride=2, padding=1),
+        #     norm(base_width * 2),
+        #     nn.ReLU(inplace=True),
+        # )
         self._block2 = nn.Sequential(
-            nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
+            nn.Conv2d(base_width, base_width * 2, kernel_size=3, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 2, base_width * 2, kernel_size=3, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
         )
-        self._mp2 = nn.Sequential(
-            nn.Conv2d(base_width * 2, base_width * 4, kernel_size=3, stride=2, padding=1),
-            norm(base_width * 4),
-            nn.ReLU(inplace=True),
-        )
+        self._mp2 = nn.MaxPool2d(2)
+        # self._mp2 = nn.Sequential(
+        #     nn.Conv2d(base_width * 2, base_width * 4, kernel_size=3, stride=2, padding=1),
+        #     norm(base_width * 4),
+        #     nn.ReLU(inplace=True),
+        # )
         self._block3 = nn.Sequential(
-            nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
+            nn.Conv2d(base_width * 2, base_width * 4, kernel_size=3, padding=1),
             norm(base_width * 4),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width * 4, base_width * 4, kernel_size=3, padding=1),
@@ -75,7 +77,7 @@ class FeatureDecoder(nn.Module):
         super().__init__()
         norm = nn.InstanceNorm2d
         self._up2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(base_width * 4, base_width * 2, kernel_size=3, stride=1, padding=1),
             norm(base_width * 2),
             nn.ReLU(inplace=True),
@@ -89,7 +91,7 @@ class FeatureDecoder(nn.Module):
             nn.ReLU(inplace=True),
         )
         self._up3 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(base_width * 2, base_width, kernel_size=3, stride=1, padding=1),
             norm(base_width),
             nn.ReLU(inplace=True),
