@@ -111,7 +111,7 @@ class NonStationarySpectromorphicMaskStrategy:
 
         bw_lo = 1
         bw_hi = max(bw_lo, max(2, n_mels // 32))
-        if random.random() < 0.1:
+        if random.random() < 0.1: # originally 0.1
             bw_hi = max(bw_hi, n_mels // 8)
 
         bw_hi = min(bw_hi, n_mels)
@@ -277,7 +277,7 @@ class StationarySpectromorphicMaskStrategy:
         n_mels = self.n_mels
         bw_lo = 1
         bw_hi = max(bw_lo, max(2, n_mels // 32))
-        if random.random() < 0.1:
+        if random.random() < 0.8:
             bw_hi = max(bw_hi, n_mels // 8)
         return bw_lo, min(bw_hi, n_mels)
 
