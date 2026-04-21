@@ -25,7 +25,7 @@ from .perlin import rand_perlin_2d_np
 
 # DCASE machine types: stationary (dense tones) vs non-stationary mask family.
 STATIONARY_SPECTROMORPHIC_MACHINE_TYPES: frozenset[str] = frozenset(
-    {"fan", "ToyConveyor", "ToyCar"}
+    {"fan", "ToyConveyor", "ToyCar", "pump"}
 )
 
 
@@ -52,7 +52,7 @@ def default_spectromorphic_perlin(
         res_x = 2 ** (res_y + random.randint(1, 3))
         noise = rand_perlin_2d_np((n_mels, T), (res_y, res_x))
         last_noise = noise
-        threshold = random.uniform(0.7, 0.95)
+        threshold = random.uniform(0.6, 0.9)
         mask = (noise > threshold).astype(np.float32)
         if mask.sum() > 0:
             return mask
@@ -273,9 +273,9 @@ class StationarySpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.4,
+        perlin_prob: float = 0.3,
         mel_n_strata: int = 3,
-        mel_n_bands_max: int = 4,
+        mel_n_bands_max: int = 10,
         mel_strata_distinct: bool = True,
         **_kwargs: object,
     ) -> None:
