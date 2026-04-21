@@ -25,7 +25,7 @@ from .perlin import rand_perlin_2d_np
 
 # DCASE machine types: stationary (dense tones) vs non-stationary mask family.
 STATIONARY_SPECTROMORPHIC_MACHINE_TYPES: frozenset[str] = frozenset(
-    {"fan", "pump", "ToyConveyor", "ToyCar"}
+    {"fan", "ToyConveyor", "ToyCar"}
 )
 
 
