@@ -240,8 +240,9 @@ class StationarySpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        p_multi_band: float = 0.7,
-        p_amplitude_mod: float = 0.85,
+        p_multi_band: float = 0.4,
+        p_amplitude_mod: float = 0.6,
+        p_transient: float = 0.7,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -253,52 +254,94 @@ class StationarySpectromorphicMaskStrategy:
         self.q_shape = q_shape or (self.n_mels, self.T)
         self.p_multi_band = float(min(max(p_multi_band, 0.0), 1.0))
         self.p_amplitude_mod = float(min(max(p_amplitude_mod, self.p_multi_band), 1.0))
+        self.p_transient = p_transient
+    
+    def _sample_freq(self):
+        # Split the frequency range into 3 strata: low, mid, high
+        # With probability 0.5, 0.3 and 0.2 sample a stratum
+        strata = [0, self.n_mels // 3, 2 * self.n_mels // 3]    
+        weights = [0.5, 0.3, 0.2]
+        stratum = np.random.choice(3, p=weights)
+        return random.randint(strata[stratum], strata[stratum + 1] - 1)
 
-    def _multi_band_continuous(self) -> np.ndarray:
-        """Narrow harmonic bands, high temporal duty cycle, optional mel jitter."""
-        n_mels, T = self.n_mels, self.T
-        mask = np.zeros((n_mels, T), dtype=np.float32)
-        if n_mels <= 0 or T <= 0:
-            return mask
+    def _temporal_segment(self, T, min_len=5, max_len=40):
+        length = random.randint(min_len, max_len)
+        start = random.randint(0, max(0, T - length))
+        mask = np.zeros(T, dtype=np.float32)
+        mask[start:start+length] = 1.0
+        return mask
 
-        n_bands = random.randint(2, 5)
-        denom = max(2 * n_bands, 1)
-        step = max(1, n_mels // denom)
-        f0_start = random.randint(0, max(0, n_mels // 4))
+    def _multi_band_continuous(self):
+        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
 
-        for i in range(n_bands):
-            f_center = f0_start + i * step + random.randint(-2, 2)
-            f_center = int(max(0, min(f_center, n_mels - 1)))
-            if f_center >= n_mels - 2:
-                break
-            bw = random.randint(1, 2)
+        n_bands = random.randint(1, 4)
+
+        for _ in range(n_bands):
+            f_center = self._sample_freq()
+            bw = random.randint(2, 6)
+
             f_start = max(0, f_center - bw // 2)
-            f_end = min(n_mels, f_start + bw)
-            if f_end <= f_start:
-                continue
-            duty_cycle = random.uniform(0.8, 1.0)
-            temporal_mask = (np.random.rand(T) < duty_cycle).astype(np.float32)
+            f_end = min(self.n_mels, f_center + bw // 2)
+
+            temporal_mask = self._temporal_segment(self.T, 10, 60)
+
             mask[f_start:f_end, :] = np.maximum(
                 mask[f_start:f_end, :],
                 temporal_mask.reshape(1, -1),
             )
+
         return mask
 
-    def _amplitude_modulation_mask(self) -> np.ndarray:
-        """Single narrow band, sinusoidal envelope in time, thresholded."""
-        n_mels, T = self.n_mels, self.T
-        mask = np.zeros((n_mels, T), dtype=np.float32)
-        if n_mels <= 0 or T <= 0:
-            return mask
+    def _amplitude_modulation_mask(self):
+        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
 
-        bw = random.randint(1, 3)
-        f_start = random.randint(0, max(0, n_mels - bw))
-        mod_freq = random.uniform(0.05, 0.2)
-        t = np.linspace(0.0, 2.0 * math.pi * mod_freq, T, dtype=np.float64)
-        modulation = 0.5 + 0.5 * np.sin(t)
-        threshold = random.uniform(0.3, 0.7)
-        temporal_mask = (modulation > threshold).astype(np.float32)
-        mask[f_start : f_start + bw, :] = temporal_mask.reshape(1, -1)
+        f_center = self._sample_freq()
+        bw = random.randint(2, 5)
+
+        temporal_mask = np.zeros(self.T)
+        for _ in range(random.randint(2, 5)):
+            temporal_mask = np.maximum(
+                temporal_mask,
+                self._temporal_segment(self.T, 5, 30)
+            )
+
+        mask[f_center:f_center + bw, :] = temporal_mask.reshape(1, -1)
+        return mask
+
+    def _transient_mask(self):
+        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
+
+        n_events = random.randint(1, 5)
+
+        for _ in range(n_events):
+            f_center = self._sample_freq()
+            t_center = random.randint(0, self.T - 1)
+
+            sigma_f = random.uniform(2, 8)
+            sigma_t = random.uniform(3, 15)
+
+            f = np.arange(self.n_mels)[:, None]
+            t = np.arange(self.T)[None, :]
+
+            blob = np.exp(
+                -((f - f_center) ** 2) / (2 * sigma_f**2)
+                -((t - t_center) ** 2) / (2 * sigma_t**2)
+            )
+
+            mask = np.maximum(mask, (blob > 0.5).astype(np.float32))
+
+        return mask
+    
+    def _enforce_density(self, mask):
+        current = mask.mean()
+        target = random.uniform(0.05, 0.2)
+
+        if current > target:
+            # randomly drop some active pixels
+            keep_prob = target / (current + 1e-8)
+            drop = np.random.rand(*mask.shape) < keep_prob
+            mask = mask * drop.astype(np.float32)
+
         return mask
 
     def _perlin(self) -> np.ndarray:
@@ -310,19 +353,27 @@ class StationarySpectromorphicMaskStrategy:
         device: torch.device | str,
     ) -> torch.Tensor:
         masks = []
-        p0, p1 = self.p_multi_band, self.p_amplitude_mod
+
         for _ in range(batch_size):
             u = random.random()
-            if u < p0:
+
+            if u < self.p_multi_band:
                 m = self._multi_band_continuous()
-            elif u < p1:
+            elif u < self.p_amplitude_mod:
                 m = self._amplitude_modulation_mask()
+            elif u < self.p_transient:
+                m = self._transient_mask()
             else:
                 m = self._perlin()
+
+            m = self._enforce_density(m)  # NEW
             masks.append(torch.from_numpy(m).unsqueeze(0).unsqueeze(0))
+
         M = torch.cat(masks, dim=0).to(device)
+
         if self.q_shape != (self.n_mels, self.T):
             M = F.interpolate(M, size=self.q_shape, mode="nearest")
+
         return M
 
 
