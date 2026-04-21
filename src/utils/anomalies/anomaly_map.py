@@ -145,11 +145,11 @@ class NonStationarySpectromorphicMaskStrategy:
         ``p = 1/mu`` for ``np.random.geometric``.
         """
         Tm = max(T, 1)
-        lo = math.log(1.0)
-        hi = math.log(float(Tm))
+        lo = math.log(1.0 + 10.0)
+        hi = math.log(float(Tm-1.0))
         mu_on = math.exp(random.uniform(lo, hi)) # before was hi
         # mu_on = math.exp(random.uniform(math.log(50), math.log(T)))
-        mu_off = math.exp(random.uniform(lo, hi)) # before was hi
+        mu_off = math.exp(random.uniform(lo, hi)) # before was lo
         # mu_off = math.exp(random.uniform(math.log(1), math.log(10)))
         p_on = 1.0 / max(mu_on, 1.0)
         p_off = 1.0 / max(mu_off, 1.0)
