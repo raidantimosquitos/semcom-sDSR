@@ -29,13 +29,37 @@ STATIONARY_SPECTROMORPHIC_MACHINE_TYPES: frozenset[str] = frozenset(
 )
 
 
-def default_spectromorphic_perlin(n_mels: int, T: int) -> np.ndarray:
-    """Thresholded 2-D Perlin noise (same recipe as the non-stationary strategy's Perlin branch)."""
-    res_y = 2 ** random.randint(1, 4)
-    res_x = 2 ** random.randint(2, 5)
-    noise = rand_perlin_2d_np((n_mels, T), (res_y, res_x))
-    threshold = random.uniform(0.3, 0.6)
-    return (noise > threshold).astype(np.float32)
+def default_spectromorphic_perlin(
+    n_mels: int,
+    T: int,
+    *,
+    max_empty_retries: int = 64,
+) -> np.ndarray:
+    """
+    Thresholded 2-D Perlin noise (non-stationary / stationary Perlin branch).
+
+    With high thresholds (e.g. ``random.uniform(0.7, 0.95)``) the binary mask is
+    often empty; we redraw noise + threshold until the mask has at least one pixel
+    set, up to ``max_empty_retries``, then fall back to a median split on the
+    last noise field so the result is never empty unless ``n_mels * T == 0``.
+    """
+    if n_mels <= 0 or T <= 0:
+        return np.zeros((max(0, n_mels), max(0, T)), dtype=np.float32)
+
+    last_noise: np.ndarray | None = None
+    for _ in range(max(1, max_empty_retries)):
+        res_y = 2 ** random.randint(1, 4)
+        res_x = 2 ** (res_y + random.randint(1, 3))
+        noise = rand_perlin_2d_np((n_mels, T), (res_y, res_x))
+        last_noise = noise
+        threshold = random.uniform(0.7, 0.95)
+        mask = (noise > threshold).astype(np.float32)
+        if mask.sum() > 0:
+            return mask
+
+    assert last_noise is not None
+    q = float(np.quantile(last_noise, 0.5))
+    return (last_noise >= q).astype(np.float32)
 
 
 def uses_stationary_spectromorphic_mask(machine_type: str | None) -> bool:
@@ -77,7 +101,7 @@ class NonStationarySpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.05,
+        perlin_prob: float = 0.3,
         mel_n_strata: int = 3,
         **_kwargs: object,
     ) -> None:
@@ -249,7 +273,7 @@ class StationarySpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.05,
+        perlin_prob: float = 0.4,
         mel_n_strata: int = 3,
         mel_n_bands_max: int = 4,
         mel_strata_distinct: bool = True,
