@@ -364,7 +364,7 @@ class AnomalyMapGenerator:
             spectrogram_shape, self.q_shape, _n_mels, _T,
         )
         # Backward compatibility: direct use of the non-stationary strategy only.
-        self.audio_specific = self._nonstationary
+        self.audio_specific = self._stationary
 
     def _strategy(
         self,
