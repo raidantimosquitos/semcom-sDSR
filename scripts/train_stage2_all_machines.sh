@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train stage2 for each machine type with multiple anomaly strategies:
+# Train stage2 for each machine type (spectromorphic masks follow machine_type in the dataset):
 # load best stage1 (all types), 10k iter, batch 16.
 # After each run, upload stage2 checkpoints to GCS.
 # Prerequisite: dataset and stage1 best checkpoint available (e.g. from experiment_grid.sh).
@@ -29,9 +29,6 @@ fi
 # All 6 DCASE2020 Task 2 machine types for stage2
 MACHINE_TYPES=(ToyCar ToyConveyor fan pump slider valve)
 
-# Anomaly mask strategies to train stage2 with
-ANOMALY_STRATEGIES=(audio_specific)
-
 # Optional: space-separated machine_ids (e.g. "id_00 id_01 id_02"). When set, train/eval per (machine_type, machine_id)
 # with other machine_ids of same type used as adversarial samples (mask all 1s). When unset, one run per machine_type (all IDs).
 MACHINE_IDS="${MACHINE_IDS:-}"
@@ -50,29 +47,25 @@ if [[ ! -f "$STAGE1_BEST" ]]; then
   exit 1
 fi
 
-# One run per (machine_type, anomaly_strategy) (all machine_ids)
+# One run per machine_type (all machine_ids)
 for machine_type in "${MACHINE_TYPES[@]}"; do
-  for anomaly_strategy in "${ANOMALY_STRATEGIES[@]}"; do
-    echo "=============================================="
-    echo "Stage2: machine_type=$machine_type anomaly_strategy=$anomaly_strategy ($N_ITER iter, bs=$BATCH_SIZE)"
-    echo "=============================================="
+  echo "=============================================="
+  echo "Stage2: machine_type=$machine_type ($N_ITER iter, bs=$BATCH_SIZE)"
+  echo "=============================================="
 
-    # Isolate checkpoints/results per strategy so best checkpoints don't overwrite
-    stage2_dir="${CKPT_DIR}/stage2/${machine_type}/${anomaly_strategy}"
-    mkdir -p "$stage2_dir"
+  stage2_dir="${CKPT_DIR}/stage2/${machine_type}"
+  mkdir -p "$stage2_dir"
 
-    python scripts/train.py stage2 \
-      --data_path "$DATA_PATH" \
-      --machine_type "$machine_type" \
-      --ckpt_dir "$stage2_dir" \
-      --stage1_ckpt "$STAGE1_BEST" \
-      --n_iter "$N_ITER" \
-      --batch_size "$BATCH_SIZE" \
-      --anomaly_sampling "distant" \
-      --anomaly_strategy "$anomaly_strategy" \
-      --val_every 2000
+  python scripts/train.py stage2 \
+    --data_path "$DATA_PATH" \
+    --machine_type "$machine_type" \
+    --ckpt_dir "$stage2_dir" \
+    --stage1_ckpt "$STAGE1_BEST" \
+    --n_iter "$N_ITER" \
+    --batch_size "$BATCH_SIZE" \
+    --anomaly_sampling "distant" \
+    --val_every 2000
 
-  done
 done
 
 echo "Stage2 finished. Checkpoints uploaded under ${GCS_CHECKPOINTS}/${STAMP}/"

@@ -104,15 +104,6 @@ def parse_args() -> argparse.Namespace:
     s2.add_argument("--lambda_recon", type=float, default=10.0)
     s2.add_argument("--lambda_focal", type=float, default=1.0)
     s2.add_argument("--lambda_sub", type=float, default=1.0, help="Weight for subspace restriction loss L2(F̃, Q)")
-    s2.add_argument(
-        "--anomaly_strategy",
-        type=str,
-        default="audio_specific",
-        choices=[
-            "audio_specific",
-        ],
-        help="Synthetic anomaly mask: audio_specific",
-    )
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
     s2.add_argument(
         "--anomaly_inj_distribution",
@@ -286,9 +277,11 @@ def run_stage2(args: argparse.Namespace) -> None:
     # Per-machine presets only apply when training on a single machine type
     single_machine_type = machine_types[0] if len(machine_types) == 1 else None
 
+    # Mask generator uses audio_specific routing; stationary vs non-stationary
+    # spectromorphic masks are chosen per sample from dataset machine_type.
     train_dataset = AudDSRAnomTrainDataset(
         q_vae_dataset,
-        strategy=args.anomaly_strategy,
+        strategy="audio_specific",
         zero_mask_prob=0.5,
         adversarial_dataset=adversarial_dataset,
         machine_type=single_machine_type,
@@ -418,7 +411,6 @@ def run_full(args: argparse.Namespace) -> None:
         lambda_recon=10.0,
         lambda_focal=1.0,
         lambda_sub=1.0,
-        anomaly_strategy="audio_specific",
         anomaly_sampling="distant",
         anomaly_inj_distribution=args.anomaly_inj_distribution,
         machine_id=None,

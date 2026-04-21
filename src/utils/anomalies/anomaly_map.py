@@ -1,32 +1,24 @@
 """
 Anomaly map generation for sDSR training.
 
-Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
+Strategies (same interface: ``__call__(batch_size, device)`` → ``(B, 1, H, W)``):
 
-1. PerlinNoiseStrategy            – threshold/binarize Perlin noise (generic fallback)
-2. MixNoiseStrategy               – smoothed random field + Poisson bursts, quantile cut
-3. SpectromorphicMaskStrategy     – stratified mel band × renewal time, optional
-                                    Perlin branch (valve, slider; non-stationary machines)
-4. StationarySpectromorphicMaskStrategy – narrow harmonics, AM bands, Perlin
-                                    (fan, pump, ToyConveyor, ToyCar)
+1. NonStationarySpectromorphicMaskStrategy – stratified mel band × renewal time,
+   optional Perlin (e.g. valve, slider). Aliased as ``SpectromorphicMaskStrategy``.
+2. StationarySpectromorphicMaskStrategy – harmonics, AM, Perlin
+   (fan, pump, ToyConveyor, ToyCar).
 
-For ``strategy="audio_specific"``, :class:`AnomalyMapGenerator` picks (3) vs (4)
-from the per-sample DCASE ``machine_type``.
-
-``AudioSpecificStrategy`` and ``LatentAlignedBandStrategy`` are kept as aliases
-for backward compatibility (non-stationary spectromorphic only).
+:class:`AnomalyMapGenerator` holds both and dispatches from the DCASE ``machine_type``
+argument on each generate call.
 """
 
 from __future__ import annotations
 
 import math
 import random
-from typing import Literal
-
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy.ndimage import gaussian_filter, rotate as ndimage_rotate
 
 from .perlin import rand_perlin_2d_np
 
@@ -34,11 +26,10 @@ from .perlin import rand_perlin_2d_np
 STATIONARY_SPECTROMORPHIC_MACHINE_TYPES: frozenset[str] = frozenset(
     {"fan", "pump", "ToyConveyor", "ToyCar"}
 )
-# All other DCASE machine types (e.g. valve, slider) use non-stationary spectromorphic masks.
 
 
 def default_spectromorphic_perlin(n_mels: int, T: int) -> np.ndarray:
-    """Thresholded 2-D Perlin noise, same recipe as SpectromorphicMaskStrategy._perlin."""
+    """Thresholded 2-D Perlin noise (same recipe as the non-stationary strategy's Perlin branch)."""
     res_y = 2 ** random.randint(1, 4)
     res_x = 2 ** random.randint(2, 5)
     noise = rand_perlin_2d_np((n_mels, T), (res_y, res_x))
@@ -55,7 +46,7 @@ def uses_stationary_spectromorphic_mask(machine_type: str | None) -> bool:
 
 class NonStationarySpectromorphicMaskStrategy:
     """
-    Non Statinory Synthetic anomaly masks for spectrograms.
+    Non-stationary synthetic anomaly masks for spectrograms.
 
     Each sample is either:
 
@@ -240,7 +231,7 @@ class StationarySpectromorphicMaskStrategy:
     Mixture: 70% / 15% / 15% by default (single ``random()`` split).
 
     Output is binary ``(B, 1, n_mels, T)`` with optional ``q_shape`` interpolation,
-    same as :class:`SpectromorphicMaskStrategy`.
+    Same tensor layout and ``q_shape`` handling as :class:`NonStationarySpectromorphicMaskStrategy`.
     """
 
     def __init__(
@@ -341,49 +332,48 @@ class StationarySpectromorphicMaskStrategy:
 
 class AnomalyMapGenerator:
     """
-    Generate anomaly map M for training.
+    Build spectromorphic anomaly masks for training.
 
-    strategy options:
-        "audio_specific"   – spectromorphic masks routed by ``machine_type``:
-                             stationary types use :class:`StationarySpectromorphicMaskStrategy`;
-                             others use :class:`SpectromorphicMaskStrategy` (valve, slider).
+    Holds both stationary and non-stationary strategies. Each call selects
+    :class:`StationarySpectromorphicMaskStrategy` vs :class:`NonStationarySpectromorphicMaskStrategy`
+    from the DCASE ``machine_type`` (``None`` → non-stationary).
 
-    When force_anomaly=False, each sample independently receives a zero mask
-    with probability zero_mask_prob.
+    When ``force_anomaly=False``, each index independently receives an all-zero mask
+    with probability ``zero_mask_prob``.
     """
 
     def __init__(
         self,
-        strategy: Literal[
-            "audio_specific"
-        ],
         spectrogram_shape: tuple[int, int],
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
         zero_mask_prob: float = 0.5,
     ) -> None:
-        self.strategy_name = strategy
         self.spectrogram_shape = spectrogram_shape
         self.q_shape = q_shape or spectrogram_shape
         self.zero_mask_prob = zero_mask_prob
 
         _n_mels = n_mels or spectrogram_shape[0]
         _T = T or spectrogram_shape[1]
-        if strategy == "audio_specific":
-            self._spectromorphic_nonstationary = NonStationarySpectromorphicMaskStrategy(
-                spectrogram_shape, self.q_shape, _n_mels, _T,
-            )
-            self._spectromorphic_stationary = StationarySpectromorphicMaskStrategy(
-                spectrogram_shape, self.q_shape, _n_mels, _T,
-            )
-            self.audio_specific = self._spectromorphic_nonstationary
-        else:
-            self._spectromorphic_nonstationary = None
-            self._spectromorphic_stationary = None
-            self.audio_specific = None
-        self._fallback = NonStationarySpectromorphicMaskStrategy(
+
+        self._nonstationary = NonStationarySpectromorphicMaskStrategy(
             spectrogram_shape, self.q_shape, _n_mels, _T,
+        )
+        self._stationary = StationarySpectromorphicMaskStrategy(
+            spectrogram_shape, self.q_shape, _n_mels, _T,
+        )
+        # Backward compatibility: direct use of the non-stationary strategy only.
+        self.audio_specific = self._nonstationary
+
+    def _strategy(
+        self,
+        machine_type: str | None,
+    ) -> NonStationarySpectromorphicMaskStrategy | StationarySpectromorphicMaskStrategy:
+        return (
+            self._stationary
+            if uses_stationary_spectromorphic_mask(machine_type)
+            else self._nonstationary
         )
 
     def _generate_one(
@@ -391,20 +381,8 @@ class AnomalyMapGenerator:
         device: torch.device | str,
         machine_type: str | None = None,
     ) -> torch.Tensor:
-        """Generate a single non-zero mask (1, 1, H, W)."""
-        name = self.strategy_name
-
-        if name == "audio_specific":
-            assert self._spectromorphic_nonstationary is not None
-            assert self._spectromorphic_stationary is not None
-            strat = (
-                self._spectromorphic_stationary
-                if uses_stationary_spectromorphic_mask(machine_type)
-                else self._spectromorphic_nonstationary
-            )
-            return strat(1, device)
-
-        return self._fallback(1, device)
+        """Generate a single non-zero mask ``(1, 1, H, W)``."""
+        return self._strategy(machine_type)(1, device)
 
     def generate_for_training_sample(
         self,
@@ -426,17 +404,17 @@ class AnomalyMapGenerator:
         machine_types: list[str] | None = None,
     ) -> torch.Tensor:
         """
-        Generate batch of anomaly masks.
+        Generate a batch of anomaly masks.
 
         Args:
             batch_size: number of masks
             device: torch device
-            force_anomaly: if True, always generate real masks (skip zero_mask_prob)
-            machine_types: optional length-``batch_size`` list of DCASE machine types
-                for ``audio_specific`` routing. If ``None``, non-stationary masks are used.
+            force_anomaly: if True, skip ``zero_mask_prob`` (always real masks)
+            machine_types: optional length-``batch_size`` list of DCASE machine types.
+                If ``None``, every mask uses the non-stationary strategy.
 
         Returns:
-            M: (B, 1, n_mels, T) binary mask
+            ``M``: ``(B, 1, n_mels, T)`` binary mask
         """
         if machine_types is not None and len(machine_types) != batch_size:
             raise ValueError(
@@ -444,22 +422,36 @@ class AnomalyMapGenerator:
             )
 
         if force_anomaly:
-            masks = [
-                self._generate_one(
-                    device,
-                    None if machine_types is None else machine_types[i],
-                )
-                for i in range(batch_size)
-            ]
-            return torch.cat(masks, dim=0)
+            return torch.cat(
+                [
+                    self._generate_one(
+                        device,
+                        None if machine_types is None else machine_types[i],
+                    )
+                    for i in range(batch_size)
+                ],
+                dim=0,
+            )
 
-        masks = []
+        masks: list[torch.Tensor] = []
         for i in range(batch_size):
             if random.random() < self.zero_mask_prob:
                 masks.append(
-                    torch.zeros(1, 1, *self.spectrogram_shape, device=device, dtype=torch.float32)
+                    torch.zeros(
+                        1,
+                        1,
+                        *self.spectrogram_shape,
+                        device=device,
+                        dtype=torch.float32,
+                    )
                 )
             else:
                 mt = None if machine_types is None else machine_types[i]
                 masks.append(self._generate_one(device, mt))
         return torch.cat(masks, dim=0)
+
+
+# Backward-compatible names (non-stationary class)
+SpectromorphicMaskStrategy = NonStationarySpectromorphicMaskStrategy
+LatentAlignedBandStrategy = NonStationarySpectromorphicMaskStrategy
+AudioSpecificStrategy = NonStationarySpectromorphicMaskStrategy
