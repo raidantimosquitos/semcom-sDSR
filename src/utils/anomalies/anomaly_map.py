@@ -32,8 +32,6 @@ STATIONARY_SPECTROMORPHIC_MACHINE_TYPES: frozenset[str] = frozenset(
 def default_spectromorphic_perlin(
     n_mels: int,
     T: int,
-    *,
-    max_empty_retries: int = 64,
 ) -> np.ndarray:
     """
     Thresholded 2-D Perlin noise (non-stationary / stationary Perlin branch).
@@ -46,20 +44,15 @@ def default_spectromorphic_perlin(
     if n_mels <= 0 or T <= 0:
         return np.zeros((max(0, n_mels), max(0, T)), dtype=np.float32)
 
-    last_noise: np.ndarray | None = None
-    for _ in range(max(1, max_empty_retries)):
-        res_y = 2 ** random.randint(1, 4)
-        res_x = 2 ** (res_y + random.randint(1, 3))
-        noise = rand_perlin_2d_np((n_mels, T), (res_y, res_x))
-        last_noise = noise
-        threshold = random.uniform(0.6, 0.9)
-        mask = (noise > threshold).astype(np.float32)
-        if mask.sum() > 0:
-            return mask
-
-    assert last_noise is not None
-    q = float(np.quantile(last_noise, 0.5))
-    return (last_noise >= q).astype(np.float32)
+    res_y = 2 ** random.randint(1, 4)
+    res_x = 2 ** (res_y + random.randint(1, 3))
+    noise = rand_perlin_2d_np((n_mels, T), (res_y, res_x))
+    threshold = random.uniform(0.6, 0.9)
+    mask = (noise > threshold).astype(np.float32)
+    if mask.sum() > 0:
+        return mask
+    else:
+        return noise.astype(np.float32)
 
 
 def uses_stationary_spectromorphic_mask(machine_type: str | None) -> bool:
