@@ -5,8 +5,8 @@ Strategies (same interface: ``__call__(batch_size, device)`` → ``(B, 1, H, W)`
 
 1. NonStationarySpectromorphicMaskStrategy – stratified mel band × renewal time,
    optional Perlin (e.g. valve, slider). Aliased as ``SpectromorphicMaskStrategy``.
-2. StationarySpectromorphicMaskStrategy – harmonics, AM, Perlin
-   (fan, pump, ToyConveyor, ToyCar).
+2. StationarySpectromorphicMaskStrategy – stratified multi-band mel × independent
+   renewal time, optional Perlin (fan, pump, ToyConveyor, ToyCar).
 
 :class:`AnomalyMapGenerator` holds both and dispatches from the DCASE ``machine_type``
 argument on each generate call.
@@ -15,6 +15,7 @@ argument on each generate call.
 from __future__ import annotations
 
 import math
+from typing import Any
 import random
 import numpy as np
 import torch
@@ -146,9 +147,9 @@ class NonStationarySpectromorphicMaskStrategy:
         Tm = max(T, 1)
         lo = math.log(1.0)
         hi = math.log(float(Tm))
-        mu_on = math.exp(random.uniform(lo, hi//2)) # before was hi
+        mu_on = math.exp(random.uniform(lo, hi)) # before was hi
         # mu_on = math.exp(random.uniform(math.log(50), math.log(T)))
-        mu_off = math.exp(random.uniform(lo, 0)) # before was hi
+        mu_off = math.exp(random.uniform(lo, hi)) # before was hi
         # mu_off = math.exp(random.uniform(math.log(1), math.log(10)))
         p_on = 1.0 / max(mu_on, 1.0)
         p_off = 1.0 / max(mu_off, 1.0)
@@ -226,12 +227,20 @@ class StationarySpectromorphicMaskStrategy:
     """
     Masks for machines with dense continuous tones (fans, pumps, conveyors).
 
-    Each sample is one of: multi-band narrow harmonics with high temporal duty
-    cycle, a single band with sinusoidal AM in time, or thresholded Perlin noise.
-    Mixture: 70% / 15% / 15% by default (single ``random()`` split).
+    Each sample is either:
 
-    Output is binary ``(B, 1, n_mels, T)`` with optional ``q_shape`` interpolation,
-    Same tensor layout and ``q_shape`` handling as :class:`NonStationarySpectromorphicMaskStrategy`.
+      1. **Multi-band + renewal** (probability ``1 - perlin_prob``): one or more
+         contiguous mel bands (up to ``mel_n_bands_max``). Bands use the same
+         **stratified mel** placement as :class:`NonStationarySpectromorphicMaskStrategy`:
+         each band intersects an assigned stratum (low / mid / high when
+         ``mel_n_strata=3``). With ``mel_strata_distinct`` and enough strata, bands
+         use **distinct** strata so they spread across frequency. Each band gets an
+         **independent** alternating renewal along time (geometric ON/OFF runs).
+         Overlaps are merged with elementwise max.
+
+      2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise.
+
+    Output is binary ``(B, 1, n_mels, T)`` with optional ``q_shape`` interpolation.
     """
 
     def __init__(
@@ -240,9 +249,10 @@ class StationarySpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        p_multi_band: float = 0.4,
-        p_amplitude_mod: float = 0.6,
-        p_transient: float = 0.7,
+        perlin_prob: float = 0.05,
+        mel_n_strata: int = 3,
+        mel_n_bands_max: int = 4,
+        mel_strata_distinct: bool = True,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -252,97 +262,123 @@ class StationarySpectromorphicMaskStrategy:
             self.n_mels = n_mels or 128
             self.T = T or 320
         self.q_shape = q_shape or (self.n_mels, self.T)
-        self.p_multi_band = float(min(max(p_multi_band, 0.0), 1.0))
-        self.p_amplitude_mod = float(min(max(p_amplitude_mod, self.p_multi_band), 1.0))
-        self.p_transient = p_transient
-    
-    def _sample_freq(self):
-        # Split the frequency range into 3 strata: low, mid, high
-        # With probability 0.5, 0.3 and 0.2 sample a stratum
-        strata = [0, self.n_mels // 3, 2 * self.n_mels // 3]    
-        weights = [0.5, 0.3, 0.2]
-        stratum = np.random.choice(3, p=weights)
-        strata.append(self.n_mels)
-        return random.randint(strata[stratum], strata[stratum + 1] - 1)
+        self.perlin_prob = float(min(max(perlin_prob, 0.0), 1.0))
+        self.mel_n_strata = max(1, int(mel_n_strata))
+        self.mel_n_bands_max = max(1, int(mel_n_bands_max))
+        self.mel_strata_distinct = bool(mel_strata_distinct)
 
-    def _temporal_segment(self, T, min_len=5, max_len=40):
-        length = random.randint(min_len, max_len)
-        start = random.randint(0, max(0, T - length))
-        mask = np.zeros(T, dtype=np.float32)
-        mask[start:start+length] = 1.0
-        return mask
+    @staticmethod
+    def _mel_stratum_bounds(n_mels: int, n_strata: int, s: int) -> tuple[int, int]:
+        L = s * n_mels // n_strata
+        R = (s + 1) * n_mels // n_strata
+        return L, R
 
-    def _multi_band_continuous(self):
-        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
+    def _band_width_bounds(self) -> tuple[int, int]:
+        n_mels = self.n_mels
+        bw_lo = 1
+        bw_hi = max(bw_lo, max(2, n_mels // 32))
+        if random.random() < 0.1:
+            bw_hi = max(bw_hi, n_mels // 8)
+        return bw_lo, min(bw_hi, n_mels)
 
-        n_bands = random.randint(1, 4)
+    def _pick_band_intersecting_stratum(self, s: int) -> tuple[int, int] | None:
+        n_mels = self.n_mels
+        n_strata = self.mel_n_strata
+        bw_lo, bw_hi = self._band_width_bounds()
+        L_s, R_s = self._mel_stratum_bounds(n_mels, n_strata, s)
+        if R_s <= L_s:
+            return None
+        for _ in range(24):
+            bw = random.randint(bw_lo, bw_hi)
+            lo = max(0, L_s - bw + 1)
+            hi = min(n_mels - bw, R_s - 1)
+            if lo <= hi:
+                start_f = random.randint(lo, hi)
+                return (start_f, start_f + bw)
+        return None
 
-        for _ in range(n_bands):
-            f_center = self._sample_freq()
-            bw = random.randint(2, 6)
+    def _pick_band_uniform_mel(self) -> tuple[int, int]:
+        n_mels = self.n_mels
+        bw_lo, bw_hi = self._band_width_bounds()
+        bw = random.randint(bw_lo, bw_hi)
+        start_f = random.randint(0, n_mels - bw)
+        return (start_f, start_f + bw)
 
-            f_start = max(0, f_center - bw // 2)
-            f_end = min(self.n_mels, f_center + bw // 2)
+    def _pick_stratified_mel_bands(self) -> list[tuple[int, int]]:
+        n_mels = self.n_mels
+        n_strata = self.mel_n_strata
+        kmax = min(self.mel_n_bands_max, max(1, n_mels))
+        nb = random.randint(1, kmax)
+        bands: list[tuple[int, int]] = []
 
-            temporal_mask = self._temporal_segment(self.T, 10, 60)
+        if n_strata <= 1:
+            for _ in range(nb):
+                bands.append(self._pick_band_uniform_mel())
+            return bands
 
-            mask[f_start:f_end, :] = np.maximum(
-                mask[f_start:f_end, :],
-                temporal_mask.reshape(1, -1),
+        if self.mel_strata_distinct and nb <= n_strata:
+            strata = random.sample(range(n_strata), nb)
+        else:
+            strata = [random.randint(0, n_strata - 1) for _ in range(nb)]
+
+        for s in strata:
+            b = self._pick_band_intersecting_stratum(s)
+            if b is None:
+                b = self._pick_band_uniform_mel()
+            bands.append(b)
+        return bands
+
+    def _hierarchical_renewal_params(self, T: int) -> tuple[float, float, float, float]:
+        Tm = max(T, 1)
+        lo = math.log(1.0)
+        hi = math.log(float(Tm))
+        mu_on = math.exp(random.uniform(lo, hi))
+        mu_off = math.exp(random.uniform(lo, hi))
+        p_on = 1.0 / max(mu_on, 1.0)
+        p_off = 1.0 / max(mu_off, 1.0)
+        eps = 1e-6
+        p_on = min(max(p_on, eps), 1.0 - eps)
+        p_off = min(max(p_off, eps), 1.0 - eps)
+        return p_on, p_off, mu_on, mu_off
+
+    @staticmethod
+    def _alternating_renewal_1d(
+        T: int,
+        p_on: float,
+        p_off: float,
+        start_on: bool,
+    ) -> np.ndarray:
+        a = np.zeros(T, dtype=np.float32)
+        if T <= 0:
+            return a
+        t = 0
+        on = start_on
+        while t < T:
+            p = p_on if on else p_off
+            L = int(np.random.geometric(p))
+            L = max(1, min(L, T - t))
+            if on:
+                a[t : t + L] = 1.0
+            t += L
+            on = not on
+        return a
+
+    def _band_time_segments(self) -> np.ndarray:
+        n_mels, T = self.n_mels, self.T
+        mask = np.zeros((n_mels, T), dtype=np.float32)
+        bands = self._pick_stratified_mel_bands()
+        if not bands:
+            return mask
+
+        for f0, f1 in bands:
+            p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
+            denom = mu_on + mu_off
+            p_start_on = (mu_on / denom) if denom > 0 else 0.5
+            track = self._alternating_renewal_1d(
+                T, p_on, p_off, random.random() < p_start_on
             )
-
-        return mask
-
-    def _amplitude_modulation_mask(self):
-        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
-
-        f_center = self._sample_freq()
-        bw = random.randint(2, 5)
-
-        temporal_mask = np.zeros(self.T)
-        for _ in range(random.randint(2, 5)):
-            temporal_mask = np.maximum(
-                temporal_mask,
-                self._temporal_segment(self.T, 5, 30)
-            )
-
-        mask[f_center:f_center + bw, :] = temporal_mask.reshape(1, -1)
-        return mask
-
-    def _transient_mask(self):
-        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
-
-        n_events = random.randint(1, 5)
-
-        for _ in range(n_events):
-            f_center = self._sample_freq()
-            t_center = random.randint(0, self.T - 1)
-
-            sigma_f = random.uniform(2, 8)
-            sigma_t = random.uniform(3, 15)
-
-            f = np.arange(self.n_mels)[:, None]
-            t = np.arange(self.T)[None, :]
-
-            blob = np.exp(
-                -((f - f_center) ** 2) / (2 * sigma_f**2)
-                -((t - t_center) ** 2) / (2 * sigma_t**2)
-            )
-
-            mask = np.maximum(mask, (blob > 0.5).astype(np.float32))
-
-        return mask
-    
-    def _enforce_density(self, mask):
-        current = mask.mean()
-        target = random.uniform(0.05, 0.2)
-
-        if current > target:
-            # randomly drop some active pixels
-            keep_prob = target / (current + 1e-8)
-            drop = np.random.rand(*mask.shape) < keep_prob
-            mask = mask * drop.astype(np.float32)
-
+            row = track.reshape(1, -1)
+            mask[f0:f1, :] = np.maximum(mask[f0:f1, :], row)
         return mask
 
     def _perlin(self) -> np.ndarray:
@@ -354,27 +390,15 @@ class StationarySpectromorphicMaskStrategy:
         device: torch.device | str,
     ) -> torch.Tensor:
         masks = []
-
         for _ in range(batch_size):
-            u = random.random()
-
-            if u < self.p_multi_band:
-                m = self._multi_band_continuous()
-            elif u < self.p_amplitude_mod:
-                m = self._amplitude_modulation_mask()
-            elif u < self.p_transient:
-                m = self._transient_mask()
-            else:
+            if random.random() < self.perlin_prob:
                 m = self._perlin()
-
-            m = self._enforce_density(m)  # NEW
+            else:
+                m = self._band_time_segments()
             masks.append(torch.from_numpy(m).unsqueeze(0).unsqueeze(0))
-
         M = torch.cat(masks, dim=0).to(device)
-
         if self.q_shape != (self.n_mels, self.T):
             M = F.interpolate(M, size=self.q_shape, mode="nearest")
-
         return M
 
 
@@ -392,6 +416,10 @@ class AnomalyMapGenerator:
 
     When ``force_anomaly=False``, each index independently receives an all-zero mask
     with probability ``zero_mask_prob``.
+
+    Extra keyword arguments are forwarded to **both** strategy classes; each ignores
+    keys it does not use (e.g. ``mel_n_bands_max`` only affects
+    :class:`StationarySpectromorphicMaskStrategy`).
     """
 
     def __init__(
@@ -401,6 +429,7 @@ class AnomalyMapGenerator:
         n_mels: int | None = None,
         T: int | None = None,
         zero_mask_prob: float = 0.5,
+        **strategy_kwargs: Any,
     ) -> None:
         self.spectrogram_shape = spectrogram_shape
         self.q_shape = q_shape or spectrogram_shape
@@ -410,10 +439,18 @@ class AnomalyMapGenerator:
         _T = T or spectrogram_shape[1]
 
         self._nonstationary = NonStationarySpectromorphicMaskStrategy(
-            spectrogram_shape, self.q_shape, _n_mels, _T,
+            spectrogram_shape,
+            self.q_shape,
+            _n_mels,
+            _T,
+            **strategy_kwargs,
         )
         self._stationary = StationarySpectromorphicMaskStrategy(
-            spectrogram_shape, self.q_shape, _n_mels, _T,
+            spectrogram_shape,
+            self.q_shape,
+            _n_mels,
+            _T,
+            **strategy_kwargs,
         )
         # Backward compatibility: direct use of the non-stationary strategy only.
         self.audio_specific = self._stationary

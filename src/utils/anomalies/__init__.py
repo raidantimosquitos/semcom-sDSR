@@ -5,7 +5,7 @@ Anomaly simulation utilities for AudDSR training.
   stationary vs non-stationary strategy.
 - NonStationarySpectromorphicMaskStrategy / SpectromorphicMaskStrategy (alias):
   valve, slider-style stratified band × renewal, optional Perlin
-- StationarySpectromorphicMaskStrategy: fan, pump, ToyConveyor, ToyCar
+- StationarySpectromorphicMaskStrategy: multi-band stratified mel × renewal, Perlin (fan, pump, ToyConveyor, ToyCar)
 - AudioSpecificStrategy / LatentAlignedBandStrategy: aliases of the non-stationary class
 - generate_fake_anomalies_distant: codebook-based feature replacement (distant +
   neighbor); distant mode skips a configurable nearest fraction (default 5 %)
