@@ -262,7 +262,7 @@ class StationarySpectromorphicMaskStrategy:
         strata = [0, self.n_mels // 3, 2 * self.n_mels // 3]    
         weights = [0.5, 0.3, 0.2]
         stratum = np.random.choice(3, p=weights)
-        return random.randint(strata[stratum], strata[stratum + 1] - 1)
+        return random.randint(strata[stratum], strata[max(self.n_mels, stratum + 1)] - 1)
 
     def _temporal_segment(self, T, min_len=5, max_len=40):
         length = random.randint(min_len, max_len)
