@@ -109,12 +109,9 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="audio_specific",
         choices=[
-            "perlin",
-            "mix",
             "audio_specific",
-            "both",
         ],
-        help="Synthetic anomaly mask: audio_specific (recommended, includes Perlin internally); perlin; mix.",
+        help="Synthetic anomaly mask: audio_specific",
     )
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
     s2.add_argument(

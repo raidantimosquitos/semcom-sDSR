@@ -335,6 +335,7 @@ class AudDSRAnomTrainDataset(Dataset):
                 mask = self._mask_generator.generate_for_training_sample(
                     device="cpu",
                     force_anomaly=True,
+                    machine_type=mt_key,
                 )
                 has_anomaly = 1.0
         return {

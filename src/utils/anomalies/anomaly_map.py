@@ -6,11 +6,15 @@ Strategies (same interface: __call__(batch_size, device) -> (B, 1, H, W)):
 1. PerlinNoiseStrategy            – threshold/binarize Perlin noise (generic fallback)
 2. MixNoiseStrategy               – smoothed random field + Poisson bursts, quantile cut
 3. SpectromorphicMaskStrategy     – stratified mel band × renewal time, optional
-                                    Perlin branch (replaces LatentAlignedBandStrategy)
+                                    Perlin branch (valve, slider; non-stationary machines)
+4. StationarySpectromorphicMaskStrategy – narrow harmonics, AM bands, Perlin
+                                    (fan, pump, ToyConveyor, ToyCar)
 
-AnomalyMapGenerator selects between strategies at call time.
+For ``strategy="audio_specific"``, :class:`AnomalyMapGenerator` picks (3) vs (4)
+from the per-sample DCASE ``machine_type``.
+
 ``AudioSpecificStrategy`` and ``LatentAlignedBandStrategy`` are kept as aliases
-for backward compatibility.
+for backward compatibility (non-stationary spectromorphic only).
 """
 
 from __future__ import annotations
@@ -26,176 +30,32 @@ from scipy.ndimage import gaussian_filter, rotate as ndimage_rotate
 
 from .perlin import rand_perlin_2d_np
 
+# DCASE machine types: stationary (dense tones) vs non-stationary mask family.
+STATIONARY_SPECTROMORPHIC_MACHINE_TYPES: frozenset[str] = frozenset(
+    {"fan", "pump", "ToyConveyor", "ToyCar"}
+)
+# All other DCASE machine types (e.g. valve, slider) use non-stationary spectromorphic masks.
 
-# ---------------------------------------------------------------------------
-# 1. Perlin noise strategy (generic)
-# ---------------------------------------------------------------------------
 
-class PerlinNoiseStrategy:
+def default_spectromorphic_perlin(n_mels: int, T: int) -> np.ndarray:
+    """Thresholded 2-D Perlin noise, same recipe as SpectromorphicMaskStrategy._perlin."""
+    res_y = 2 ** random.randint(1, 4)
+    res_x = 2 ** random.randint(2, 5)
+    noise = rand_perlin_2d_np((n_mels, T), (res_y, res_x))
+    threshold = random.uniform(0.3, 0.6)
+    return (noise > threshold).astype(np.float32)
+
+
+def uses_stationary_spectromorphic_mask(machine_type: str | None) -> bool:
+    """True iff ``machine_type`` should use stationary spectromorphic masks."""
+    if machine_type is None:
+        return False
+    return machine_type in STATIONARY_SPECTROMORPHIC_MACHINE_TYPES
+
+
+class NonStationarySpectromorphicMaskStrategy:
     """
-    Generate anomaly map by thresholding Perlin noise.
-    Produces blob-like regions. Optionally rotates noise for varied orientations.
-    """
-
-    def __init__(
-        self,
-        spectrogram_shape: tuple[int, int],
-        q_shape: tuple[int, int] | None = None,
-        threshold: float = 0.5,
-        perlin_scale_range: tuple[int, int] = (0, 6),
-        rotate: bool = True,
-        rotation_range: tuple[float, float] = (-90.0, 90.0),
-    ) -> None:
-        self.spectrogram_shape = spectrogram_shape
-        # q_shape retained for backward compatibility; output is always spectrogram_shape
-        self.q_shape = q_shape or spectrogram_shape
-        self.threshold = threshold
-        self.perlin_scale_range = perlin_scale_range
-        self.rotate = rotate
-        self.rotation_range = rotation_range
-
-    def __call__(self, batch_size: int, device: torch.device | str) -> torch.Tensor:
-        masks = []
-        for _ in range(batch_size):
-            res_y = 2 ** random.randint(*self.perlin_scale_range)
-            res_x = 2 ** random.randint(*self.perlin_scale_range)
-            noise = rand_perlin_2d_np(self.spectrogram_shape, (res_y, res_x))
-            if self.rotate:
-                angle = random.uniform(*self.rotation_range)
-                noise = ndimage_rotate(noise, angle, reshape=False, order=1, mode="constant", cval=0)
-            binary = (noise > self.threshold).astype(np.float32)
-            masks.append(torch.from_numpy(binary).unsqueeze(0).unsqueeze(0))
-        M = torch.cat(masks, dim=0).to(device)
-        if self.q_shape != self.spectrogram_shape:
-            M = F.interpolate(M, size=self.q_shape, mode="nearest")
-        return M
-
-
-# ---------------------------------------------------------------------------
-# 1b. Mix strategy (smooth field + structured bursts)
-# ---------------------------------------------------------------------------
-
-class MixNoiseStrategy:
-    """
-    Smooth random base (Gaussian-blurred white noise or optional Perlin) plus Poisson-count
-    structured additions, then z-score and quantile threshold.
-
-    Array layout is (n_mels, T): row index = mel / frequency, column = time. Modes: ``v``
-    adds a Gaussian ridge along time (broadband temporal event); ``h`` adds a Gaussian ridge
-    along frequency (narrowband over time); ``d`` a thickened diagonal; ``blob`` a 2D Gaussian.
-    """
-
-    def __init__(
-        self,
-        spectrogram_shape: tuple[int, int],
-        q_shape: tuple[int, int] | None = None,
-        lambda_k: float = 3.0,
-        quantile: float = 0.98,
-        base: Literal["smoothed_white", "perlin"] = "smoothed_white",
-        perlin_scale_range: tuple[int, int] = (0, 6),
-        diag_half_width: int = 1,
-        norm_eps: float = 1e-6,
-    ) -> None:
-        self.spectrogram_shape = spectrogram_shape
-        self.q_shape = q_shape or spectrogram_shape
-        self.lambda_k = max(0.0, lambda_k)
-        self.quantile = quantile
-        self.base = base
-        self.perlin_scale_range = perlin_scale_range
-        self.diag_half_width = max(0, diag_half_width)
-        self.norm_eps = norm_eps
-
-    def _scaled_smooth_sigmas(self, H: int, W: int) -> tuple[float, float]:
-        sigma_f = max(1e-3, 8.0 * H / 128.0)
-        sigma_t = max(1e-3, 20.0 * W / 320.0)
-        return sigma_f, sigma_t
-
-    def _single_mask_numpy(self) -> np.ndarray:
-        H, W = self.spectrogram_shape
-        sigma_f0, sigma_t0 = self._scaled_smooth_sigmas(H, W)
-
-        if self.base == "perlin":
-            res_y = 2 ** random.randint(*self.perlin_scale_range)
-            res_x = 2 ** random.randint(*self.perlin_scale_range)
-            Z = rand_perlin_2d_np((H, W), (res_y, res_x)).astype(np.float64)
-            blur_f = max(0.5, sigma_f0 / 4.0)
-            blur_t = max(0.5, sigma_t0 / 4.0)
-            Z = gaussian_filter(Z, sigma=(blur_f, blur_t))
-        else:
-            Z = np.random.randn(H, W).astype(np.float64)
-            Z = gaussian_filter(Z, sigma=(sigma_f0, sigma_t0))
-
-        scale_h = H / 128.0
-        scale_w = W / 320.0
-
-        K = int(np.random.poisson(self.lambda_k)) if self.lambda_k > 0 else 0
-        for _ in range(K):
-            typ = random.choice(["v", "h", "d", "blob"])
-
-            if typ == "v":
-                t0 = random.randint(0, W - 1) if W > 0 else 0
-                sigma_t = float(np.random.uniform(2.0, 10.0) * scale_w)
-                sigma_t = max(sigma_t, 1e-3)
-                t_ax = np.arange(W, dtype=np.float64)
-                row = np.exp(-((t_ax - t0) ** 2) / (2.0 * sigma_t**2))
-                Z += row[np.newaxis, :]
-
-            elif typ == "h":
-                f0 = random.randint(0, H - 1) if H > 0 else 0
-                sigma_f = float(np.random.uniform(1.0, 5.0) * scale_h)
-                sigma_f = max(sigma_f, 1e-3)
-                f_ax = np.arange(H, dtype=np.float64)
-                col = np.exp(-((f_ax - f0) ** 2) / (2.0 * sigma_f**2))
-                Z += col[:, np.newaxis]
-
-            elif typ == "d":
-                a = float(np.random.uniform(-0.2, 0.2))
-                b = float(np.random.uniform(0.0, float(H)))
-                hw = self.diag_half_width
-                for t in range(W):
-                    f_line = int(round(a * t + b))
-                    for df in range(-hw, hw + 1):
-                        ff = f_line + df
-                        if 0 <= ff < H:
-                            Z[ff, t] += 1.0
-
-            else:
-                f0 = random.randint(0, H - 1) if H > 0 else 0
-                t0 = random.randint(0, W - 1) if W > 0 else 0
-                sigma_f = float(np.random.uniform(3.0, 10.0) * scale_h)
-                sigma_t = float(np.random.uniform(5.0, 20.0) * scale_w)
-                sigma_f = max(sigma_f, 1e-3)
-                sigma_t = max(sigma_t, 1e-3)
-                F, Tgrid = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
-                Z += np.exp(
-                    -((F - f0) ** 2) / (2.0 * sigma_f**2)
-                    -((Tgrid - t0) ** 2) / (2.0 * sigma_t**2)
-                )
-
-        z_mean = float(Z.mean())
-        z_std = max(float(Z.std()), self.norm_eps)
-        Z = (Z - z_mean) / z_std
-        tau = float(np.quantile(Z, self.quantile))
-        return (Z > tau).astype(np.float32)
-
-    def __call__(self, batch_size: int, device: torch.device | str) -> torch.Tensor:
-        masks = [
-            torch.from_numpy(self._single_mask_numpy()).unsqueeze(0).unsqueeze(0)
-            for _ in range(batch_size)
-        ]
-        M = torch.cat(masks, dim=0).to(device)
-        if self.q_shape != self.spectrogram_shape:
-            M = F.interpolate(M, size=self.q_shape, mode="nearest")
-        return M
-
-
-# ---------------------------------------------------------------------------
-# 2. SpectromorphicMaskStrategy (replaces LatentAlignedBandStrategy)
-# ---------------------------------------------------------------------------
-
-class SpectromorphicMaskStrategy:
-    """
-    Synthetic anomaly masks for spectrograms.
+    Non Statinory Synthetic anomaly masks for spectrograms.
 
     Each sample is either:
 
@@ -351,11 +211,7 @@ class SpectromorphicMaskStrategy:
         return mask
 
     def _perlin(self) -> np.ndarray:
-        res_y = 2 ** random.randint(1, 4)
-        res_x = 2 ** random.randint(2, 5)
-        noise = rand_perlin_2d_np((self.n_mels, self.T), (res_y, res_x))
-        threshold = random.uniform(0.3, 0.6)
-        return (noise > threshold).astype(np.float32)
+        return default_spectromorphic_perlin(self.n_mels, self.T)
 
     def __call__(
         self,
@@ -375,9 +231,108 @@ class SpectromorphicMaskStrategy:
         return M
 
 
-# Backward-compatible aliases
-LatentAlignedBandStrategy = SpectromorphicMaskStrategy
-AudioSpecificStrategy = SpectromorphicMaskStrategy
+class StationarySpectromorphicMaskStrategy:
+    """
+    Masks for machines with dense continuous tones (fans, pumps, conveyors).
+
+    Each sample is one of: multi-band narrow harmonics with high temporal duty
+    cycle, a single band with sinusoidal AM in time, or thresholded Perlin noise.
+    Mixture: 70% / 15% / 15% by default (single ``random()`` split).
+
+    Output is binary ``(B, 1, n_mels, T)`` with optional ``q_shape`` interpolation,
+    same as :class:`SpectromorphicMaskStrategy`.
+    """
+
+    def __init__(
+        self,
+        spectrogram_shape: tuple[int, int] | None = None,
+        q_shape: tuple[int, int] | None = None,
+        n_mels: int | None = None,
+        T: int | None = None,
+        p_multi_band: float = 0.7,
+        p_amplitude_mod: float = 0.85,
+        **_kwargs: object,
+    ) -> None:
+        if spectrogram_shape is not None:
+            self.n_mels = n_mels or spectrogram_shape[0]
+            self.T = T or spectrogram_shape[1]
+        else:
+            self.n_mels = n_mels or 128
+            self.T = T or 320
+        self.q_shape = q_shape or (self.n_mels, self.T)
+        self.p_multi_band = float(min(max(p_multi_band, 0.0), 1.0))
+        self.p_amplitude_mod = float(min(max(p_amplitude_mod, self.p_multi_band), 1.0))
+
+    def _multi_band_continuous(self) -> np.ndarray:
+        """Narrow harmonic bands, high temporal duty cycle, optional mel jitter."""
+        n_mels, T = self.n_mels, self.T
+        mask = np.zeros((n_mels, T), dtype=np.float32)
+        if n_mels <= 0 or T <= 0:
+            return mask
+
+        n_bands = random.randint(2, 5)
+        denom = max(2 * n_bands, 1)
+        step = max(1, n_mels // denom)
+        f0_start = random.randint(0, max(0, n_mels // 4))
+
+        for i in range(n_bands):
+            f_center = f0_start + i * step + random.randint(-2, 2)
+            f_center = int(max(0, min(f_center, n_mels - 1)))
+            if f_center >= n_mels - 2:
+                break
+            bw = random.randint(1, 2)
+            f_start = max(0, f_center - bw // 2)
+            f_end = min(n_mels, f_start + bw)
+            if f_end <= f_start:
+                continue
+            duty_cycle = random.uniform(0.8, 1.0)
+            temporal_mask = (np.random.rand(T) < duty_cycle).astype(np.float32)
+            mask[f_start:f_end, :] = np.maximum(
+                mask[f_start:f_end, :],
+                temporal_mask.reshape(1, -1),
+            )
+        return mask
+
+    def _amplitude_modulation_mask(self) -> np.ndarray:
+        """Single narrow band, sinusoidal envelope in time, thresholded."""
+        n_mels, T = self.n_mels, self.T
+        mask = np.zeros((n_mels, T), dtype=np.float32)
+        if n_mels <= 0 or T <= 0:
+            return mask
+
+        bw = random.randint(1, 3)
+        f_start = random.randint(0, max(0, n_mels - bw))
+        mod_freq = random.uniform(0.05, 0.2)
+        t = np.linspace(0.0, 2.0 * math.pi * mod_freq, T, dtype=np.float64)
+        modulation = 0.5 + 0.5 * np.sin(t)
+        threshold = random.uniform(0.3, 0.7)
+        temporal_mask = (modulation > threshold).astype(np.float32)
+        mask[f_start : f_start + bw, :] = temporal_mask.reshape(1, -1)
+        return mask
+
+    def _perlin(self) -> np.ndarray:
+        return default_spectromorphic_perlin(self.n_mels, self.T)
+
+    def __call__(
+        self,
+        batch_size: int,
+        device: torch.device | str,
+    ) -> torch.Tensor:
+        masks = []
+        p0, p1 = self.p_multi_band, self.p_amplitude_mod
+        for _ in range(batch_size):
+            u = random.random()
+            if u < p0:
+                m = self._multi_band_continuous()
+            elif u < p1:
+                m = self._amplitude_modulation_mask()
+            else:
+                m = self._perlin()
+            masks.append(torch.from_numpy(m).unsqueeze(0).unsqueeze(0))
+        M = torch.cat(masks, dim=0).to(device)
+        if self.q_shape != (self.n_mels, self.T):
+            M = F.interpolate(M, size=self.q_shape, mode="nearest")
+        return M
 
 
 # ---------------------------------------------------------------------------
@@ -389,10 +344,9 @@ class AnomalyMapGenerator:
     Generate anomaly map M for training.
 
     strategy options:
-        "perlin"           – Perlin noise only
-        "mix"              – smoothed field + burst mix, quantile threshold
-        "audio_specific"   – SpectromorphicMaskStrategy (stratified mel band ×
-                             renewal in time, optional internal Perlin branch)
+        "audio_specific"   – spectromorphic masks routed by ``machine_type``:
+                             stationary types use :class:`StationarySpectromorphicMaskStrategy`;
+                             others use :class:`SpectromorphicMaskStrategy` (valve, slider).
 
     When force_anomaly=False, each sample independently receives a zero mask
     with probability zero_mask_prob.
@@ -401,8 +355,6 @@ class AnomalyMapGenerator:
     def __init__(
         self,
         strategy: Literal[
-            "perlin",
-            "mix",
             "audio_specific"
         ],
         spectrogram_shape: tuple[int, int],
@@ -418,43 +370,39 @@ class AnomalyMapGenerator:
 
         _n_mels = n_mels or spectrogram_shape[0]
         _T = T or spectrogram_shape[1]
-
-        self.perlin = (
-            PerlinNoiseStrategy(spectrogram_shape, self.q_shape)
-            if strategy == "perlin"
-            else None
-        )
-        self.mix = (
-            MixNoiseStrategy(spectrogram_shape, self.q_shape)
-            if strategy == "mix"
-            else None
-        )
-        self.audio_specific = (
-            AudioSpecificStrategy(
+        if strategy == "audio_specific":
+            self._spectromorphic_nonstationary = NonStationarySpectromorphicMaskStrategy(
                 spectrogram_shape, self.q_shape, _n_mels, _T,
             )
-            if strategy == "audio_specific"
-            else None
-        )
-        self._fallback = AudioSpecificStrategy(
+            self._spectromorphic_stationary = StationarySpectromorphicMaskStrategy(
+                spectrogram_shape, self.q_shape, _n_mels, _T,
+            )
+            self.audio_specific = self._spectromorphic_nonstationary
+        else:
+            self._spectromorphic_nonstationary = None
+            self._spectromorphic_stationary = None
+            self.audio_specific = None
+        self._fallback = NonStationarySpectromorphicMaskStrategy(
             spectrogram_shape, self.q_shape, _n_mels, _T,
         )
 
-    def _generate_one(self, device: torch.device | str) -> torch.Tensor:
+    def _generate_one(
+        self,
+        device: torch.device | str,
+        machine_type: str | None = None,
+    ) -> torch.Tensor:
         """Generate a single non-zero mask (1, 1, H, W)."""
         name = self.strategy_name
 
-        if name == "perlin":
-            assert self.perlin is not None
-            return self.perlin(1, device)
-
-        if name == "mix":
-            assert self.mix is not None
-            return self.mix(1, device)
-
         if name == "audio_specific":
-            assert self.audio_specific is not None
-            return self.audio_specific(1, device)
+            assert self._spectromorphic_nonstationary is not None
+            assert self._spectromorphic_stationary is not None
+            strat = (
+                self._spectromorphic_stationary
+                if uses_stationary_spectromorphic_mask(machine_type)
+                else self._spectromorphic_nonstationary
+            )
+            return strat(1, device)
 
         return self._fallback(1, device)
 
@@ -462,17 +410,20 @@ class AnomalyMapGenerator:
         self,
         device: torch.device | str,
         force_anomaly: bool = True,
+        machine_type: str | None = None,
     ) -> torch.Tensor:
         """Generate one mask for a single training sample (convenience wrapper)."""
         if force_anomaly:
-            return self._generate_one(device)
-        return self.generate(1, device, force_anomaly=False)
+            return self._generate_one(device, machine_type)
+        mt_list = [machine_type] if machine_type is not None else None
+        return self.generate(1, device, force_anomaly=False, machine_types=mt_list)
 
     def generate(
         self,
         batch_size: int,
         device: torch.device | str,
         force_anomaly: bool = False,
+        machine_types: list[str] | None = None,
     ) -> torch.Tensor:
         """
         Generate batch of anomaly masks.
@@ -481,21 +432,34 @@ class AnomalyMapGenerator:
             batch_size: number of masks
             device: torch device
             force_anomaly: if True, always generate real masks (skip zero_mask_prob)
+            machine_types: optional length-``batch_size`` list of DCASE machine types
+                for ``audio_specific`` routing. If ``None``, non-stationary masks are used.
 
         Returns:
             M: (B, 1, n_mels, T) binary mask
         """
-        if force_anomaly:
-            return torch.cat(
-                [self._generate_one(device) for _ in range(batch_size)], dim=0
+        if machine_types is not None and len(machine_types) != batch_size:
+            raise ValueError(
+                f"machine_types length ({len(machine_types)}) must equal batch_size ({batch_size})"
             )
 
+        if force_anomaly:
+            masks = [
+                self._generate_one(
+                    device,
+                    None if machine_types is None else machine_types[i],
+                )
+                for i in range(batch_size)
+            ]
+            return torch.cat(masks, dim=0)
+
         masks = []
-        for _ in range(batch_size):
+        for i in range(batch_size):
             if random.random() < self.zero_mask_prob:
                 masks.append(
                     torch.zeros(1, 1, *self.spectrogram_shape, device=device, dtype=torch.float32)
                 )
             else:
-                masks.append(self._generate_one(device))
+                mt = None if machine_types is None else machine_types[i]
+                masks.append(self._generate_one(device, mt))
         return torch.cat(masks, dim=0)
