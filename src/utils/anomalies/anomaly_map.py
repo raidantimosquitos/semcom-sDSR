@@ -69,61 +69,6 @@ def hz_band_to_mel_bin_range(
     return start_f, end_f
 
 
-def sample_f0_bw_hz_stratified(
-    f_min_hz: float,
-    f_max_hz: float,
-    bw_min_hz: float,
-    bw_max_hz: float,
-    *,
-    split_hz: float = 2000.0,
-    low_stratum_prob: float = 0.7,
-) -> tuple[float, float] | None:
-    """
-    Sample band start ``f0_hz`` and width ``bw_hz`` (linear Hz) from two strata:
-
-    - **Low**: band contained in ``[0, split_hz] ∩ [f_min_hz, f_max_hz]``.
-    - **High**: band contained in ``[split_hz, f_max_hz] ∩ [f_min_hz, f_max_hz]``.
-
-    With probability ``low_stratum_prob`` the low stratum is tried first, then high;
-    otherwise the order is reversed. ``bw_hz`` is uniform in
-    ``[bw_min_hz, min(bw_max_hz, stratum_width)]``.
-
-    Returns:
-        ``(f0_hz, bw_hz)`` or ``None`` if neither stratum can fit ``bw_min_hz``.
-    """
-    lo_g = float(f_min_hz)
-    hi_g = float(f_max_hz)
-    bw_lo = float(max(0.0, bw_min_hz))
-    bw_hi = float(max(bw_lo, bw_max_hz))
-    p_low = float(min(max(low_stratum_prob, 0.0), 1.0))
-    split_hz = float(split_hz)
-
-    def _one_stratum(s_lo: float, s_hi: float) -> tuple[float, float] | None:
-        span = s_hi - s_lo
-        if span <= 0:
-            return None
-        max_bw = min(bw_hi, span)
-        if bw_lo > max_bw + 1e-9:
-            return None
-        bw_hz = random.uniform(bw_lo, max_bw)
-        f0_hz = random.uniform(s_lo, s_hi - bw_hz)
-        return f0_hz, bw_hz
-
-    low_bounds = (max(lo_g, 0.0), min(split_hz, hi_g))
-    high_bounds = (max(lo_g, split_hz), hi_g)
-
-    if random.random() < p_low:
-        strata = (low_bounds, high_bounds)
-    else:
-        strata = (high_bounds, low_bounds)
-
-    for s_lo, s_hi in strata:
-        r = _one_stratum(s_lo, s_hi)
-        if r is not None:
-            return r
-    return None
-
-
 def _perlin_mask_is_nonempty_binary(m: np.ndarray) -> bool:
     """True iff ``m`` is strictly binary {0,1} and has at least one 1."""
     if m.size == 0:
@@ -188,10 +133,6 @@ class NonStationarySpectromorphicMaskStrategy:
         perlin_prob: probability of choosing the Perlin branch per mask.
         f_min_hz, f_max_hz: linear frequency range matching the mel spectrogram (Hz).
         bw_min_hz, bw_max_hz: uniform range for band width in Hz (machine-like bands).
-        hz_stratified_sampling: if True, draw ``(f0_hz, bw_hz)`` via
-            :func:`sample_f0_bw_hz_stratified`; if False, uniform over full range.
-        hz_stratum_split_hz: boundary (Hz) between low and high strata (default 2000).
-        hz_low_stratum_prob: probability to try the low stratum first (default 0.7).
         fallback_band_bw_hz: linear bandwidth (Hz) for the time-full strip used when
             band+renewal yields no mask or Perlin does not yield a non-empty binary mask.
     """
@@ -202,14 +143,11 @@ class NonStationarySpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         n_mels: int | None = None,
         T: int | None = None,
-        perlin_prob: float = 0.1,
+        perlin_prob: float = 0.15,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
         bw_max_hz: float = 1000.0,
-        hz_stratified_sampling: bool = True,
-        hz_stratum_split_hz: float = 2000.0,
-        hz_low_stratum_prob: float = 0.5,
         fallback_band_bw_hz: float = 40.0,
         **_kwargs: object,
     ) -> None:
@@ -225,9 +163,6 @@ class NonStationarySpectromorphicMaskStrategy:
         self.f_max_hz = float(f_max_hz)
         self.bw_min_hz = float(max(0.0, bw_min_hz))
         self.bw_max_hz = float(max(self.bw_min_hz, bw_max_hz))
-        self.hz_stratified_sampling = bool(hz_stratified_sampling)
-        self.hz_stratum_split_hz = float(hz_stratum_split_hz)
-        self.hz_low_stratum_prob = float(min(max(hz_low_stratum_prob, 0.0), 1.0))
         self.fallback_band_bw_hz = float(max(1.0, fallback_band_bw_hz))
 
     def _fallback_time_continuous_band_mask(self) -> np.ndarray:
@@ -271,21 +206,8 @@ class NonStationarySpectromorphicMaskStrategy:
             bw_lo, bw_hi = bw_hi, bw_lo
 
         for _ in range(32):
-            sampled: tuple[float, float] | None = None
-            if self.hz_stratified_sampling:
-                sampled = sample_f0_bw_hz_stratified(
-                    lo,
-                    hi,
-                    bw_lo,
-                    bw_hi,
-                    split_hz=self.hz_stratum_split_hz,
-                    low_stratum_prob=self.hz_low_stratum_prob,
-                )
-            if sampled is not None:
-                f0_hz, bw_hz = sampled
-            else:
-                bw_hz = random.uniform(bw_lo, bw_hi)
-                f0_hz = random.uniform(lo, max(lo, hi - bw_hz))
+            bw_hz = random.uniform(bw_lo, bw_hi)
+            f0_hz = random.uniform(lo, max(lo, hi - bw_hz))
             f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, lo, hi)
             if f1 > f0:
                 return [(f0, f1)]
@@ -300,10 +222,8 @@ class NonStationarySpectromorphicMaskStrategy:
         Tm = max(T, 1)
         lo = math.log(1.0 + 10.0)
         hi = math.log(float(Tm-1.0))
-        mu_on = math.exp(random.uniform(lo, hi)) # before was hi
-        # mu_on = math.exp(random.uniform(math.log(50), math.log(T)))
-        mu_off = math.exp(random.uniform(lo, hi)) # before was lo
-        # mu_off = math.exp(random.uniform(math.log(1), math.log(10)))
+        mu_on = math.exp(random.uniform(lo, hi))
+        mu_off = math.exp(random.uniform(lo, hi)) 
         p_on = 1.0 / max(mu_on, 1.0)
         p_off = 1.0 / max(mu_off, 1.0)
         eps = 1e-6
@@ -350,7 +270,7 @@ class NonStationarySpectromorphicMaskStrategy:
         denom = mu_on + mu_off
         p_start_on = (mu_on / denom) if denom > 0 else 0.5
         track = self._alternating_renewal_1d(
-            T, p_on, p_off, random.random() < p_start_on
+           T, p_on, p_off, random.random() < p_start_on
         )
         mask[f0:f1, :] = track.reshape(1, -1)
         if float(mask.sum()) <= 0.0:
@@ -399,8 +319,6 @@ class AnomalyMapGenerator:
     keys it does not use (e.g. ``mel_n_bands_max`` only affects
     :class:`StationarySpectromorphicMaskStrategy`). Hz band args (``f_min_hz``,
     ``f_max_hz``, ``bw_min_hz``, ``bw_max_hz``) apply to both strategies.
-    Optional stratified Hz sampling: ``hz_stratified_sampling`` (default True),
-    ``hz_stratum_split_hz`` (default 2000), ``hz_low_stratum_prob`` (default 0.7),
     ``fallback_band_bw_hz`` (default 40): Hz width for fallback time-full strip.
     """
 

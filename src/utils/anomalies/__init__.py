@@ -21,8 +21,6 @@ from .anomaly_map import (
     default_spectromorphic_perlin,
     hz_band_to_mel_bin_range,
     hz_to_mel,
-    sample_f0_bw_hz_stratified,
-    sample_f0_bw_hz_stratified, 
 )
 from .anomaly_generation import (
     generate_fake_anomalies_distant,
@@ -38,7 +36,6 @@ __all__ = [
     "default_spectromorphic_perlin",
     "hz_band_to_mel_bin_range",
     "hz_to_mel",
-    "sample_f0_bw_hz_stratified",
     "generate_fake_anomalies_distant",
     "generate_fake_anomalies_uniform",
 ]
