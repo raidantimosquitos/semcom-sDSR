@@ -306,21 +306,22 @@ class NonStationarySpectromorphicMaskStrategy:
 
         f0, f1 = bands[0]
 
-        # n_segs = random.randint(1, 5)
-        # min_len = max(1, T // 20)
-        # max_len = max(min_len, T // 3)
-        # for _ in range(n_segs):
-        #     length = random.randint(min_len, max_len)
-        #     t_start = random.randint(0, max(0, T - length))
-        #     mask[f0:f1, t_start:t_start + length] = 1.0
+        n_segs = random.randint(1, 5)
+        min_len = max(1, T // 20)
+        max_len = max(min_len, T // 3)
+        for _ in range(n_segs):
+            length = random.randint(min_len, max_len)
+            t_start = random.randint(0, max(0, T - length))
+            mask[f0:f1, t_start:t_start + length] = 1.0
 
-        p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
-        denom = mu_on + mu_off
-        p_start_on = (mu_on / denom) if denom > 0 else 0.5
-        track = self._alternating_renewal_1d(
-           T, p_on, p_off, random.random() < p_start_on
-        )
-        mask[f0:f1, :] = track.reshape(1, -1)
+        # p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
+        # denom = mu_on + mu_off
+        # p_start_on = (mu_on / denom) if denom > 0 else 0.5
+        # track = self._alternating_renewal_1d(
+        #    T, p_on, p_off, random.random() < p_start_on
+        # )
+        # mask[f0:f1, :] = track.reshape(1, -1)
+
         if float(mask.sum()) <= 0.0:
             return self._fallback_time_continuous_band_mask()
         return mask
