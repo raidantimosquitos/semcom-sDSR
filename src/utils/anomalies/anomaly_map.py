@@ -23,15 +23,9 @@ import torch.nn.functional as F
 
 from .perlin import rand_perlin_2d_np
 
-# DCASE machine types: stationary (dense tones) vs non-stationary mask family.
-STATIONARY_SPECTROMORPHIC_MACHINE_TYPES: frozenset[str] = frozenset(
-    {"fan", "ToyConveyor", "ToyCar"}
-)
-
 def hz_to_mel(hz: float) -> float:
     """Mel scale (Hz) — same family as typical log-mel frontends."""
     return 2595.0 * math.log10(1.0 + max(hz, 0.0) / 700.0)
-
 
 def hz_band_to_mel_bin_range(
     f0_hz: float,
@@ -74,6 +68,62 @@ def hz_band_to_mel_bin_range(
     end_f = max(start_f + 1, min(n_mels, end_f))
     return start_f, end_f
 
+
+def sample_f0_bw_hz_stratified(
+    f_min_hz: float,
+    f_max_hz: float,
+    bw_min_hz: float,
+    bw_max_hz: float,
+    *,
+    split_hz: float = 2000.0,
+    low_stratum_prob: float = 0.7,
+) -> tuple[float, float] | None:
+    """
+    Sample band start ``f0_hz`` and width ``bw_hz`` (linear Hz) from two strata:
+
+    - **Low**: band contained in ``[0, split_hz] ∩ [f_min_hz, f_max_hz]``.
+    - **High**: band contained in ``[split_hz, f_max_hz] ∩ [f_min_hz, f_max_hz]``.
+
+    With probability ``low_stratum_prob`` the low stratum is tried first, then high;
+    otherwise the order is reversed. ``bw_hz`` is uniform in
+    ``[bw_min_hz, min(bw_max_hz, stratum_width)]``.
+
+    Returns:
+        ``(f0_hz, bw_hz)`` or ``None`` if neither stratum can fit ``bw_min_hz``.
+    """
+    lo_g = float(f_min_hz)
+    hi_g = float(f_max_hz)
+    bw_lo = float(max(0.0, bw_min_hz))
+    bw_hi = float(max(bw_lo, bw_max_hz))
+    p_low = float(min(max(low_stratum_prob, 0.0), 1.0))
+    split_hz = float(split_hz)
+
+    def _one_stratum(s_lo: float, s_hi: float) -> tuple[float, float] | None:
+        span = s_hi - s_lo
+        if span <= 0:
+            return None
+        max_bw = min(bw_hi, span)
+        if bw_lo > max_bw + 1e-9:
+            return None
+        bw_hz = random.uniform(bw_lo, max_bw)
+        f0_hz = random.uniform(s_lo, s_hi - bw_hz)
+        return f0_hz, bw_hz
+
+    low_bounds = (max(lo_g, 0.0), min(split_hz, hi_g))
+    high_bounds = (max(lo_g, split_hz), hi_g)
+
+    if random.random() < p_low:
+        strata = (low_bounds, high_bounds)
+    else:
+        strata = (high_bounds, low_bounds)
+
+    for s_lo, s_hi in strata:
+        r = _one_stratum(s_lo, s_hi)
+        if r is not None:
+            return r
+    return None
+
+
 def default_spectromorphic_perlin(
     n_mels: int,
     T: int,
@@ -106,13 +156,6 @@ def default_spectromorphic_perlin(
         return noise.astype(np.float32)
 
 
-def uses_stationary_spectromorphic_mask(machine_type: str | None) -> bool:
-    """True iff ``machine_type`` should use stationary spectromorphic masks."""
-    if machine_type is None:
-        return False
-    return machine_type in STATIONARY_SPECTROMORPHIC_MACHINE_TYPES
-
-
 class NonStationarySpectromorphicMaskStrategy:
     """
     Non-stationary synthetic anomaly masks for spectrograms.
@@ -135,6 +178,10 @@ class NonStationarySpectromorphicMaskStrategy:
         perlin_prob: probability of choosing the Perlin branch per mask.
         f_min_hz, f_max_hz: linear frequency range matching the mel spectrogram (Hz).
         bw_min_hz, bw_max_hz: uniform range for band width in Hz (machine-like bands).
+        hz_stratified_sampling: if True, draw ``(f0_hz, bw_hz)`` via
+            :func:`sample_f0_bw_hz_stratified`; if False, uniform over full range.
+        hz_stratum_split_hz: boundary (Hz) between low and high strata (default 2000).
+        hz_low_stratum_prob: probability to try the low stratum first (default 0.7).
     """
 
     def __init__(
@@ -148,6 +195,9 @@ class NonStationarySpectromorphicMaskStrategy:
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
         bw_max_hz: float = 500.0,
+        hz_stratified_sampling: bool = True,
+        hz_stratum_split_hz: float = 2000.0,
+        hz_low_stratum_prob: float = 0.7,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -162,6 +212,9 @@ class NonStationarySpectromorphicMaskStrategy:
         self.f_max_hz = float(f_max_hz)
         self.bw_min_hz = float(max(0.0, bw_min_hz))
         self.bw_max_hz = float(max(self.bw_min_hz, bw_max_hz))
+        self.hz_stratified_sampling = bool(hz_stratified_sampling)
+        self.hz_stratum_split_hz = float(hz_stratum_split_hz)
+        self.hz_low_stratum_prob = float(min(max(hz_low_stratum_prob, 0.0), 1.0))
 
     def _pick_single_hz_mel_band(self) -> list[tuple[int, int]]:
         """One contiguous band ``[f0, f1)`` in mel bins from uniform Hz ``f0``, ``bw``."""
@@ -180,8 +233,21 @@ class NonStationarySpectromorphicMaskStrategy:
             bw_lo, bw_hi = bw_hi, bw_lo
 
         for _ in range(32):
-            bw_hz = random.uniform(bw_lo, bw_hi)
-            f0_hz = random.uniform(lo, max(lo, hi - bw_hz))
+            sampled: tuple[float, float] | None = None
+            if self.hz_stratified_sampling:
+                sampled = sample_f0_bw_hz_stratified(
+                    lo,
+                    hi,
+                    bw_lo,
+                    bw_hi,
+                    split_hz=self.hz_stratum_split_hz,
+                    low_stratum_prob=self.hz_low_stratum_prob,
+                )
+            if sampled is not None:
+                f0_hz, bw_hz = sampled
+            else:
+                bw_hz = random.uniform(bw_lo, bw_hi)
+                f0_hz = random.uniform(lo, max(lo, hi - bw_hz))
             f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, lo, hi)
             if f1 > f0:
                 return [(f0, f1)]
@@ -271,166 +337,8 @@ class NonStationarySpectromorphicMaskStrategy:
             M = F.interpolate(M, size=self.q_shape, mode="nearest")
         return M
 
-
-class StationarySpectromorphicMaskStrategy:
-    """
-    Masks for machines with dense continuous tones (fans, pumps, conveyors).
-
-    Each sample is either:
-
-      1. **Multi-band + renewal** (probability ``1 - perlin_prob``): one or more
-         contiguous mel bands (up to ``mel_n_bands_max``). Each band is drawn
-         independently in **linear Hz** (same rules as
-         :class:`NonStationarySpectromorphicMaskStrategy`) and mapped to mel bins.
-         Each band gets an **independent** alternating renewal along time (geometric
-         ON/OFF runs). Overlaps are merged with elementwise max.
-
-      2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise.
-
-    Output is binary ``(B, 1, n_mels, T)`` with optional ``q_shape`` interpolation.
-    """
-
-    def __init__(
-        self,
-        spectrogram_shape: tuple[int, int] | None = None,
-        q_shape: tuple[int, int] | None = None,
-        n_mels: int | None = None,
-        T: int | None = None,
-        perlin_prob: float = 0.3,
-        mel_n_bands_max: int = 10,
-        f_min_hz: float = 0.0,
-        f_max_hz: float = 8_000.0,
-        bw_min_hz: float = 40.0,
-        bw_max_hz: float = 2_000.0,
-        **_kwargs: object,
-    ) -> None:
-        if spectrogram_shape is not None:
-            self.n_mels = n_mels or spectrogram_shape[0]
-            self.T = T or spectrogram_shape[1]
-        else:
-            self.n_mels = n_mels or 128
-            self.T = T or 320
-        self.q_shape = q_shape or (self.n_mels, self.T)
-        self.perlin_prob = float(min(max(perlin_prob, 0.0), 1.0))
-        self.mel_n_bands_max = max(1, int(mel_n_bands_max))
-        self.f_min_hz = float(f_min_hz)
-        self.f_max_hz = float(f_max_hz)
-        self.bw_min_hz = float(max(0.0, bw_min_hz))
-        self.bw_max_hz = float(max(self.bw_min_hz, bw_max_hz))
-
-    def _pick_hz_mel_bands(self) -> list[tuple[int, int]]:
-        """One or more disjoint-in-definition bands in mel bins from independent Hz draws."""
-        n_mels = self.n_mels
-        if n_mels <= 0:
-            return []
-
-        lo, hi = self.f_min_hz, self.f_max_hz
-        span_hz = hi - lo
-        if span_hz <= 0:
-            return []
-
-        bw_lo = min(self.bw_min_hz, span_hz)
-        bw_hi = min(self.bw_max_hz, span_hz)
-        if bw_hi < bw_lo:
-            bw_lo, bw_hi = bw_hi, bw_lo
-
-        kmax = min(self.mel_n_bands_max, max(1, n_mels))
-        nb = random.randint(1, kmax)
-        bands: list[tuple[int, int]] = []
-        for _ in range(nb):
-            for _try in range(16):
-                bw_hz = random.uniform(bw_lo, bw_hi)
-                f0_hz = random.uniform(lo, max(lo, hi - bw_hz))
-                f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, lo, hi)
-                if f1 > f0:
-                    bands.append((f0, f1))
-                    break
-        if not bands:
-            for _ in range(32):
-                bw_hz = random.uniform(bw_lo, bw_hi)
-                f0_hz = random.uniform(lo, max(lo, hi - bw_hz))
-                f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, lo, hi)
-                if f1 > f0:
-                    bands.append((f0, f1))
-                    break
-        return bands
-
-    def _hierarchical_renewal_params(self, T: int) -> tuple[float, float, float, float]:
-        Tm = max(T, 1)
-        lo = math.log(1.0)
-        hi = math.log(float(Tm))
-        mu_on = math.exp(random.uniform(lo, hi))
-        mu_off = math.exp(random.uniform(lo, hi))
-        p_on = 1.0 / max(mu_on, 1.0)
-        p_off = 1.0 / max(mu_off, 1.0)
-        eps = 1e-6
-        p_on = min(max(p_on, eps), 1.0 - eps)
-        p_off = min(max(p_off, eps), 1.0 - eps)
-        return p_on, p_off, mu_on, mu_off
-
-    @staticmethod
-    def _alternating_renewal_1d(
-        T: int,
-        p_on: float,
-        p_off: float,
-        start_on: bool,
-    ) -> np.ndarray:
-        a = np.zeros(T, dtype=np.float32)
-        if T <= 0:
-            return a
-        t = 0
-        on = start_on
-        while t < T:
-            p = p_on if on else p_off
-            L = int(np.random.geometric(p))
-            L = max(1, min(L, T - t))
-            if on:
-                a[t : t + L] = 1.0
-            t += L
-            on = not on
-        return a
-
-    def _band_time_segments(self) -> np.ndarray:
-        n_mels, T = self.n_mels, self.T
-        mask = np.zeros((n_mels, T), dtype=np.float32)
-        bands = self._pick_hz_mel_bands()
-        if not bands:
-            return mask
-
-        for f0, f1 in bands:
-            p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
-            denom = mu_on + mu_off
-            p_start_on = (mu_on / denom) if denom > 0 else 0.5
-            track = self._alternating_renewal_1d(
-                T, p_on, p_off, random.random() < p_start_on
-            )
-            row = track.reshape(1, -1)
-            mask[f0:f1, :] = np.maximum(mask[f0:f1, :], row)
-        return mask
-
-    def _perlin(self) -> np.ndarray:
-        return default_spectromorphic_perlin(self.n_mels, self.T)
-
-    def __call__(
-        self,
-        batch_size: int,
-        device: torch.device | str,
-    ) -> torch.Tensor:
-        masks = []
-        for _ in range(batch_size):
-            if random.random() < self.perlin_prob:
-                m = self._perlin()
-            else:
-                m = self._band_time_segments()
-            masks.append(torch.from_numpy(m).unsqueeze(0).unsqueeze(0))
-        M = torch.cat(masks, dim=0).to(device)
-        if self.q_shape != (self.n_mels, self.T):
-            M = F.interpolate(M, size=self.q_shape, mode="nearest")
-        return M
-
-
 # ---------------------------------------------------------------------------
-# 4. AnomalyMapGenerator — unified entry point
+# 2. AnomalyMapGenerator — unified entry point
 # ---------------------------------------------------------------------------
 
 class AnomalyMapGenerator:
@@ -448,6 +356,8 @@ class AnomalyMapGenerator:
     keys it does not use (e.g. ``mel_n_bands_max`` only affects
     :class:`StationarySpectromorphicMaskStrategy`). Hz band args (``f_min_hz``,
     ``f_max_hz``, ``bw_min_hz``, ``bw_max_hz``) apply to both strategies.
+    Optional stratified Hz sampling: ``hz_stratified_sampling`` (default True),
+    ``hz_stratum_split_hz`` (default 2000), ``hz_low_stratum_prob`` (default 0.7).
     """
 
     def __init__(
@@ -473,24 +383,13 @@ class AnomalyMapGenerator:
             _T,
             **strategy_kwargs,
         )
-        self._stationary = StationarySpectromorphicMaskStrategy(
-            spectrogram_shape,
-            self.q_shape,
-            _n_mels,
-            _T,
-            **strategy_kwargs,
-        )
-        # Backward compatibility: direct use of the non-stationary strategy only.
-        self.audio_specific = self._stationary
 
     def _strategy(
         self,
         machine_type: str | None,
-    ) -> NonStationarySpectromorphicMaskStrategy | StationarySpectromorphicMaskStrategy:
+    ) -> NonStationarySpectromorphicMaskStrategy:
         return (
-            self._stationary
-            if uses_stationary_spectromorphic_mask(machine_type)
-            else self._nonstationary
+            self._nonstationary
         )
 
     def _generate_one(
