@@ -194,7 +194,7 @@ class NonStationarySpectromorphicMaskStrategy:
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
-        bw_max_hz: float = 500.0,
+        bw_max_hz: float = 1000.0,
         hz_stratified_sampling: bool = True,
         hz_stratum_split_hz: float = 2000.0,
         hz_low_stratum_prob: float = 0.7,
