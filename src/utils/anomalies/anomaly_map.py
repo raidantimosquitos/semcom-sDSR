@@ -118,10 +118,9 @@ class NonStationarySpectromorphicMaskStrategy:
     Each sample is either:
 
       1. **Band + renewal time** (probability ``1 - perlin_prob``): exactly one
-         contiguous mel band. Band edges are sampled in **linear Hz** on
-         ``[f_min_hz, f_max_hz]``: ``bw_hz ~ Uniform(bw_min_hz, bw_max_hz)``,
-         ``f0_hz ~ Uniform(f_min_hz, f_max_hz - bw_hz)``, then mapped to mel-bin
-         indices via :func:`hz_band_to_mel_bin_range` / :func:`hz_to_mel`.
+         contiguous mel band. ``bw_hz ~ Uniform(bw_min_hz, bw_max_hz)`` (clipped to span);
+         ``f0_hz`` is **log-uniform** on valid starts in Hz, then mapped to mel bins via
+         :func:`hz_band_to_mel_bin_range` using ``(f_min_hz, f_max_hz)`` as the mel bank.
 
       2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
          for blob-shaped masks.
@@ -193,11 +192,14 @@ class NonStationarySpectromorphicMaskStrategy:
         """
         One contiguous band ``[f0, f1)`` in mel bins.
 
-        Band **start** and **width** may be drawn uniformly within a random Hz stratum
-        (low / mid / high), but :func:`hz_band_to_mel_bin_range` must always receive the
-        **same** ``f_min_hz``, ``f_max_hz`` as the log-mel frontend (``self.f_min_hz``,
-        ``self.f_max_hz``). Passing stratum bounds there re-partitions mel bins as if the
-        spectrogram only spanned that sub-range and maps energy to the wrong indices.
+        ``bw_hz`` is uniform in ``[bw_min_hz, bw_max_hz]`` (clipped to the global Hz span).
+        ``f0_hz`` is **log-uniform** on the valid start interval
+        ``[max(f_min_hz, f_floor), f_max_hz - bw_hz]`` so low centre frequencies are not
+        under-sampled relative to a linear uniform draw (closer to uniform occupancy in mel).
+
+        ``f_floor`` is 1 Hz when ``f_min_hz`` is 0 so ``log`` is defined; otherwise
+        ``f_floor = f_min_hz``. :func:`hz_band_to_mel_bin_range` always uses
+        ``(self.f_min_hz, self.f_max_hz)`` as the mel bank edges.
         """
         n_mels = self.n_mels
         if n_mels <= 0:
@@ -207,17 +209,7 @@ class NonStationarySpectromorphicMaskStrategy:
         if g_hi <= g_lo:
             return []
 
-        r = random.random()
-        if r < 0.45:
-            s_lo, s_hi = 0.0, 1_000.0
-        elif r < 0.80:
-            s_lo, s_hi = 1_000.0, 3_000.0
-        else:
-            s_lo, s_hi = 3_000.0, g_hi
-
-        s_lo = max(s_lo, g_lo)
-        s_hi = min(s_hi, g_hi)
-        span_hz = s_hi - s_lo
+        span_hz = g_hi - g_lo
         if span_hz <= 0:
             return []
 
@@ -226,10 +218,24 @@ class NonStationarySpectromorphicMaskStrategy:
         if bw_hi < bw_lo:
             bw_lo, bw_hi = bw_hi, bw_lo
 
+        # For log-uniform f0 when f_min is 0, avoid log(0).
+        f_log_lo = max(g_lo, 1.0)
+
         for _ in range(32):
             bw_hz = random.uniform(bw_lo, bw_hi)
-            f0_hi = max(s_lo, s_hi - bw_hz)
-            f0_hz = random.uniform(s_lo, f0_hi)
+            f0_max = g_hi - bw_hz
+            if f0_max <= g_lo:
+                continue
+            if f0_max <= f_log_lo:
+                f0_hz = random.uniform(g_lo, f0_max)
+            else:
+                log_a = math.log(max(f_log_lo, g_lo))
+                log_b = math.log(f0_max)
+                if log_b <= log_a:
+                    f0_hz = random.uniform(g_lo, f0_max)
+                else:
+                    f0_hz = math.exp(random.uniform(log_a, log_b))
+            f0_hz = max(g_lo, min(f0_hz, f0_max))
             f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, g_lo, g_hi)
             if f1 > f0:
                 return [(f0, f1)]
@@ -306,9 +312,9 @@ class NonStationarySpectromorphicMaskStrategy:
 
         f0, f1 = bands[0]
 
-        n_segs = random.randint(1, 5)
-        min_len = max(1, T // 20)
-        max_len = max(min_len, T // 3)
+        n_segs = random.randint(1, 10)
+        min_len = max(1, T // 40)
+        max_len = max(min_len, T // 5)
         for _ in range(n_segs):
             length = random.randint(min_len, max_len)
             t_start = random.randint(0, max(0, T - length))
