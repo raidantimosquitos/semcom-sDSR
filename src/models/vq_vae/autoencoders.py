@@ -293,10 +293,10 @@ if __name__ == "__main__":
 
     # Different codebook sizes: coarse smaller, fine larger
     m = VQ_VAE_2Layer(
-        hidden_channels=(256,64),
+        hidden_channels=(128,128),
         num_residual_layers=2,
-        num_embeddings=(1024, 4096),
-        embedding_dim=(256,64),
+        num_embeddings=(512, 1024),
+        embedding_dim=(128,128),
         commitment_cost=0.25,
         decay=0.99,
     ).to(device)

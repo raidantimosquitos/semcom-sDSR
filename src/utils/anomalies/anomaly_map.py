@@ -124,6 +124,16 @@ def sample_f0_bw_hz_stratified(
     return None
 
 
+def _perlin_mask_is_nonempty_binary(m: np.ndarray) -> bool:
+    """True iff ``m`` is strictly binary {0,1} and has at least one 1."""
+    if m.size == 0:
+        return False
+    flat = m.reshape(-1)
+    if not np.all((flat == 0.0) | (flat == 1.0)):
+        return False
+    return bool(flat.sum() > 0.0)
+
+
 def default_spectromorphic_perlin(
     n_mels: int,
     T: int,
@@ -182,6 +192,8 @@ class NonStationarySpectromorphicMaskStrategy:
             :func:`sample_f0_bw_hz_stratified`; if False, uniform over full range.
         hz_stratum_split_hz: boundary (Hz) between low and high strata (default 2000).
         hz_low_stratum_prob: probability to try the low stratum first (default 0.7).
+        fallback_band_bw_hz: linear bandwidth (Hz) for the time-full strip used when
+            band+renewal yields no mask or Perlin does not yield a non-empty binary mask.
     """
 
     def __init__(
@@ -197,7 +209,8 @@ class NonStationarySpectromorphicMaskStrategy:
         bw_max_hz: float = 1000.0,
         hz_stratified_sampling: bool = True,
         hz_stratum_split_hz: float = 2000.0,
-        hz_low_stratum_prob: float = 0.7,
+        hz_low_stratum_prob: float = 0.5,
+        fallback_band_bw_hz: float = 40.0,
         **_kwargs: object,
     ) -> None:
         if spectrogram_shape is not None:
@@ -215,6 +228,31 @@ class NonStationarySpectromorphicMaskStrategy:
         self.hz_stratified_sampling = bool(hz_stratified_sampling)
         self.hz_stratum_split_hz = float(hz_stratum_split_hz)
         self.hz_low_stratum_prob = float(min(max(hz_low_stratum_prob, 0.0), 1.0))
+        self.fallback_band_bw_hz = float(max(1.0, fallback_band_bw_hz))
+
+    def _fallback_time_continuous_band_mask(self) -> np.ndarray:
+        """
+        Full-time contiguous mel strip: ``bw`` Hz wide in linear frequency, all ``T`` frames 1.
+
+        ``f0`` is uniform on valid starts in ``[f_min_hz, f_max_hz]``.
+        """
+        n_mels, T = self.n_mels, self.T
+        out = np.zeros((max(0, n_mels), max(0, T)), dtype=np.float32)
+        if n_mels <= 0 or T <= 0:
+            return out
+
+        lo, hi = self.f_min_hz, self.f_max_hz
+        span = float(hi - lo)
+        if span <= 0:
+            return out
+
+        bw = min(self.fallback_band_bw_hz, span)
+        f0_hi = lo + max(0.0, span - bw)
+        f0_hz = random.uniform(lo, f0_hi) if f0_hi >= lo else lo
+        f0_bin, f1_bin = hz_band_to_mel_bin_range(f0_hz, bw, n_mels, lo, hi)
+        if f1_bin > f0_bin:
+            out[f0_bin:f1_bin, :] = 1.0
+        return out
 
     def _pick_single_hz_mel_band(self) -> list[tuple[int, int]]:
         """One contiguous band ``[f0, f1)`` in mel bins from uniform Hz ``f0``, ``bw``."""
@@ -305,7 +343,7 @@ class NonStationarySpectromorphicMaskStrategy:
         mask = np.zeros((n_mels, T), dtype=np.float32)
         bands = self._pick_single_hz_mel_band()
         if not bands:
-            return mask
+            return self._fallback_time_continuous_band_mask()
 
         f0, f1 = bands[0]
         p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
@@ -315,10 +353,15 @@ class NonStationarySpectromorphicMaskStrategy:
             T, p_on, p_off, random.random() < p_start_on
         )
         mask[f0:f1, :] = track.reshape(1, -1)
+        if float(mask.sum()) <= 0.0:
+            return self._fallback_time_continuous_band_mask()
         return mask
 
     def _perlin(self) -> np.ndarray:
-        return default_spectromorphic_perlin(self.n_mels, self.T)
+        m = default_spectromorphic_perlin(self.n_mels, self.T)
+        if not _perlin_mask_is_nonempty_binary(m):
+            return self._fallback_time_continuous_band_mask()
+        return m
 
     def __call__(
         self,
@@ -357,7 +400,8 @@ class AnomalyMapGenerator:
     :class:`StationarySpectromorphicMaskStrategy`). Hz band args (``f_min_hz``,
     ``f_max_hz``, ``bw_min_hz``, ``bw_max_hz``) apply to both strategies.
     Optional stratified Hz sampling: ``hz_stratified_sampling`` (default True),
-    ``hz_stratum_split_hz`` (default 2000), ``hz_low_stratum_prob`` (default 0.7).
+    ``hz_stratum_split_hz`` (default 2000), ``hz_low_stratum_prob`` (default 0.7),
+    ``fallback_band_bw_hz`` (default 40): Hz width for fallback time-full strip.
     """
 
     def __init__(
