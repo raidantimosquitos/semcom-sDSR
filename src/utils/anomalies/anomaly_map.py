@@ -147,7 +147,7 @@ class NonStationarySpectromorphicMaskStrategy:
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
-        bw_max_hz: float = 1000.0,
+        bw_max_hz: float = 200.0,
         fallback_band_bw_hz: float = 40.0,
         **_kwargs: object,
     ) -> None:
