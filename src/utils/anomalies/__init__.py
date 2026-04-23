@@ -1,12 +1,8 @@
 """
 Anomaly simulation utilities for AudDSR training.
 
-- AnomalyMapGenerator: spectromorphic masks; per-call ``machine_type`` selects
-  stationary vs non-stationary strategy.
-- NonStationarySpectromorphicMaskStrategy / SpectromorphicMaskStrategy (alias):
-  valve, slider-style linear-Hz band × renewal, optional Perlin
-- StationarySpectromorphicMaskStrategy: multi-band linear-Hz × renewal, Perlin (fan, pump, ToyConveyor, ToyCar)
-- AudioSpecificStrategy / LatentAlignedBandStrategy: aliases of the non-stationary class
+- AnomalyMapGenerator: spectromorphic masks.
+- SpectromorphicMaskStrategy: valve, slider-style linear-Hz band × renewal, optional Perlin
 - generate_fake_anomalies_distant: codebook-based feature replacement (distant +
   neighbor); distant mode skips a configurable nearest fraction (default 5 %)
 - generate_fake_anomalies_uniform: uniform codebook sampling for masked positions
@@ -14,13 +10,7 @@ Anomaly simulation utilities for AudDSR training.
 
 from .anomaly_map import (
     AnomalyMapGenerator,
-    AudioSpecificStrategy,
-    LatentAlignedBandStrategy,
-    NonStationarySpectromorphicMaskStrategy,
     SpectromorphicMaskStrategy,
-    default_spectromorphic_perlin,
-    hz_band_to_mel_bin_range,
-    hz_to_mel,
 )
 from .anomaly_generation import (
     generate_fake_anomalies_distant,
@@ -29,13 +19,7 @@ from .anomaly_generation import (
 
 __all__ = [
     "AnomalyMapGenerator",
-    "AudioSpecificStrategy",
-    "LatentAlignedBandStrategy",
-    "NonStationarySpectromorphicMaskStrategy",
     "SpectromorphicMaskStrategy",
-    "default_spectromorphic_perlin",
-    "hz_band_to_mel_bin_range",
-    "hz_to_mel",
     "generate_fake_anomalies_distant",
     "generate_fake_anomalies_uniform",
 ]

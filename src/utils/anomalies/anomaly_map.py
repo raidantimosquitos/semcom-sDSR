@@ -1,467 +1,285 @@
 """
-Anomaly map generation for sDSR training.
+Spectromorphic anomaly mask generation for sDSR training.
 
-Strategies (same interface: ``__call__(batch_size, device)`` → ``(B, 1, H, W)``):
-
-1. NonStationarySpectromorphicMaskStrategy – linear-Hz band (mapped to mel bins) × renewal time,
-   optional Perlin (e.g. valve, slider). Aliased as ``SpectromorphicMaskStrategy``.
-2. StationarySpectromorphicMaskStrategy – multi-band linear-Hz (mapped to mel) × independent
-   renewal time, optional Perlin (fan, pump, ToyConveyor, ToyCar).
-
-:class:`AnomalyMapGenerator` holds both and dispatches from the DCASE ``machine_type``
-argument on each generate call.
+One strategy: pick a mel band (stratified Hz → mel), modulate over time
+with alternating geometric renewal runs. Perlin noise as an optional
+regularizer. Never produces a fully-filled time strip.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any
 import random
+from typing import Sequence
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from .perlin import rand_perlin_2d_np
 
-def hz_to_mel(hz: float) -> float:
-    """Mel scale (Hz) — same family as typical log-mel frontends."""
+
+# ---------------------------------------------------------------------------
+# Frequency utilities
+# ---------------------------------------------------------------------------
+
+def _hz_to_mel(hz: float) -> float:
     return 2595.0 * math.log10(1.0 + max(hz, 0.0) / 700.0)
 
-def hz_band_to_mel_bin_range(
+
+def _hz_band_to_mel_bins(
     f0_hz: float,
     bw_hz: float,
     n_mels: int,
     f_min_hz: float,
     f_max_hz: float,
 ) -> tuple[int, int]:
+    """Map a linear-Hz band to half-open mel-bin indices [i0, i1)."""
+    mel_min = _hz_to_mel(f_min_hz)
+    mel_span = _hz_to_mel(f_max_hz) - mel_min
+    if mel_span <= 0:
+        return 0, 1
+
+    def to_bin(hz: float) -> float:
+        return (_hz_to_mel(hz) - mel_min) / mel_span * n_mels
+
+    i0 = max(0, min(n_mels - 1, int(math.floor(to_bin(max(f_min_hz, f0_hz))))))
+    i1 = max(i0 + 1, min(n_mels, int(math.ceil(to_bin(min(f_max_hz, f0_hz + bw_hz))))))
+    return i0, i1
+
+
+# ---------------------------------------------------------------------------
+# Time modulation
+# ---------------------------------------------------------------------------
+
+def _alternating_renewal(T: int, p_on: float, p_off: float, start_on: bool) -> np.ndarray:
     """
-    Map a linear-frequency band ``[f0_hz, f0_hz + bw_hz)`` (clipped to ``[f_min_hz, f_max_hz]``)
-    to half-open mel-bin indices ``[i0, i1)`` consistent with a uniform mel partition between
-    ``f_min_hz`` and ``f_max_hz`` (same convention as spacing along the mel axis in log-mel).
+    Binary (T,) vector from alternating geometric on/off runs.
+    Guaranteed to have both 0s and 1s for typical p values.
     """
-    if n_mels <= 0:
-        return 0, 0
-    f_min_hz = float(f_min_hz)
-    f_max_hz = float(f_max_hz)
-    if f_max_hz <= f_min_hz:
-        return 0, min(1, n_mels)
-
-    f_lo = max(f_min_hz, f0_hz)
-    f_hi = min(f_max_hz, f0_hz + max(bw_hz, 0.0))
-    if f_hi <= f_lo:
-        f_hi = min(f_max_hz, f_lo + 1.0)
-
-    mel_min = hz_to_mel(f_min_hz)
-    mel_max = hz_to_mel(f_max_hz)
-    span = mel_max - mel_min
-    if span <= 0:
-        return 0, min(1, n_mels)
-
-    m_lo = hz_to_mel(f_lo)
-    m_hi = hz_to_mel(f_hi)
-    i0 = (m_lo - mel_min) / span * n_mels
-    i1 = (m_hi - mel_min) / span * n_mels
-
-    start_f = int(math.floor(i0))
-    end_f = int(math.ceil(i1))
-    start_f = max(0, min(n_mels - 1, start_f))
-    end_f = max(start_f + 1, min(n_mels, end_f))
-    return start_f, end_f
+    out = np.zeros(T, dtype=np.float32)
+    t, state = 0, start_on
+    while t < T:
+        p = p_on if state else p_off
+        run = min(max(1, int(np.random.geometric(p))), T - t)
+        if state:
+            out[t : t + run] = 1.0
+        t += run
+        state = not state
+    return out
 
 
-def _perlin_mask_is_nonempty_binary(m: np.ndarray) -> bool:
-    """True iff ``m`` is strictly binary {0,1} and has at least one 1."""
-    if m.size == 0:
-        return False
-    flat = m.reshape(-1)
-    if not np.all((flat == 0.0) | (flat == 1.0)):
-        return False
-    return bool(flat.sum() > 0.0)
+def _renewal_params(T: int) -> tuple[float, float]:
+    """Log-uniform mean run lengths in [10, T-1], returned as geometric p values."""
+    lo, hi = math.log(10.0), math.log(max(11.0, T - 1.0))
+    mu_on  = math.exp(random.uniform(lo, hi))
+    mu_off = math.exp(random.uniform(lo, hi))
+    eps = 1e-6
+    p_on  = float(np.clip(1.0 / mu_on,  eps, 1 - eps))
+    p_off = float(np.clip(1.0 / mu_off, eps, 1 - eps))
+    return p_on, p_off
 
 
-def default_spectromorphic_perlin(
-    n_mels: int,
-    T: int,
-) -> np.ndarray:
-    """
-    Thresholded 2-D Perlin noise (non-stationary / stationary Perlin branch).
+# ---------------------------------------------------------------------------
+# Perlin regularizer
+# ---------------------------------------------------------------------------
 
-    Perlin ``res`` is the low-frequency grid size along mel and time. It must stay
-    on the order of the spectrogram dimensions; otherwise ``rand_perlin_2d_np``
-    builds enormous intermediate grids (e.g. if ``res_x`` were ``2**(res_y+k)``
-    with ``res_y`` already a power of two, ``res_x`` could reach ``2^19``).
-
-    If the binary mask is empty after thresholding, returns the raw noise field
-    (soft fallback) so the result is still usable.
-    """
-    if n_mels <= 0 or T <= 0:
-        return np.zeros((max(0, n_mels), max(0, T)), dtype=np.float32)
-
-    # Independent coarse scales in [2, 16] on each axis (cost ~ O(n_mels * T)).
-    res_y = 2 ** random.randint(1, 4)
-    res_x = 2 ** random.randint(1, 4)
-    res_y = max(2, min(res_y, n_mels))
-    res_x = max(2, min(res_x, T))
+def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
+    """Thresholded 2-D Perlin noise, binary output. Falls back to soft noise if empty."""
+    res_y = max(2, min(2 ** random.randint(1, 4), n_mels))
+    res_x = max(2, min(2 ** random.randint(1, 4), T))
     noise = rand_perlin_2d_np((n_mels, T), (res_y, res_x))
-    threshold = random.uniform(0.3, 0.6)
-    mask = (noise > threshold).astype(np.float32)
-    if mask.sum() > 0:
-        return mask
-    else:
-        return noise.astype(np.float32)
+    mask = (noise > random.uniform(0.3, 0.6)).astype(np.float32)
+    return mask if mask.sum() > 0 else noise.astype(np.float32)
 
 
-class NonStationarySpectromorphicMaskStrategy:
+# ---------------------------------------------------------------------------
+# Frequency band sampler
+# ---------------------------------------------------------------------------
+
+# Stratified Hz bands (low / mid / high). Keeps coverage of the full spectrum.
+_HZ_STRATA: list[tuple[float, float]] = [(0.0, 1000.0), (1000.0, 3000.0), (3000.0, 8000.0)]
+
+
+def _sample_mel_band(
+    n_mels: int,
+    f_min_hz: float,
+    f_max_hz: float,
+    bw_min_hz: float,
+    bw_max_hz: float,
+    max_tries: int = 32,
+) -> tuple[int, int] | None:
     """
-    Non-stationary synthetic anomaly masks for spectrograms.
+    Sample one mel band via stratified Hz selection.
+    Returns (i0, i1) or None if no valid band found within max_tries.
+    """
+    for _ in range(max_tries):
+        b_lo, b_hi = random.choice(_HZ_STRATA)
+        lo = max(f_min_hz, b_lo)
+        hi = min(f_max_hz, b_hi)
+        if hi - lo < 1.0:
+            continue
 
-    Each sample is either:
+        bw = random.uniform(
+            min(bw_min_hz, hi - lo),
+            min(bw_max_hz, hi - lo),
+        )
+        f0 = random.uniform(lo, hi - bw)
+        i0, i1 = _hz_band_to_mel_bins(f0, bw, n_mels, f_min_hz, f_max_hz)
+        if i1 > i0:
+            return i0, i1
+    return None
 
-      1. **Band + renewal time** (probability ``1 - perlin_prob``): exactly one
-         contiguous mel band. ``f0_hz`` is sampled by **stratifying the linear frequency axis**
-         into low/mid/high bands and sampling those equiprobably; ``bw_hz`` is sampled **uniformly**
-         in Hz and mapped to mel bins via
-         :func:`hz_band_to_mel_bin_range` using ``(f_min_hz, f_max_hz)`` as the mel bank.
 
-      2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
-         for blob-shaped masks.
+# ---------------------------------------------------------------------------
+# Main strategy
+# ---------------------------------------------------------------------------
 
-    Output is binary, shape ``(1, 1, n_mels, T)``. Callers may downsample with
-    ``F.interpolate`` when ``q_shape`` differs from spectrogram resolution.
+class SpectromorphicMaskStrategy:
+    """
+    Spectromorphic anomaly masks: a mel band modulated over time.
+
+    Each mask is one of:
+      - **Band + renewal** (prob ``1 - perlin_prob``): a stratified Hz band
+        mapped to mel bins, activated over time by alternating geometric runs.
+        Never a fully continuous strip — the renewal process always creates gaps.
+      - **Perlin** (prob ``perlin_prob``): thresholded 2-D Perlin noise for
+        blob-shaped masks.
 
     Args:
-        perlin_prob: probability of choosing the Perlin branch per mask.
-        f_min_hz, f_max_hz: linear frequency range matching the mel spectrogram (Hz).
-        bw_min_hz, bw_max_hz: uniform range for band width in Hz (machine-like bands).
-        fallback_band_bw_hz: linear bandwidth (Hz) for the time-full strip used when
-            band+renewal yields no mask or Perlin does not yield a non-empty binary mask.
+        n_mels: mel bins in the spectrogram.
+        T: time frames in the spectrogram.
+        q_shape: output spatial shape; masks are interpolated if it differs from (n_mels, T).
+        perlin_prob: probability of the Perlin branch per mask.
+        f_min_hz, f_max_hz: mel filterbank frequency range (Hz).
+        bw_min_hz, bw_max_hz: uniform range for band width (Hz).
     """
+
+    # Hard fallback: a very narrow partial-time band used only if _sample_mel_band fails.
+    _FALLBACK_BW_HZ = 40.0
 
     def __init__(
         self,
-        spectrogram_shape: tuple[int, int] | None = None,
+        n_mels: int = 128,
+        T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        n_mels: int | None = None,
-        T: int | None = None,
         perlin_prob: float = 0.15,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
-        bw_max_hz: float = 1000.0,
-        fallback_band_bw_hz: float = 40.0,
-        **_kwargs: object,
+        bw_max_hz: float = 1_000.0,
+        **_: object,
     ) -> None:
-        if spectrogram_shape is not None:
-            self.n_mels = n_mels or spectrogram_shape[0]
-            self.T = T or spectrogram_shape[1]
-        else:
-            self.n_mels = n_mels or 128
-            self.T = T or 320
-        self.q_shape = q_shape or (self.n_mels, self.T)
-        self.perlin_prob = float(min(max(perlin_prob, 0.0), 1.0))
-        self.f_min_hz = float(f_min_hz)
-        self.f_max_hz = float(f_max_hz)
-        self.bw_min_hz = float(max(0.0, bw_min_hz))
-        self.bw_max_hz = float(max(self.bw_min_hz, bw_max_hz))
-        self.fallback_band_bw_hz = float(max(1.0, fallback_band_bw_hz))
+        self.n_mels = n_mels
+        self.T = T
+        self.q_shape = q_shape or (n_mels, T)
+        self.perlin_prob = float(np.clip(perlin_prob, 0.0, 1.0))
+        self.f_min_hz = f_min_hz
+        self.f_max_hz = f_max_hz
+        self.bw_min_hz = bw_min_hz
+        self.bw_max_hz = bw_max_hz
 
-    def _fallback_time_continuous_band_mask(self) -> np.ndarray:
-        """
-        Full-time contiguous mel strip: ``bw`` Hz wide in linear frequency, all ``T`` frames 1.
+    # -- mask builders -------------------------------------------------------
 
-        ``f0`` is uniform on valid starts in ``[f_min_hz, f_max_hz]``.
-        """
-        n_mels, T = self.n_mels, self.T
-        out = np.zeros((max(0, n_mels), max(0, T)), dtype=np.float32)
-        if n_mels <= 0 or T <= 0:
-            return out
+    def _band_mask(self) -> np.ndarray:
+        """Mel band × renewal-modulated time vector."""
+        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
 
-        lo, hi = self.f_min_hz, self.f_max_hz
-        span = float(hi - lo)
-        if span <= 0:
-            return out
-
-        bw = min(self.fallback_band_bw_hz, span)
-        f0_hi = lo + max(0.0, span - bw)
-        f0_hz = random.uniform(lo, f0_hi) if f0_hi >= lo else lo
-        f0_bin, f1_bin = hz_band_to_mel_bin_range(f0_hz, bw, n_mels, lo, hi)
-        if f1_bin > f0_bin:
-            out[f0_bin:f1_bin, :] = 1.0
-        return out
-
-    def _pick_single_hz_mel_band(self) -> list[tuple[int, int]]:
-        """
-        One contiguous band ``[f0, f1)`` in mel bins.
-
-        Frequency-axis stratification (equiprobable):
-        - low: 0–1 kHz
-        - mid: 1–3 kHz
-        - high: 3–8 kHz
-
-        ``bw_hz`` is sampled **uniformly** in ``[bw_min_hz, bw_max_hz]`` (clipped to the
-        chosen band span). ``f0_hz`` is sampled **uniformly** over valid starts within
-        the chosen band. :func:`hz_band_to_mel_bin_range` always maps using
-        ``(self.f_min_hz, self.f_max_hz)`` as the mel bank edges.
-        """
-        n_mels = self.n_mels
-        if n_mels <= 0:
-            return []
-
-        g_lo, g_hi = self.f_min_hz, self.f_max_hz
-        if g_hi <= g_lo:
-            return []
-
-        # Stratify linear Hz axis into three bands.
-        bands: list[tuple[float, float]] = [
-            (0.0, 1_000.0),
-            (1_000.0, 3_000.0),
-            (3_000.0, 8_000.0),
-        ]
-
-        for _ in range(32):
-            b_lo, b_hi = random.choice(bands)
-            lo = max(g_lo, b_lo)
-            hi = min(g_hi, b_hi)
-            span_hz = hi - lo
-            if span_hz <= 1.0:
-                continue
-
-            bw_lo = min(self.bw_min_hz, span_hz)
-            bw_hi = min(self.bw_max_hz, span_hz)
-            if bw_hi < bw_lo:
-                bw_lo, bw_hi = bw_hi, bw_lo
-            bw_hz = random.uniform(bw_lo, bw_hi)
-
-            f0_max = hi - bw_hz
-            if f0_max <= lo:
-                continue
-            f0_hz = random.uniform(lo, f0_max)
-
-            f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, g_lo, g_hi)
-            if f1 > f0:
-                return [(f0, f1)]
-        return []
-
-    def _hierarchical_renewal_params(self, T: int) -> tuple[float, float, float, float]:
-        """
-        Geometric run lengths: mean on-run ``mu_on``, mean off-run ``mu_off``,
-        each log-uniform in [1, T]. Return ``(p_on, p_off, mu_on, mu_off)`` with
-        ``p = 1/mu`` for ``np.random.geometric``.
-        """
-        Tm = max(T, 1)
-        lo = math.log(1.0 + 10.0)
-        hi = math.log(float(Tm-1.0))
-        mu_on = math.exp(random.uniform(lo, hi))
-        mu_off = math.exp(random.uniform(lo, hi)) 
-
-        p_on = 1.0 / max(mu_on, 1.0)
-        p_off = 1.0 / max(mu_off, 1.0)
-        eps = 1e-6
-        p_on = min(max(p_on, eps), 1.0 - eps)
-        p_off = min(max(p_off, eps), 1.0 - eps)
-        return p_on, p_off, mu_on, mu_off
-
-    @staticmethod
-    def _alternating_renewal_1d(
-        T: int,
-        p_on: float,
-        p_off: float,
-        start_on: bool,
-    ) -> np.ndarray:
-        """Binary (T,) via alternating on/off geometric runs, truncated to T."""
-        a = np.zeros(T, dtype=np.float32)
-        if T <= 0:
-            return a
-        t = 0
-        on = start_on
-        while t < T:
-            p = p_on if on else p_off
-            L = int(np.random.geometric(p))
-            L = max(1, min(L, T - t))
-            if on:
-                a[t : t + L] = 1.0
-            t += L
-            on = not on
-        return a
-
-    def _band_time_segments(self) -> np.ndarray:
-        """
-        Binary mask: one Hz-derived mel band × time from alternating renewal
-        (geometric runs, hierarchical means).
-        """
-        n_mels, T = self.n_mels, self.T
-        mask = np.zeros((n_mels, T), dtype=np.float32)
-        bands = self._pick_single_hz_mel_band()
-        if not bands:
-            return self._fallback_time_continuous_band_mask()
-
-        f0, f1 = bands[0]
-
-        p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
-        denom = mu_on + mu_off
-        p_start_on = (mu_on / denom) if denom > 0 else 0.5
-        track = self._alternating_renewal_1d(
-           T, p_on, p_off, random.random() < p_start_on
+        band = _sample_mel_band(
+            self.n_mels, self.f_min_hz, self.f_max_hz, self.bw_min_hz, self.bw_max_hz
         )
-        mask[f0:f1, :] = track.reshape(1, -1)
+        if band is None:
+            # Hard fallback: tiny band, partial time via a single renewal
+            band = _hz_band_to_mel_bins(
+                self.f_min_hz, self._FALLBACK_BW_HZ,
+                self.n_mels, self.f_min_hz, self.f_max_hz,
+            )
 
-        if float(mask.sum()) <= 0.0:
-            return self._fallback_time_continuous_band_mask()
+        i0, i1 = band
+        p_on, p_off = _renewal_params(self.T)
+        mu_on = 1.0 / p_on
+        start_on = random.random() < mu_on / (mu_on + 1.0 / p_off)
+        time_track = _alternating_renewal(self.T, p_on, p_off, start_on)
+        mask[i0:i1, :] = time_track
         return mask
 
-    def _perlin(self) -> np.ndarray:
-        m = default_spectromorphic_perlin(self.n_mels, self.T)
-        if not _perlin_mask_is_nonempty_binary(m):
-            return self._fallback_time_continuous_band_mask()
-        return m
+    def _perlin_mask(self) -> np.ndarray:
+        return _perlin_mask(self.n_mels, self.T)
 
-    def __call__(
-        self,
-        batch_size: int,
-        device: torch.device | str,
-    ) -> torch.Tensor:
-        masks = []
-        for _ in range(batch_size):
-            if random.random() < self.perlin_prob:
-                m = self._perlin()
-            else:
-                m = self._band_time_segments()
-            masks.append(torch.from_numpy(m).unsqueeze(0).unsqueeze(0))
+    # -- public interface ----------------------------------------------------
+
+    def __call__(self, batch_size: int, device: torch.device | str) -> torch.Tensor:
+        """Return ``(B, 1, *q_shape)`` binary float32 mask tensor."""
+        masks = [
+            torch.from_numpy(
+                self._perlin_mask() if random.random() < self.perlin_prob else self._band_mask()
+            ).unsqueeze(0).unsqueeze(0)
+            for _ in range(batch_size)
+        ]
         M = torch.cat(masks, dim=0).to(device)
         if self.q_shape != (self.n_mels, self.T):
             M = F.interpolate(M, size=self.q_shape, mode="nearest")
         return M
 
+
 # ---------------------------------------------------------------------------
-# 2. AnomalyMapGenerator — unified entry point
+# AnomalyMapGenerator — training entry point
 # ---------------------------------------------------------------------------
 
 class AnomalyMapGenerator:
     """
-    Build spectromorphic anomaly masks for training.
+    Wraps :class:`SpectromorphicMaskStrategy` for training-loop use.
 
-    Holds both stationary and non-stationary strategies. Each call selects
-    :class:`StationarySpectromorphicMaskStrategy` vs :class:`NonStationarySpectromorphicMaskStrategy`
-    from the DCASE ``machine_type`` (``None`` → non-stationary).
-
-    When ``force_anomaly=False``, each index independently receives an all-zero mask
-    with probability ``zero_mask_prob``.
-
-    Extra keyword arguments are forwarded to **both** strategy classes; each ignores
-    keys it does not use (e.g. ``mel_n_bands_max`` only affects
-    :class:`StationarySpectromorphicMaskStrategy`). Hz band args (``f_min_hz``,
-    ``f_max_hz``, ``bw_min_hz``, ``bw_max_hz``) apply to both strategies.
-    ``fallback_band_bw_hz`` (default 40): Hz width for fallback time-full strip.
+    Args:
+        spectrogram_shape: ``(n_mels, T)`` of the model input.
+        q_shape: output shape (defaults to ``spectrogram_shape``).
+        zero_mask_prob: probability of an all-zero (normal) mask when
+            ``force_anomaly=False``.
+        **strategy_kwargs: forwarded to :class:`SpectromorphicMaskStrategy`.
     """
 
     def __init__(
         self,
         spectrogram_shape: tuple[int, int],
         q_shape: tuple[int, int] | None = None,
-        n_mels: int | None = None,
-        T: int | None = None,
         zero_mask_prob: float = 0.5,
-        **strategy_kwargs: Any,
+        **strategy_kwargs,
     ) -> None:
+        n_mels, T = spectrogram_shape
         self.spectrogram_shape = spectrogram_shape
         self.q_shape = q_shape or spectrogram_shape
         self.zero_mask_prob = zero_mask_prob
-
-        _n_mels = n_mels or spectrogram_shape[0]
-        _T = T or spectrogram_shape[1]
-
-        self._nonstationary = NonStationarySpectromorphicMaskStrategy(
-            spectrogram_shape,
-            self.q_shape,
-            _n_mels,
-            _T,
-            **strategy_kwargs,
+        self._strategy = SpectromorphicMaskStrategy(
+            n_mels=n_mels, T=T, q_shape=self.q_shape, **strategy_kwargs
         )
-
-    def _strategy(
-        self,
-        machine_type: str | None,
-    ) -> NonStationarySpectromorphicMaskStrategy:
-        return (
-            self._nonstationary
-        )
-
-    def _generate_one(
-        self,
-        device: torch.device | str,
-        machine_type: str | None = None,
-    ) -> torch.Tensor:
-        """Generate a single non-zero mask ``(1, 1, H, W)``."""
-        return self._strategy(machine_type)(1, device)
-
-    def generate_for_training_sample(
-        self,
-        device: torch.device | str,
-        force_anomaly: bool = True,
-        machine_type: str | None = None,
-    ) -> torch.Tensor:
-        """Generate one mask for a single training sample (convenience wrapper)."""
-        if force_anomaly:
-            return self._generate_one(device, machine_type)
-        mt_list = [machine_type] if machine_type is not None else None
-        return self.generate(1, device, force_anomaly=False, machine_types=mt_list)
 
     def generate(
         self,
         batch_size: int,
         device: torch.device | str,
         force_anomaly: bool = False,
-        machine_types: list[str] | None = None,
     ) -> torch.Tensor:
         """
-        Generate a batch of anomaly masks.
+        Generate ``(B, 1, *q_shape)`` anomaly masks.
 
-        Args:
-            batch_size: number of masks
-            device: torch device
-            force_anomaly: if True, skip ``zero_mask_prob`` (always real masks)
-            machine_types: optional length-``batch_size`` list of DCASE machine types.
-                If ``None``, every mask uses the non-stationary strategy.
-
-        Returns:
-            ``M``: ``(B, 1, n_mels, T)`` binary mask
+        If ``force_anomaly=True``, all masks are non-zero.
+        Otherwise each is zeroed with probability ``zero_mask_prob``.
         """
-        if machine_types is not None and len(machine_types) != batch_size:
-            raise ValueError(
-                f"machine_types length ({len(machine_types)}) must equal batch_size ({batch_size})"
-            )
-
         if force_anomaly:
-            return torch.cat(
-                [
-                    self._generate_one(
-                        device,
-                        None if machine_types is None else machine_types[i],
-                    )
-                    for i in range(batch_size)
-                ],
-                dim=0,
-            )
+            return self._strategy(batch_size, device)
 
-        masks: list[torch.Tensor] = []
-        for i in range(batch_size):
+        masks = []
+        for _ in range(batch_size):
             if random.random() < self.zero_mask_prob:
-                masks.append(
-                    torch.zeros(
-                        1,
-                        1,
-                        *self.spectrogram_shape,
-                        device=device,
-                        dtype=torch.float32,
-                    )
-                )
+                masks.append(torch.zeros(1, 1, *self.spectrogram_shape, device=device))
             else:
-                mt = None if machine_types is None else machine_types[i]
-                masks.append(self._generate_one(device, mt))
+                masks.append(self._strategy(1, device))
         return torch.cat(masks, dim=0)
 
-
-# Backward-compatible names (non-stationary class)
-SpectromorphicMaskStrategy = NonStationarySpectromorphicMaskStrategy
-LatentAlignedBandStrategy = NonStationarySpectromorphicMaskStrategy
-AudioSpecificStrategy = NonStationarySpectromorphicMaskStrategy
+    def generate_for_training_sample(
+        self,
+        device: torch.device | str,
+        force_anomaly: bool = True,
+    ) -> torch.Tensor:
+        """Convenience wrapper for a single sample."""
+        return self.generate(1, device, force_anomaly=force_anomaly)
