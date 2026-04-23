@@ -49,7 +49,7 @@ class sDSRConfig:
     anomaly_strength_fine: Tuple[float, float] = (0.3, 0.99)
     anomaly_strength_coarse: Tuple[float, float] = (0.25, 0.98)
     neighbor_prob: float = 0.05
-    use_subspace_restriction: bool = True
+    use_subspace_restriction: bool = False
     # Stage-2 latent injection: "uniform" = P(fine-only)=P(coarse-only)=P(both)=1/3;
     # "dsr" = P(both)=0.5, P(fine-only)=P(coarse-only)=0.25 (same tree as DSR use_both then use_hi/use_lo).
     anomaly_inj_distribution: Literal["uniform", "dsr"] = "dsr"
