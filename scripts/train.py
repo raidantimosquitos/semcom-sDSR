@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--lr", type=float, default=2e-4)
     s1.add_argument("--num_embeddings_coarse", type=int, default=512)
     s1.add_argument("--num_embeddings_fine", type=int, default=1024)
-    s1.add_argument("--embedding_dim_fine", type=int, default=128)
+    s1.add_argument("--embedding_dim_fine", type=int, default=64)
     s1.add_argument("--embedding_dim_coarse", type=int, default=128)
     s1.add_argument("--hidden_channels_fine", type=int, default=128)
     s1.add_argument("--hidden_channels_coarse", type=int, default=256)

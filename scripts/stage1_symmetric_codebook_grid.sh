@@ -28,7 +28,6 @@ MACHINE_TYPES=(fan pump slider valve ToyCar ToyConveyor)
 # Must match train.py: "+".join(sorted(machine_types))
 RUN_NAME="ToyCar+ToyConveyor+fan+pump+slider+valve"
 
-CODEBOOK_SIZES=(512 1024 2048)
 # (num_embeddings_coarse, num_embeddings_fine)
 # NOTE: last value is 2046 as requested (not a power of two).
 CODEBOOK_PAIRS=(
