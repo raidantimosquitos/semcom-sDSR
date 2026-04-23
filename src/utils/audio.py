@@ -39,9 +39,9 @@ def load_mel_for_dir(
 
 def standardize_spectrogram(mel_db):
     # mel_db: (1, n_mels, T) in dB, already floor-clipped
-    mean = mel_db.mean(dim=(1, 2), keepdim=True)
-    std = mel_db.std(dim=(1, 2), keepdim=True)
-    return (mel_db - mean) / (std + 1e-8)
+    lo = mel_db.amin(dim=(1, 2), keepdim=True)
+    hi = mel_db.amax(dim=(1, 2), keepdim=True)
+    return (mel_db - lo) / (hi - lo + _EPS)
 
 def log_mel_to_rgb(log_mel: torch.Tensor, cmap: colors.Colormap | None = None) -> torch.Tensor:
     """Convert log-mel spectrogram (1 or 2D) to RGB tensor (3, n_mels, T) in [0, 1]."""
