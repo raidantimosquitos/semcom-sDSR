@@ -315,8 +315,8 @@ class sDSR(nn.Module):
         x_specific, aux = out_dec
         m_out = self._anomaly_detection(x_specific.detach(), x_general.detach())
 
-        # DSR-style focal target: pool M_gt to fine/coarse latent grids (same as
-        # injection), nearest-upsample to spectrogram resolution, mix by inj_mode.
+        # DSR-style focal target: same max_pool projection as feature injection,
+        # then nearest-upsample to spectrogram resolution, mix by inj_mode.
         _, _, n_mels, T_spec = M_gt.shape
         H_fine, W_fine = q_fine.shape[2], q_fine.shape[3]
         H_coarse, W_coarse = q_coarse.shape[2], q_coarse.shape[3]

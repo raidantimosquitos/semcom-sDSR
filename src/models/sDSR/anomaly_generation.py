@@ -17,24 +17,18 @@ from ...utils.anomalies import (
 )
 
 
-def _match_mask_size(mask: torch.Tensor, target: tuple[int, int]) -> torch.Tensor:
-    """Pad or crop mask to target (H, W)."""
-    H, W = target
-    _, _, h, w = mask.shape
-    if h < H or w < W:
-        mask = F.pad(mask, (0, max(0, W - w), 0, max(0, H - h)), value=0.0)
-    if mask.shape[2] > H or mask.shape[3] > W:
-        mask = mask[:, :, :H, :W].contiguous()
-    return mask
-
-
 def spec_to_latent_pool_stride(
     H_spec: int,
     W_spec: int,
     H_lat: int,
     W_lat: int,
 ) -> tuple[int, int]:
-    """Kernel/stride for pooling a spectrogram-shaped mask onto a latent grid."""
+    """
+    DSR down_ratio per axis: ``(H_spec//H_lat, W_spec//W_lat)`` with floor division.
+
+    Used as ``kernel_size`` and ``stride`` in :func:`project_spec_mask_to_latent_binary`
+    (same as the reference ``int(mask/emb)`` rule). Each component is at least 1.
+    """
     return (max(1, H_spec // H_lat), max(1, W_spec // W_lat))
 
 
@@ -44,25 +38,28 @@ def project_spec_mask_to_latent_binary(
     W_lat: int,
 ) -> torch.Tensor:
     """
-    Pool ``M`` from spectrogram resolution to ``(H_lat, W_lat)``, then binarize.
+    DSR rule: pool the spectrogram mask with ``max_pool2d`` using
+    ``kernel_size = stride = (H_spec//H_lat, W_spec//W_lat)`` — no padding,
+    no crop, no forced resize to ``(H_lat, W_lat)``.
 
-    Same rule as :meth:`AnomalyGeneration.forward`: avg_pool over each latent
-    footprint, pad/crop to exact latent shape, then ``> 0`` so any active spec
-    pixel marks the latent cell.
+    Binarize with ``> 0`` so any positive mass in a window yields 1. Output
+    height/width follow PyTorch pooling; they match ``(H_lat, W_lat)`` when
+    dimensions are commensurate (typical DSR / VQ case). If they differ,
+    ``generate_fake_anomalies_distant`` / ``generate_fake_anomalies_uniform``
+    align the mask to the feature map with nearest interpolation.
 
     Args:
         M: (B, 1, H_spec, W_spec) mask at spectrogram resolution
-        H_lat, W_lat: target latent height and width
+        H_lat, W_lat: spatial size of the corresponding latent / quantized map
+            (used only to define the down_ratio, as in DSR)
 
     Returns:
-        (B, 1, H_lat, W_lat) float in ``{0.0, 1.0}``
+        (B, 1, H', W') with ``H'``/``W'`` the pooled size; values in ``{0.0, 1.0}``
     """
     M_float = M.float()
     H_spec, W_spec = M_float.shape[2], M_float.shape[3]
-    stride = spec_to_latent_pool_stride(H_spec, W_spec, H_lat, W_lat)
-    M_lat = F.avg_pool2d(M_float, kernel_size=stride, stride=stride)
-    if M_lat.shape[2] != H_lat or M_lat.shape[3] != W_lat:
-        M_lat = _match_mask_size(M_lat, (H_lat, W_lat))
+    k = spec_to_latent_pool_stride(H_spec, W_spec, H_lat, W_lat)
+    M_lat = F.max_pool2d(M_float, kernel_size=k, stride=k)
     return (M_lat > 0).float()
 
 
@@ -125,8 +122,9 @@ class AnomalyGeneration(nn.Module):
 
         Args:
             q_fine, q_coarse: quantized features (B, emb_dim, H, W) each
-            M: (B, 1, n_mels, T) anomaly mask at spectrogram shape; resized to
-               fine/coarse latent grid dimensions (paper: "M is then resized to fit").
+            M: (B, 1, n_mels, T) anomaly mask at spectrogram shape; DSR
+               max-pool to latent scale (no forced resize; see
+               :func:`project_spec_mask_to_latent_binary`).
             vq_fine, vq_coarse: VectorQuantizerEMA modules (for codebook access)
             z_fine, z_coarse: optional pre-quantize features (used only for "distant")
             strength_fine, strength_coarse: anomaly strength [0.2, 1.0] (used only for "distant")

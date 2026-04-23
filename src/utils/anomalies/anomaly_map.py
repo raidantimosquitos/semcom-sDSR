@@ -69,6 +69,20 @@ def hz_band_to_mel_bin_range(
     return start_f, end_f
 
 
+def _log_uniform_positive(lo: float, hi: float) -> float:
+    """Sample ``X`` with log-uniform density on ``[lo, hi]``; clamp to ``[lo, hi]``."""
+    if hi <= lo:
+        return lo
+    if lo <= 0.0:
+        return random.uniform(lo, hi)
+    log_a = math.log(lo)
+    log_b = math.log(hi)
+    if log_b <= log_a:
+        return random.uniform(lo, hi)
+    x = math.exp(random.uniform(log_a, log_b))
+    return max(lo, min(x, hi))
+
+
 def _perlin_mask_is_nonempty_binary(m: np.ndarray) -> bool:
     """True iff ``m`` is strictly binary {0,1} and has at least one 1."""
     if m.size == 0:
@@ -118,8 +132,8 @@ class NonStationarySpectromorphicMaskStrategy:
     Each sample is either:
 
       1. **Band + renewal time** (probability ``1 - perlin_prob``): exactly one
-         contiguous mel band. ``bw_hz ~ Uniform(bw_min_hz, bw_max_hz)`` (clipped to span);
-         ``f0_hz`` is **log-uniform** on valid starts in Hz, then mapped to mel bins via
+         contiguous mel band. ``bw_hz`` and ``f0_hz`` are **log-uniform** in Hz (over valid
+         intervals; clipped to span), then mapped to mel bins via
          :func:`hz_band_to_mel_bin_range` using ``(f_min_hz, f_max_hz)`` as the mel bank.
 
       2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
@@ -192,7 +206,8 @@ class NonStationarySpectromorphicMaskStrategy:
         """
         One contiguous band ``[f0, f1)`` in mel bins.
 
-        ``bw_hz`` is uniform in ``[bw_min_hz, bw_max_hz]`` (clipped to the global Hz span).
+        ``bw_hz`` is **log-uniform** in ``[bw_min_hz, bw_max_hz]`` (clipped to the global Hz
+        span) so narrow bands are not under-sampled vs wide ones under linear uniform Hz.
         ``f0_hz`` is **log-uniform** on the valid start interval
         ``[max(f_min_hz, f_floor), f_max_hz - bw_hz]`` so low centre frequencies are not
         under-sampled relative to a linear uniform draw (closer to uniform occupancy in mel).
@@ -222,19 +237,15 @@ class NonStationarySpectromorphicMaskStrategy:
         f_log_lo = max(g_lo, 1.0)
 
         for _ in range(32):
-            bw_hz = random.uniform(bw_lo, bw_hi)
+            bw_hz = _log_uniform_positive(bw_lo, bw_hi)
             f0_max = g_hi - bw_hz
             if f0_max <= g_lo:
                 continue
             if f0_max <= f_log_lo:
                 f0_hz = random.uniform(g_lo, f0_max)
             else:
-                log_a = math.log(max(f_log_lo, g_lo))
-                log_b = math.log(f0_max)
-                if log_b <= log_a:
-                    f0_hz = random.uniform(g_lo, f0_max)
-                else:
-                    f0_hz = math.exp(random.uniform(log_a, log_b))
+                f0_hz = _log_uniform_positive(f_log_lo, f0_max)
+                f0_hz = max(g_lo, f0_hz)
             f0_hz = max(g_lo, min(f0_hz, f0_max))
             f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, g_lo, g_hi)
             if f1 > f0:
@@ -256,7 +267,7 @@ class NonStationarySpectromorphicMaskStrategy:
         # Regime coin flip — reflects that most machines are stationary
         regime = random.random()
         
-        if regime < 0.50:
+        if regime < 0.2:
             # Stationary: band is on for most/all of the recording (fan, pump, slider, conveyor)
             mu_on  = math.exp(random.uniform(math.log(T // 2), math.log(T * 2)))
             mu_off = math.exp(random.uniform(math.log(1), math.log(T // 4)))
@@ -312,21 +323,21 @@ class NonStationarySpectromorphicMaskStrategy:
 
         f0, f1 = bands[0]
 
-        n_segs = random.randint(1, 10)
-        min_len = max(1, T // 40)
-        max_len = max(min_len, T // 5)
-        for _ in range(n_segs):
-            length = random.randint(min_len, max_len)
-            t_start = random.randint(0, max(0, T - length))
-            mask[f0:f1, t_start:t_start + length] = 1.0
+        # n_segs = random.randint(1, 5)
+        # min_len = max(1, T // 40)
+        # max_len = max(min_len, T // 5)
+        # for _ in range(n_segs):
+        #     length = random.randint(min_len, max_len)
+        #     t_start = random.randint(0, max(0, T - length))
+        #     mask[f0:f1, t_start:t_start + length] = 1.0
 
-        # p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
-        # denom = mu_on + mu_off
-        # p_start_on = (mu_on / denom) if denom > 0 else 0.5
-        # track = self._alternating_renewal_1d(
-        #    T, p_on, p_off, random.random() < p_start_on
-        # )
-        # mask[f0:f1, :] = track.reshape(1, -1)
+        p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
+        denom = mu_on + mu_off
+        p_start_on = (mu_on / denom) if denom > 0 else 0.5
+        track = self._alternating_renewal_1d(
+           T, p_on, p_off, random.random() < p_start_on
+        )
+        mask[f0:f1, :] = track.reshape(1, -1)
 
         if float(mask.sum()) <= 0.0:
             return self._fallback_time_continuous_band_mask()
