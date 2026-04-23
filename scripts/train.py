@@ -28,6 +28,7 @@ from src.engine.stage1 import Stage1Trainer
 from src.engine.stage2 import Stage2Trainer
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
+from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 from src.utils.nn import weights_init
 
 
@@ -87,6 +88,11 @@ def parse_args() -> argparse.Namespace:
     )
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     s1.add_argument("--include_test", action="store_true", help="Include test data in stage1 training")
+    s1.add_argument(
+        "--no_norm",
+        action="store_true",
+        help="Disable spectrogram standardization (use raw log-mel dB). If set, stage2/eval will also skip normalization when using this stage1 checkpoint.",
+    )
 
     # Stage 2: one or more machine types (joint Stage 2 if multiple; default single fan)
     s2 = sub.choices["stage2"]
@@ -191,10 +197,12 @@ def build_s_dsr(
 
 def run_stage1(args: argparse.Namespace) -> None:
     machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
+    standardize = not bool(getattr(args, "no_norm", False))
     if len(machine_types) == 1:
         dataset = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=machine_types[0],
+            standardize=standardize,
         )
         run_name = machine_types[0]
     else:
@@ -203,6 +211,7 @@ def run_stage1(args: argparse.Namespace) -> None:
             root=args.data_path,
             machine_types=machine_types,
             include_test=include_test,
+            standardize=standardize,
         )
         run_name = "+".join(sorted(machine_types))
     _, _, n_mels, T = dataset.data.shape
@@ -245,6 +254,8 @@ def run_stage1(args: argparse.Namespace) -> None:
 
 def run_stage2(args: argparse.Namespace) -> None:
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    use_norm = bool(ckpt.get("spectrogram_standardize", True))
+    norm_mean, norm_std = load_norm_from_stage1_ckpt(ckpt) if use_norm else (None, None)
 
     machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
     if len(machine_types) > 1 and args.machine_id is not None:
@@ -258,6 +269,10 @@ def run_stage2(args: argparse.Namespace) -> None:
         q_vae_dataset = DCASE2020Task2LogMelDataset(
             **ds_common,
             machine_id=args.machine_id,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+            standardize=use_norm,
+            compute_norm_stats=False,
         )
         run_name = machine_types[0]
     else:
@@ -265,6 +280,10 @@ def run_stage2(args: argparse.Namespace) -> None:
             root=args.data_path,
             machine_types=machine_types,
             include_test=False,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+            standardize=use_norm,
+            compute_norm_stats=False,
         )
         run_name = "+".join(sorted(machine_types))
 
@@ -276,6 +295,10 @@ def run_stage2(args: argparse.Namespace) -> None:
         q_vae_full = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=machine_types[0],
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+            standardize=use_norm,
+            compute_norm_stats=False,
         )
         adversarial_indices = [
             i for i in range(len(q_vae_full._machine_id_strs))
@@ -336,12 +359,18 @@ def run_stage2(args: argparse.Namespace) -> None:
                 root=args.data_path,
                 machine_type=machine_types[0],
                 target_T=q_vae_dataset.target_T,
+                norm_mean=norm_mean,
+                norm_std=norm_std,
+                standardize=use_norm,
             )
         else:
             val_dataset = DCASE2020Task2TestDataset(
                 root=args.data_path,
                 machine_types=machine_types,
                 target_T=q_vae_dataset.target_T,
+                norm_mean=norm_mean,
+                norm_std=norm_std,
+                standardize=use_norm,
             )
 
     trainer = Stage2Trainer(

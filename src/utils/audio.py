@@ -16,6 +16,10 @@ def load_mel_for_dir(
     mel_transform: T.MelSpectrogram,
     to_db: Callable[[torch.Tensor], torch.Tensor],
     filename_re: re.Pattern[str],
+    *,
+    norm_mean: torch.Tensor | None = None,
+    norm_std: torch.Tensor | None = None,
+    standardize: bool = True,
 ) -> tuple[list[torch.Tensor], list[str]]:
     files = sorted(audio_dir.glob("*.wav"))
     assert files, f"No .wav files found in {audio_dir}"
@@ -32,15 +36,22 @@ def load_mel_for_dir(
             wav = wav.mean(0, keepdim=True)
         mel = mel_transform(wav)
         log_mel_db = to_db(mel).float()  # (1, n_mels, T)
-        normalized_mel = standardize_spectrogram(log_mel_db)
-        spectrograms.append(normalized_mel)
+        if standardize:
+            log_mel_db = standardize_spectrogram(log_mel_db, mean=norm_mean, std=norm_std)
+        spectrograms.append(log_mel_db)
         
     return spectrograms, machine_id_strs
 
-def standardize_spectrogram(mel_db):
+def standardize_spectrogram(
+    mel_db: torch.Tensor,
+    *,
+    mean: torch.Tensor | None = None,
+    std: torch.Tensor | None = None,
+) -> torch.Tensor:
     # mel_db: (1, n_mels, T) in dB, already floor-clipped
-    mean = mel_db.mean(dim=(1, 2), keepdim=True)
-    std = mel_db.std(dim=(1, 2), keepdim=True)
+    if mean is None or std is None:
+        mean = mel_db.mean(dim=(1, 2), keepdim=True)
+        std = mel_db.std(dim=(1, 2), keepdim=True)
     return (mel_db - mean) / (std + _EPS)
 
 def log_mel_to_rgb(log_mel: torch.Tensor, cmap: colors.Colormap | None = None) -> torch.Tensor:

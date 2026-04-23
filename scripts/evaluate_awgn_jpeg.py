@@ -27,6 +27,7 @@ from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
 
 from src.comm.bitflip_ber import load_ber_curve_csv, bitflip_bytes
 from src.comm.jpeg_payload import bitflip_jpeg_entropy_payload
+from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 
 
 def parse_args() -> argparse.Namespace:
@@ -190,9 +191,26 @@ def main() -> None:
     NAN = float("nan")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    use_norm = bool(stage1_ckpt.get("spectrogram_standardize", True))
+    norm_mean, norm_std = load_norm_from_stage1_ckpt(stage1_ckpt) if use_norm else (None, None)
 
-    train_ds = DCASE2020Task2LogMelDataset(root=args.data_path, machine_type=args.machine_type, include_test=False)
-    test_ds = DCASE2020Task2TestDataset(root=args.data_path, machine_type=args.machine_type, target_T=train_ds.target_T)
+    train_ds = DCASE2020Task2LogMelDataset(
+        root=args.data_path,
+        machine_type=args.machine_type,
+        include_test=False,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        standardize=use_norm,
+        compute_norm_stats=False,
+    )
+    test_ds = DCASE2020Task2TestDataset(
+        root=args.data_path,
+        machine_type=args.machine_type,
+        target_T=train_ds.target_T,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        standardize=use_norm,
+    )
     _, _, n_mels, T = train_ds.data.shape
 
     vq_vae = VQ_VAE_2Layer(

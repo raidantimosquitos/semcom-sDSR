@@ -162,9 +162,12 @@ class OpusTestSpectrogramDataset(Dataset):
 
         mel = self.mel_transform(wav)
         log_mel = self.to_db(mel).float()  # (1, n_mels, T)
-        standardized_mel = standardize_spectrogram(log_mel)
-
-        standardized_mel = standardized_mel[..., :MEL_TIME_CROP]
+        log_mel = log_mel[..., :MEL_TIME_CROP]
+        standardized_mel = standardize_spectrogram(
+            log_mel,
+            mean=getattr(self.base, "norm_mean", None),
+            std=getattr(self.base, "norm_std", None),
+        )
         T = standardized_mel.shape[-1]
         if self.target_T is not None and T < self.target_T:
             standardized_mel = F.pad(standardized_mel, (0, self.target_T - T), mode="constant", value=0.0)
@@ -257,18 +260,26 @@ def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     ffmpeg = _ensure_ffmpeg()
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    _norm_mean, _norm_std = load_norm_from_stage1_ckpt(stage1_ckpt)
+    use_norm = bool(stage1_ckpt.get("spectrogram_standardize", True))
+    _norm_mean, _norm_std = load_norm_from_stage1_ckpt(stage1_ckpt) if use_norm else (None, None)
 
     train_ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         machine_id=args.machine_id,
+        norm_mean=_norm_mean,
+        norm_std=_norm_std,
+        standardize=use_norm,
+        compute_norm_stats=False,
     )
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         target_T=train_ds.target_T,
         machine_id=args.machine_id,
+        norm_mean=_norm_mean,
+        norm_std=_norm_std,
+        standardize=use_norm,
     )
     _, _, n_mels, T = train_ds.data.shape
 

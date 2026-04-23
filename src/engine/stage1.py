@@ -224,6 +224,8 @@ class Stage1Trainer(BaseTrainer):
             "hidden_channels_coarse": int(self.model.hidden_channels_coarse),
             "num_residual_layers": int(self.model.num_residual_layers),
         }
+        payload["spectrogram_standardize"] = bool(getattr(self.dataset, "standardize", True))
+        payload["spectrogram_norm_type"] = str(getattr(self.dataset, "norm_type", "unknown"))
         norm_stats = getattr(self.dataset, "norm_stats", None)
         if norm_stats:
             payload["norm_stats"] = {

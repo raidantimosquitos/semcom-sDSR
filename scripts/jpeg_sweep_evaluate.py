@@ -190,18 +190,26 @@ def parse_args() -> argparse.Namespace:
 
 def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    _norm_mean, _norm_std = load_norm_from_stage1_ckpt(stage1_ckpt)
+    use_norm = bool(stage1_ckpt.get("spectrogram_standardize", True))
+    _norm_mean, _norm_std = load_norm_from_stage1_ckpt(stage1_ckpt) if use_norm else (None, None)
 
     train_ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         machine_id=args.machine_id,
+        norm_mean=_norm_mean,
+        norm_std=_norm_std,
+        standardize=use_norm,
+        compute_norm_stats=False,
     )
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         target_T=train_ds.target_T,
         machine_id=args.machine_id,
+        norm_mean=_norm_mean,
+        norm_std=_norm_std,
+        standardize=use_norm,
     )
     _, _, n_mels, T = train_ds.data.shape
 

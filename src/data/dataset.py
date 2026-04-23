@@ -68,7 +68,14 @@ class DCASE2020Task2LogMelDataset(Dataset):
         top_db:        float = 80.0,
         machine_id: str | None = None,
         include_test: bool = True,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
+        standardize: bool = True,
+        compute_norm_stats: bool = True,
     ):
+        self.standardize = bool(standardize)
+        self.norm_type = "none" if not self.standardize else "global"
+        self._compute_norm_stats = bool(compute_norm_stats)
         if machine_types is not None:
             if machine_id is not None:
                 raise ValueError("machine_id filter only applies to single machine_type")
@@ -83,6 +90,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
                 f_max,
                 top_db,
                 include_test,
+                norm_mean=norm_mean,
+                norm_std=norm_std,
             )
         elif machine_type is not None:
             self._init_single(
@@ -96,6 +105,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
                 f_max,
                 top_db,
                 machine_id,
+                norm_mean=norm_mean,
+                norm_std=norm_std,
             )
         else:
             raise ValueError("Provide either machine_type or machine_types")
@@ -112,6 +123,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_max: float,
         top_db: float,
         machine_id: str | None = None,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -125,11 +138,44 @@ class DCASE2020Task2LogMelDataset(Dataset):
         self.machine_type = machine_type
 
         audio_dir = Path(root) / machine_type / "train"
-        spectrograms, machine_id_strs = load_mel_for_dir(audio_dir, sample_rate, self.mel_transform, self.to_db, self._FILENAME_RE)
+        spectrograms, machine_id_strs = load_mel_for_dir(
+            audio_dir,
+            sample_rate,
+            self.mel_transform,
+            self.to_db,
+            self._FILENAME_RE,
+            standardize=False,
+        )
 
         # Truncate to MEL_TIME_CROP (shortest spectrogram alignment)
         spectrograms = [s[..., :MEL_TIME_CROP] for s in spectrograms]
         stacked = torch.stack(spectrograms)
+
+        if not self.standardize:
+            self.norm_mean = None
+            self.norm_std = None
+        else:
+            if (norm_mean is None or norm_std is None) and self._compute_norm_stats:
+                # Global dataset statistics over all values after crop (match training distribution).
+                # Keep as scalar tensors (broadcastable) for later reuse.
+                n = stacked.numel()
+                total = stacked.sum(dtype=torch.float64)
+                total2 = (stacked.to(torch.float64) ** 2).sum()
+                mean_val = total / max(n, 1)
+                var = total2 / max(n, 1) - mean_val**2
+                var = torch.clamp(var, min=float(1e-8))
+                norm_mean = mean_val.to(torch.float32)
+                norm_std = torch.sqrt(var).to(torch.float32)
+
+            if norm_mean is not None and norm_std is not None:
+                self.norm_mean = norm_mean.detach().cpu().clone()
+                self.norm_std = norm_std.detach().cpu().clone()
+                stacked = standardize_spectrogram(stacked, mean=self.norm_mean, std=self.norm_std)
+            else:
+                # Backward-compatible fallback: per-sample standardization
+                stacked = standardize_spectrogram(stacked)
+                self.norm_mean = None
+                self.norm_std = None
 
         target_T = ((MEL_TIME_CROP + 15) // 16) * 16  # 32
 
@@ -175,6 +221,9 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_max: float,
         top_db: float,
         include_test: bool = True,
+        *,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -199,13 +248,23 @@ class DCASE2020Task2LogMelDataset(Dataset):
         for mt in sorted(machine_types):
             train_dir = root_path / mt / "train"
             spectrograms, machine_id_strs = load_mel_for_dir(
-                train_dir, sample_rate, self.mel_transform, self.to_db, self._FILENAME_RE
+                train_dir,
+                sample_rate,
+                self.mel_transform,
+                self.to_db,
+                self._FILENAME_RE,
+                standardize=False,
             )
             if include_test:
                 test_dir = root_path / mt / "test"
                 if test_dir.exists():
                     spec_test, mid_test = load_mel_for_dir(
-                        test_dir, sample_rate, self.mel_transform, self.to_db, self._FILENAME_RE_TEST
+                        test_dir,
+                        sample_rate,
+                        self.mel_transform,
+                        self.to_db,
+                        self._FILENAME_RE_TEST,
+                        standardize=False,
                     )
                     spectrograms = spectrograms + spec_test
                     machine_id_strs = machine_id_strs + mid_test
@@ -217,6 +276,29 @@ class DCASE2020Task2LogMelDataset(Dataset):
             all_machine_type_strs.extend([mt] * len(machine_id_strs))
 
         self.data = torch.cat(all_spectrograms, dim=0)
+
+        if not self.standardize:
+            self.norm_mean = None
+            self.norm_std = None
+        else:
+            if (norm_mean is None or norm_std is None) and self._compute_norm_stats:
+                n = self.data.numel()
+                total = self.data.sum(dtype=torch.float64)
+                total2 = (self.data.to(torch.float64) ** 2).sum()
+                mean_val = total / max(n, 1)
+                var = total2 / max(n, 1) - mean_val**2
+                var = torch.clamp(var, min=float(1e-8))
+                norm_mean = mean_val.to(torch.float32)
+                norm_std = torch.sqrt(var).to(torch.float32)
+
+            if norm_mean is not None and norm_std is not None:
+                self.norm_mean = norm_mean.detach().cpu().clone()
+                self.norm_std = norm_std.detach().cpu().clone()
+                self.data = standardize_spectrogram(self.data, mean=self.norm_mean, std=self.norm_std)
+            else:
+                self.data = standardize_spectrogram(self.data)
+                self.norm_mean = None
+                self.norm_std = None
 
         pad = target_T - self.data.shape[-1]
         if pad > 0:
@@ -382,6 +464,9 @@ class DCASE2020Task2TestDataset(Dataset):
         top_db: float = 80.0,
         target_T: int | None = None,
         machine_id: str | None = None,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
+        standardize: bool = True,
     ):
         if (machine_type is None) == (machine_types is None):
             raise ValueError("Provide exactly one of machine_type or machine_types")
@@ -415,6 +500,9 @@ class DCASE2020Task2TestDataset(Dataset):
                 target_T,
                 machine_id,
             )
+        self.norm_mean = norm_mean.detach().cpu().clone() if norm_mean is not None else None
+        self.norm_std = norm_std.detach().cpu().clone() if norm_std is not None else None
+        self.standardize = bool(standardize)
 
     def _init_single(
         self,
@@ -533,10 +621,16 @@ class DCASE2020Task2TestDataset(Dataset):
             wav = wav.mean(0, keepdim=True)
         mel = self.mel_transform(wav)
         log_mel = self.to_db(mel).float()  # (1, n_mels, T)
-        standardized_mel = standardize_spectrogram(log_mel)
-
         # Match training: crop time, then standardize, then pad (in standardized space).
-        standardized_mel = standardized_mel[..., :MEL_TIME_CROP]
+        log_mel = log_mel[..., :MEL_TIME_CROP]
+        if self.standardize:
+            standardized_mel = standardize_spectrogram(
+                log_mel,
+                mean=self.norm_mean,
+                std=self.norm_std,
+            )
+        else:
+            standardized_mel = log_mel
 
         T = standardized_mel.shape[-1]
         if self.target_T is not None and T < self.target_T:

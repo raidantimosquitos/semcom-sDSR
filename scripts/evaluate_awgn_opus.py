@@ -38,6 +38,7 @@ from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
 from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
 from src.utils.audio import standardize_spectrogram
+from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 
 from src.comm.bitflip_ber import load_ber_curve_csv, bitflip_bytes
 from src.comm.ogg_payload import bitflip_ogg_payload_pages
@@ -189,6 +190,8 @@ def wav_to_logmel(
     n_mels: int = 128,
     top_db: float = 80.0,
     target_T: int | None = None,
+    norm_mean: torch.Tensor | None = None,
+    norm_std: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if sr != sample_rate:
         wav = torchaudio.functional.resample(wav, sr, sample_rate)
@@ -205,8 +208,8 @@ def wav_to_logmel(
     to_db = T.AmplitudeToDB(top_db=top_db)
     mel = mel_transform(wav)
     log_mel = to_db(mel).float()  # (1,n_mels,T)
-    x = standardize_spectrogram(log_mel)
-    x = x[..., :MEL_TIME_CROP]
+    log_mel = log_mel[..., :MEL_TIME_CROP]
+    x = standardize_spectrogram(log_mel, mean=norm_mean, std=norm_std)
     if target_T is not None and x.shape[-1] < target_T:
         x = F.pad(x, (0, target_T - x.shape[-1]), mode="constant", value=0.0)
     return x
@@ -257,6 +260,8 @@ class OpusTestDataset(torch.utils.data.Dataset):
         ffmpeg_bin: str,
         opus_cache_dir: str | None,
         target_T: int,
+        norm_mean: torch.Tensor | None = None,
+        norm_std: torch.Tensor | None = None,
     ) -> None:
         self.base = base
         # critical: evaluator keys results by dataset.machine_type
@@ -272,6 +277,8 @@ class OpusTestDataset(torch.utils.data.Dataset):
         self.ffmpeg_bin = str(ffmpeg_bin)
         self.opus_cache_dir = Path(opus_cache_dir) if opus_cache_dir else None
         self.target_T = int(target_T)
+        self.norm_mean = norm_mean.detach().cpu().clone() if norm_mean is not None else None
+        self.norm_std = norm_std.detach().cpu().clone() if norm_std is not None else None
         self._rng = np.random.default_rng(self.seed)
         self._cu_total = 0
         self._n_total = 0
@@ -341,7 +348,13 @@ class OpusTestDataset(torch.utils.data.Dataset):
             # If decoding fails due to erasures, fall back to silence.
             wav_d, sr_d = torch.zeros((10, int(sr)), dtype=torch.float32), int(sr)
             self._decode_fail += 1
-        x = wav_to_logmel(wav_d, sr_d, target_T=self.target_T)
+        x = wav_to_logmel(
+            wav_d,
+            sr_d,
+            target_T=self.target_T,
+            norm_mean=self.norm_mean,
+            norm_std=self.norm_std,
+        )
         return x, label, machine_id
 
 
@@ -353,9 +366,26 @@ def main() -> None:
     print(f"[opus] using ffmpeg binary: {ffmpeg_bin}")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    use_norm = bool(stage1_ckpt.get("spectrogram_standardize", True))
+    norm_mean, norm_std = load_norm_from_stage1_ckpt(stage1_ckpt) if use_norm else (None, None)
 
-    train_ds = DCASE2020Task2LogMelDataset(root=args.data_path, machine_type=args.machine_type, include_test=False)
-    test_ds = DCASE2020Task2TestDataset(root=args.data_path, machine_type=args.machine_type, target_T=train_ds.target_T)
+    train_ds = DCASE2020Task2LogMelDataset(
+        root=args.data_path,
+        machine_type=args.machine_type,
+        include_test=False,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        standardize=use_norm,
+        compute_norm_stats=False,
+    )
+    test_ds = DCASE2020Task2TestDataset(
+        root=args.data_path,
+        machine_type=args.machine_type,
+        target_T=train_ds.target_T,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        standardize=use_norm,
+    )
     _, _, n_mels, T = train_ds.data.shape
 
     vq_vae = VQ_VAE_2Layer(
@@ -436,6 +466,8 @@ def main() -> None:
                     ffmpeg_bin=ffmpeg_bin,
                     opus_cache_dir=str(opus_cache_dir),
                     target_T=train_ds.target_T,
+                    norm_mean=norm_mean,
+                    norm_std=norm_std,
                 )
                 evaluator = AnomalyEvaluator(
                     model=model,

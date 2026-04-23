@@ -71,7 +71,23 @@ def main() -> None:
     jscc = JSCCDualMap(coarse=coarse_cfg, fine=fine_cfg).eval().to(device)
     jscc.load_state_dict(jscc_ckpt["jscc_state_dict"])
 
-    ds = DCASE2020Task2LogMelDataset(root=args.data_path, machine_type=args.machine_type, include_test=False)
+    use_norm = bool(stage1.get("spectrogram_standardize", True))
+    if use_norm:
+        from src.utils.stage1_norm import load_norm_from_stage1_ckpt
+
+        norm_mean, norm_std = load_norm_from_stage1_ckpt(stage1)
+    else:
+        norm_mean, norm_std = None, None
+
+    ds = DCASE2020Task2LogMelDataset(
+        root=args.data_path,
+        machine_type=args.machine_type,
+        include_test=False,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        standardize=use_norm,
+        compute_norm_stats=False,
+    )
     x, _lbl, _mid = next(iter(torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0)))
     x = x.to(device)
 
