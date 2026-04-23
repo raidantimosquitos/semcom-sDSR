@@ -69,20 +69,6 @@ def hz_band_to_mel_bin_range(
     return start_f, end_f
 
 
-def _log_uniform_positive(lo: float, hi: float) -> float:
-    """Sample ``X`` with log-uniform density on ``[lo, hi]``; clamp to ``[lo, hi]``."""
-    if hi <= lo:
-        return lo
-    if lo <= 0.0:
-        return random.uniform(lo, hi)
-    log_a = math.log(lo)
-    log_b = math.log(hi)
-    if log_b <= log_a:
-        return random.uniform(lo, hi)
-    x = math.exp(random.uniform(log_a, log_b))
-    return max(lo, min(x, hi))
-
-
 def _perlin_mask_is_nonempty_binary(m: np.ndarray) -> bool:
     """True iff ``m`` is strictly binary {0,1} and has at least one 1."""
     if m.size == 0:
@@ -132,8 +118,9 @@ class NonStationarySpectromorphicMaskStrategy:
     Each sample is either:
 
       1. **Band + renewal time** (probability ``1 - perlin_prob``): exactly one
-         contiguous mel band. ``bw_hz`` and ``f0_hz`` are **log-uniform** in Hz (over valid
-         intervals; clipped to span), then mapped to mel bins via
+         contiguous mel band. ``f0_hz`` is sampled by **stratifying the linear frequency axis**
+         into low/mid/high bands and sampling those equiprobably; ``bw_hz`` is sampled **uniformly**
+         in Hz and mapped to mel bins via
          :func:`hz_band_to_mel_bin_range` using ``(f_min_hz, f_max_hz)`` as the mel bank.
 
       2. **Perlin** (probability ``perlin_prob``): thresholded 2-D Perlin noise
@@ -206,14 +193,14 @@ class NonStationarySpectromorphicMaskStrategy:
         """
         One contiguous band ``[f0, f1)`` in mel bins.
 
-        ``bw_hz`` is **log-uniform** in ``[bw_min_hz, bw_max_hz]`` (clipped to the global Hz
-        span) so narrow bands are not under-sampled vs wide ones under linear uniform Hz.
-        ``f0_hz`` is **log-uniform** on the valid start interval
-        ``[max(f_min_hz, f_floor), f_max_hz - bw_hz]`` so low centre frequencies are not
-        under-sampled relative to a linear uniform draw (closer to uniform occupancy in mel).
+        Frequency-axis stratification (equiprobable):
+        - low: 0–1 kHz
+        - mid: 1–3 kHz
+        - high: 3–8 kHz
 
-        ``f_floor`` is 1 Hz when ``f_min_hz`` is 0 so ``log`` is defined; otherwise
-        ``f_floor = f_min_hz``. :func:`hz_band_to_mel_bin_range` always uses
+        ``bw_hz`` is sampled **uniformly** in ``[bw_min_hz, bw_max_hz]`` (clipped to the
+        chosen band span). ``f0_hz`` is sampled **uniformly** over valid starts within
+        the chosen band. :func:`hz_band_to_mel_bin_range` always maps using
         ``(self.f_min_hz, self.f_max_hz)`` as the mel bank edges.
         """
         n_mels = self.n_mels
@@ -224,29 +211,32 @@ class NonStationarySpectromorphicMaskStrategy:
         if g_hi <= g_lo:
             return []
 
-        span_hz = g_hi - g_lo
-        if span_hz <= 0:
-            return []
-
-        bw_lo = min(self.bw_min_hz, span_hz)
-        bw_hi = min(self.bw_max_hz, span_hz)
-        if bw_hi < bw_lo:
-            bw_lo, bw_hi = bw_hi, bw_lo
-
-        # For log-uniform f0 when f_min is 0, avoid log(0).
-        f_log_lo = max(g_lo, 1.0)
+        # Stratify linear Hz axis into three bands.
+        bands: list[tuple[float, float]] = [
+            (0.0, 1_000.0),
+            (1_000.0, 3_000.0),
+            (3_000.0, 8_000.0),
+        ]
 
         for _ in range(32):
-            bw_hz = _log_uniform_positive(bw_lo, bw_hi)
-            f0_max = g_hi - bw_hz
-            if f0_max <= g_lo:
+            b_lo, b_hi = random.choice(bands)
+            lo = max(g_lo, b_lo)
+            hi = min(g_hi, b_hi)
+            span_hz = hi - lo
+            if span_hz <= 1.0:
                 continue
-            if f0_max <= f_log_lo:
-                f0_hz = random.uniform(g_lo, f0_max)
-            else:
-                f0_hz = _log_uniform_positive(f_log_lo, f0_max)
-                f0_hz = max(g_lo, f0_hz)
-            f0_hz = max(g_lo, min(f0_hz, f0_max))
+
+            bw_lo = min(self.bw_min_hz, span_hz)
+            bw_hi = min(self.bw_max_hz, span_hz)
+            if bw_hi < bw_lo:
+                bw_lo, bw_hi = bw_hi, bw_lo
+            bw_hz = random.uniform(bw_lo, bw_hi)
+
+            f0_max = hi - bw_hz
+            if f0_max <= lo:
+                continue
+            f0_hz = random.uniform(lo, f0_max)
+
             f0, f1 = hz_band_to_mel_bin_range(f0_hz, bw_hz, n_mels, g_lo, g_hi)
             if f1 > f0:
                 return [(f0, f1)]
@@ -259,26 +249,10 @@ class NonStationarySpectromorphicMaskStrategy:
         ``p = 1/mu`` for ``np.random.geometric``.
         """
         Tm = max(T, 1)
-        # lo = math.log(1.0 + 10.0)
-        # hi = math.log(float(Tm-1.0))
-        # mu_on = math.exp(random.uniform(lo, hi))
-        # mu_off = math.exp(random.uniform(lo, hi)) 
-
-        # Regime coin flip — reflects that most machines are stationary
-        regime = random.random()
-        
-        if regime < 0.2:
-            # Stationary: band is on for most/all of the recording (fan, pump, slider, conveyor)
-            mu_on  = math.exp(random.uniform(math.log(T // 2), math.log(T * 2)))
-            mu_off = math.exp(random.uniform(math.log(1), math.log(T // 4)))
-        elif regime < 0.80:
-            # Several segments: a few clear bursts (paper's explicit description, ToyCar-like)
-            mu_on  = math.exp(random.uniform(math.log(T // 8), math.log(T // 2)))
-            mu_off = math.exp(random.uniform(math.log(T // 8), math.log(T // 2)))
-        else:
-            # Transient / sparse: valve-like brief events
-            mu_on  = math.exp(random.uniform(math.log(5), math.log(T // 6)))
-            mu_off = math.exp(random.uniform(math.log(T // 4), math.log(T)))
+        lo = math.log(1.0 + 10.0)
+        hi = math.log(float(Tm-1.0))
+        mu_on = math.exp(random.uniform(lo, hi))
+        mu_off = math.exp(random.uniform(lo, hi)) 
 
         p_on = 1.0 / max(mu_on, 1.0)
         p_off = 1.0 / max(mu_off, 1.0)
@@ -322,14 +296,6 @@ class NonStationarySpectromorphicMaskStrategy:
             return self._fallback_time_continuous_band_mask()
 
         f0, f1 = bands[0]
-
-        # n_segs = random.randint(1, 5)
-        # min_len = max(1, T // 40)
-        # max_len = max(min_len, T // 5)
-        # for _ in range(n_segs):
-        #     length = random.randint(min_len, max_len)
-        #     t_start = random.randint(0, max(0, T - length))
-        #     mask[f0:f1, t_start:t_start + length] = 1.0
 
         p_on, p_off, mu_on, mu_off = self._hierarchical_renewal_params(T)
         denom = mu_on + mu_off
