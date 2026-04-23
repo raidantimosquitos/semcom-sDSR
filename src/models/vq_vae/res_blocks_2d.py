@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class Residual(nn.Module):
@@ -31,4 +32,4 @@ class ResidualStack(nn.Module):
     def forward(self, x):
         for i in range(self._num_residual_layers):
             x = self._layers[i](x)
-        return x
+        return F.relu(x)

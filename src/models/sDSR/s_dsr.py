@@ -98,6 +98,7 @@ class sDSR(nn.Module):
             hidden_channels=cfg.hidden_channels,
             num_residual_layers=cfg.num_residual_layers,
             use_subspace_restriction=cfg.use_subspace_restriction,
+            coarse_upsampler=self._vq_vae._upscale_coarse,
         )
         self._anomaly_detection = AnomalyDetectionModule(
             in_channels=2,
@@ -148,6 +149,16 @@ class sDSR(nn.Module):
         """Freeze VQ-VAE (encoder, quantizers, general decoder) in stage 2."""
         for p in self._vq_vae.parameters():
             p.requires_grad = False
+
+    def apply_stage2_init(self, fn) -> None:
+        """
+        Apply an initialization function to Stage-2 trainable submodules only.
+
+        This intentionally excludes the embedded Stage-1 VQ-VAE, which is loaded
+        from checkpoint and frozen during Stage 2 training.
+        """
+        self._object_decoder.apply(fn)
+        self._anomaly_detection.apply(fn)
 
     def train(self, mode: bool = True) -> sDSR:
         """When training mode is on, keep VQ-VAE in eval so its EMA codebook is not updated."""

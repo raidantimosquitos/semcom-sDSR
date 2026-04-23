@@ -31,11 +31,19 @@ class ObjectSpecificDecoder(nn.Module):
         hidden_channels: Tuple[int, int],
         num_residual_layers: int,
         use_subspace_restriction: bool = True,
+        coarse_upsampler: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self._embedding_dim_coarse, self._embedding_dim_fine = embedding_dim
         self._hidden_channels_coarse, self._hidden_channels_fine = hidden_channels
         self._use_subspace_restriction = use_subspace_restriction
+        self._coarse_upsampler = coarse_upsampler
+
+        # The upsampler must stay frozen (borrowed from Stage-1 VQ-VAE-2).
+        if self._coarse_upsampler is not None:
+            for p in self._coarse_upsampler.parameters():
+                p.requires_grad = False
+            self._coarse_upsampler.eval()
 
         if use_subspace_restriction:
             self._subspace_coarse = SubspaceRestrictionModule(embedding_size=self._embedding_dim_coarse)
@@ -48,6 +56,25 @@ class ObjectSpecificDecoder(nn.Module):
             in_channels=self._embedding_dim_coarse + self._embedding_dim_fine,
             hidden_channels=self._hidden_channels_coarse + self._hidden_channels_fine,
             num_residual_layers=num_residual_layers,
+        )
+
+    def _upsample_coarse_to_fine_grid(
+        self, q_coarse: torch.Tensor, q_fine: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Upsample coarse latent to fine latent grid.
+
+        If a VQ-VAE-2 upsampler is provided, it is used (frozen).
+        Otherwise fall back to bilinear interpolation.
+        """
+        if self._coarse_upsampler is not None:
+            with torch.no_grad():
+                q_coarse_up = self._coarse_upsampler(q_coarse)
+            # Ensure the SRN never backprops into the frozen upsampler output.
+            return q_coarse_up.detach()
+
+        return F.interpolate(
+            q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False
         )
 
     def forward(
@@ -85,12 +112,14 @@ class ObjectSpecificDecoder(nn.Module):
             assert self._subspace_coarse is not None and self._subspace_fine is not None
             recon_feat_coarse, q_coarse_r, _ = self._subspace_coarse(q_coarse, vq_coarse)
             recon_feat_fine, q_fine_r, _ = self._subspace_fine(q_fine, vq_fine)
-            x_s = self.spectrogram_reconstruction_network(q_coarse_r, q_fine_r)
+            q_coarse_up = self._upsample_coarse_to_fine_grid(q_coarse_r, q_fine_r)
+            x_s = self.spectrogram_reconstruction_network(q_coarse_up, q_fine_r)
             if return_aux:
                 aux["recon_feat_coarse"] = recon_feat_coarse
                 aux["recon_feat_fine"] = recon_feat_fine
         else:
-            x_s = self.spectrogram_reconstruction_network(q_coarse, q_fine)
+            q_coarse_up = self._upsample_coarse_to_fine_grid(q_coarse, q_fine)
+            x_s = self.spectrogram_reconstruction_network(q_coarse_up, q_fine)
 
         if return_aux:
             return x_s, aux
@@ -181,12 +210,9 @@ class SpectrogramReconstructionNetwork(nn.Module):
 
     def forward(
         self,
-        q_coarse: torch.Tensor,
+        q_coarse_up: torch.Tensor,
         q_fine: torch.Tensor,
     ) -> torch.Tensor:
-        q_coarse_up = F.interpolate(
-            q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False
-        )
         x = torch.cat([q_coarse_up, q_fine], dim=1)
 
         x = self._block1(x)

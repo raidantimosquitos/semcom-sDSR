@@ -28,6 +28,7 @@ from src.engine.stage1 import Stage1Trainer
 from src.engine.stage2 import Stage2Trainer
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
+from src.utils.nn import weights_init
 
 
 def parse_args() -> argparse.Namespace:
@@ -215,6 +216,8 @@ def run_stage1(args: argparse.Namespace) -> None:
         commitment_cost=args.commitment_cost,
         decay=args.decay,
     )
+    if args.resume is None:
+        model.apply(weights_init)
     trainer = Stage1Trainer(
         model=model,
         dataset=dataset,
@@ -322,6 +325,8 @@ def run_stage2(args: argparse.Namespace) -> None:
         anomaly_inj_distribution=args.anomaly_inj_distribution,
         machine_type=single_machine_type,
     )
+    if args.resume is None:
+        model.apply_stage2_init(weights_init)
 
     val_dataset = None
     val_every = getattr(args, "val_every", 0)

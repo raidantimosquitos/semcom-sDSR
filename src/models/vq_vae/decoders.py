@@ -36,16 +36,9 @@ class DecoderFine(nn.Module):
             num_residual_hiddens=num_residual_hiddens,
         )
 
-        self._conv_trans_1 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(num_hiddens, num_hiddens//2, kernel_size=3, stride=1, padding=1),
-        )
+        self._conv_trans_1 = nn.ConvTranspose2d(num_hiddens, num_hiddens//2, kernel_size=4, stride=2, padding=1)
 
-        self._conv_trans_2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(num_hiddens//2, 1, kernel_size=3, stride=1, padding=1),
-        )
-
+        self._conv_trans_2 = nn.ConvTranspose2d(num_hiddens//2, 1, kernel_size=4, stride=2, padding=1)
 
     def forward(self, inputs):
         x = self._conv_1(inputs)
@@ -53,35 +46,4 @@ class DecoderFine(nn.Module):
         x = self._conv_trans_1(x)
         x = F.relu(x)
         x = self._conv_trans_2(x)
-        return x
-
-class DecoderCoarse(nn.Module):
-    """
-    Upsamples coarse latent to fine latent grid (2x in each dimension).
-    Input (emb_dim, n_mels//8, T//8) e.g. (16, 40);
-    output (num_hiddens, n_mels//4, T//4) e.g. (32, 80).
-    """
-    def __init__(self, in_channels, num_hiddens, out_channels, num_residual_layers, num_residual_hiddens):
-        super(DecoderCoarse, self).__init__()
-
-        self._conv_1 = nn.Conv2d(in_channels=in_channels,
-                                 out_channels=num_hiddens,
-                                 kernel_size=3,
-                                 stride=1, padding=1)
-
-        self._residual_stack = ResidualStack(in_channels=num_hiddens,
-                                             num_hiddens=num_hiddens,
-                                             num_residual_layers=num_residual_layers,
-                                             num_residual_hiddens=num_residual_hiddens)
-
-        self._conv_trans_1 =  nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(num_hiddens, out_channels, kernel_size=3, stride=1, padding=1),
-        )
-
-    def forward(self, inputs):
-        x = self._conv_1(inputs)
-        x = self._residual_stack(x)
-        x = self._conv_trans_1(x)
-        x = F.relu(x)
         return x
