@@ -31,19 +31,19 @@ class ObjectSpecificDecoder(nn.Module):
         hidden_channels: Tuple[int, int],
         num_residual_layers: int,
         use_subspace_restriction: bool = True,
-        coarse_upsampler: nn.Module | None = None,
+        coarse_upscaler: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self._embedding_dim_coarse, self._embedding_dim_fine = embedding_dim
         self._hidden_channels_coarse, self._hidden_channels_fine = hidden_channels
         self._use_subspace_restriction = use_subspace_restriction
-        self._coarse_upsampler = coarse_upsampler
+        self._coarse_upscaler = coarse_upscaler
 
         # The upsampler must stay frozen (borrowed from Stage-1 VQ-VAE-2).
-        if self._coarse_upsampler is not None:
-            for p in self._coarse_upsampler.parameters():
+        if self._coarse_upscaler is not None:
+            for p in self._coarse_upscaler.parameters():
                 p.requires_grad = False
-            self._coarse_upsampler.eval()
+            self._coarse_upscaler.eval()
 
         if use_subspace_restriction:
             self._subspace_coarse = SubspaceRestrictionModule(embedding_size=self._embedding_dim_coarse)
@@ -67,9 +67,9 @@ class ObjectSpecificDecoder(nn.Module):
         If a VQ-VAE-2 upsampler is provided, it is used (frozen).
         Otherwise fall back to bilinear interpolation.
         """
-        if self._coarse_upsampler is not None:
+        if self._coarse_upscaler is not None:
             with torch.no_grad():
-                q_coarse_up = self._coarse_upsampler(q_coarse)
+                q_coarse_up = self._coarse_upscaler(q_coarse)
             # Ensure the SRN never backprops into the frozen upsampler output.
             return q_coarse_up.detach()
 

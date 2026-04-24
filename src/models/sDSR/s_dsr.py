@@ -98,12 +98,12 @@ class sDSR(nn.Module):
             hidden_channels=cfg.hidden_channels,
             num_residual_layers=cfg.num_residual_layers,
             use_subspace_restriction=cfg.use_subspace_restriction,
-            coarse_upsampler=self._vq_vae._upscale_coarse,
+            coarse_upscaler=self._vq_vae._upscale_coarse,
         )
         self._anomaly_detection = AnomalyDetectionModule(
             in_channels=2,
             out_channels=2,
-            base_width=128,
+            base_width=64,
         )
 
         self._anomaly_generation = AnomalyGeneration(
