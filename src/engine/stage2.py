@@ -43,7 +43,6 @@ class Stage2Trainer(BaseTrainer):
         lambda_focal: float = 1.0,
         lambda_sub: float = 1.0,
         lr: float = 2e-4,
-        lr_warmup_iters: int = 0,
         lr_min: float = 1e-5,
         batch_size: int = 16,
         grad_clip: float | None = 1.0,
@@ -64,7 +63,6 @@ class Stage2Trainer(BaseTrainer):
         self.lambda_focal = lambda_focal
         self.lambda_sub = lambda_sub
         self.lr = lr
-        self.lr_warmup_iters = lr_warmup_iters
         self.lr_min = lr_min
         self.total_steps = total_steps
 
@@ -113,11 +111,7 @@ class Stage2Trainer(BaseTrainer):
         )
 
     def _get_lr(self, step: int, total_steps: int) -> float:
-        if step < self.lr_warmup_iters:
-            return self.lr * (step + 1) / self.lr_warmup_iters
-        progress = (step - self.lr_warmup_iters) / max(
-            1, total_steps - self.lr_warmup_iters
-        )
+        progress = step / max(1, total_steps)
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         return self.lr_min + cosine * (self.lr - self.lr_min)
 

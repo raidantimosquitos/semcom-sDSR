@@ -19,7 +19,6 @@ from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 
 from ..models.vq_vae.autoencoders import VQ_VAE_2Layer
-from ..models.vq_vae.kmeans_init import init_vqvae_codebooks_from_loader
 
 from .base import BaseTrainer
 
@@ -39,7 +38,6 @@ class Stage1Trainer(BaseTrainer):
         machine_type: str = "unknown",
         lambda_recon: float = 0.25,
         lr: float = 2e-4,
-        lr_warmup_iters: int = 0,
         lr_min: float = 1e-5,
         batch_size: int = 64,
         grad_clip: float | None = 1.0,
@@ -50,28 +48,13 @@ class Stage1Trainer(BaseTrainer):
         device: str = "cuda",
         total_steps: int = 20000,
         num_workers: int = 0,
-        *,
-        kmeans_init_after_warmup: bool = False,
-        kmeans_max_samples: int = 500_000,
-        kmeans_iters: int = 15,
-        kmeans_seed: int = 0,
-        kmeans_max_batches: int | None = None,
-        kmeans_reset_adam: bool = False,
     ) -> None:
         self.machine_type = machine_type
         self.lambda_recon = lambda_recon
         self.lr = lr
-        self.lr_warmup_iters = lr_warmup_iters
         self.lr_min = lr_min
         self.dataset = dataset
         self.total_steps = total_steps
-        self.kmeans_init_after_warmup = kmeans_init_after_warmup
-        self.kmeans_max_samples = kmeans_max_samples
-        self.kmeans_iters = kmeans_iters
-        self.kmeans_seed = kmeans_seed
-        self.kmeans_max_batches = kmeans_max_batches
-        self.kmeans_reset_adam = kmeans_reset_adam
-        self._kmeans_init_done = False
 
         # Dataset is already for a single machine_type; no filtering needed
         if getattr(dataset, "machine_type", None) not in (None, machine_type):
@@ -101,63 +84,13 @@ class Stage1Trainer(BaseTrainer):
             f"Stage1 | Device: {self.device} | AMP: {self.use_amp} | "
             f"DataLoader workers: {self.num_workers} | Params: {n_params:,}"
         )
-        if self.kmeans_init_after_warmup:
-            self._tee(
-                f"Stage1 | K-means codebook init: after warmup step "
-                f"{self.lr_warmup_iters} (max_samples={self.kmeans_max_samples}, "
-                f"iters={self.kmeans_iters})"
-            )
-
-    def _kmeans_schedule_step(self) -> int:
-        """Training step index at which we run k-means (after that many optimizer steps)."""
-        return self.lr_warmup_iters
-
-    def _maybe_kmeans_init_codebooks(self, step: int) -> None:
-        if not self.kmeans_init_after_warmup or self._kmeans_init_done:
-            return
-        if step != self._kmeans_schedule_step():
-            return
-        if not isinstance(self.model, VQ_VAE_2Layer):
-            raise TypeError(
-                "kmeans_init_after_warmup requires VQ_VAE_2Layer; got "
-                f"{type(self.model).__name__}"
-            )
-        self._tee(
-            f"Running k-means codebook init at step {step} (scanning loader) ..."
-        )
-        init_vqvae_codebooks_from_loader(
-            self.model,
-            self.loader,
-            self.device,
-            max_batches=self.kmeans_max_batches,
-            max_samples=self.kmeans_max_samples,
-            kmeans_iters=self.kmeans_iters,
-            seed=self.kmeans_seed,
-        )
-        if self.kmeans_reset_adam:
-            n_cleared = 0
-            for name, p in self.model.named_parameters():
-                if "_vq_coarse" in name or "_vq_fine" in name:
-                    if p in self.optimizer.state:
-                        self.optimizer.state[p].clear()
-                        n_cleared += 1
-            self._tee(f"Stage1 | Cleared Adam state for {n_cleared} VQ parameter tensors")
-
-        self._kmeans_init_done = True
-        self._tee("Stage1 | K-means codebook init done.")
 
     def _get_lr(self, step: int, total_steps: int) -> float:
-        if step < self.lr_warmup_iters:
-            return self.lr * (step + 1) / self.lr_warmup_iters
-        progress = (step - self.lr_warmup_iters) / max(
-            1, total_steps - self.lr_warmup_iters
-        )
+        progress = step / max(1, total_steps)
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         return self.lr_min + cosine * (self.lr - self.lr_min)
 
     def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
-        self._maybe_kmeans_init_codebooks(step)
-
         if isinstance(batch, (list, tuple)):
             x = batch[0]
         else:
@@ -213,7 +146,6 @@ class Stage1Trainer(BaseTrainer):
             "optim_state_dict": self.optimizer.state_dict(),
             "scaler_state_dict": self.scaler.state_dict(),
             "best_total_loss": self.best_total_loss,
-            "kmeans_init_done": bool(self._kmeans_init_done),
             "target_T": int(self.dataset.target_T),
             "n_mels": int(self.dataset.data.shape[2]),
             "num_embeddings_fine": int(self.model.num_embeddings_fine),
@@ -272,13 +204,6 @@ class Stage1Trainer(BaseTrainer):
         self.global_step = ckpt["global_step"]
         if "best_total_loss" in ckpt:
             self.best_total_loss = ckpt["best_total_loss"]
-        if self.kmeans_init_after_warmup:
-            if "kmeans_init_done" in ckpt:
-                self._kmeans_init_done = bool(ckpt["kmeans_init_done"])
-            else:
-                self._kmeans_init_done = (
-                    self.global_step > self._kmeans_schedule_step()
-                )
         self._tee(f"Resumed from {path} at step {self.global_step}")
 
     def _extract_x(self, batch: Any) -> torch.Tensor:
