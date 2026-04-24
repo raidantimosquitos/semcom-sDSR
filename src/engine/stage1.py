@@ -280,3 +280,167 @@ class Stage1Trainer(BaseTrainer):
                     self.global_step > self._kmeans_schedule_step()
                 )
         self._tee(f"Resumed from {path} at step {self.global_step}")
+
+    def _extract_x(self, batch: Any) -> torch.Tensor:
+        if isinstance(batch, (list, tuple)):
+            return batch[0]
+        return batch
+
+    @staticmethod
+    def _vq_raw_latent_sse_and_counts(
+        *,
+        z: torch.Tensor,
+        embedding_weight: torch.Tensor,
+        indices_flat: torch.Tensor,
+    ) -> tuple[torch.Tensor, int]:
+        """
+        Compute raw latent SSE between pre-quant features and nearest embeddings.
+
+        Matches quantizer math:
+          inputs: (B, C, H, W) -> permute to (B, H, W, C) -> flatten to (N, C)
+          quantized: embedding[indices] -> view back to (B, H, W, C)
+
+        Returns:
+          sse: scalar float64 tensor on device
+          n: number of latent elements contributing to SSE
+        """
+        z32 = z.float()
+        z_hw_c = z32.permute(0, 2, 3, 1).contiguous()
+        B, H, W, C = z_hw_c.shape
+        n_tokens = int(B * H * W)
+        emb = embedding_weight.float()
+        nearest = emb[indices_flat]  # (N, C)
+        nearest = nearest.view(B, H, W, C)
+        diff2 = (nearest - z_hw_c).to(torch.float64).pow(2)
+        sse = diff2.sum()
+        n_elems = int(n_tokens * C)
+        return sse, n_elems
+
+    @staticmethod
+    def _perplexity_from_counts(counts: torch.Tensor, eps: float = 1e-10) -> float:
+        counts64 = counts.to(torch.float64)
+        total = float(counts64.sum().item())
+        if total <= 0:
+            return float("nan")
+        p = counts64 / total
+        ent = -(p * (p + eps).log()).sum()
+        return float(torch.exp(ent).item())
+
+    def _compute_trainset_metrics_frozen(self) -> dict[str, float]:
+        if not isinstance(self.model, VQ_VAE_2Layer):
+            raise TypeError(
+                "Stage1 final metrics (global perplexity + raw quant MSE) currently "
+                f"require VQ_VAE_2Layer; got {type(self.model).__name__}"
+            )
+
+        eval_loader = DataLoader(
+            self.dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=self.device.type == "cuda",
+            drop_last=False,
+        )
+
+        Kc = int(self.model.num_embeddings_coarse)
+        Kf = int(self.model.num_embeddings_fine)
+        counts_coarse = torch.zeros(Kc, dtype=torch.int64, device=self.device)
+        counts_fine = torch.zeros(Kf, dtype=torch.int64, device=self.device)
+
+        recon_sse = torch.zeros((), dtype=torch.float64, device=self.device)
+        recon_n = 0
+
+        commit_sum_coarse = torch.zeros((), dtype=torch.float64, device=self.device)
+        commit_sum_fine = torch.zeros((), dtype=torch.float64, device=self.device)
+        commit_tokens_coarse = 0
+        commit_tokens_fine = 0
+
+        raw_sse_coarse = torch.zeros((), dtype=torch.float64, device=self.device)
+        raw_sse_fine = torch.zeros((), dtype=torch.float64, device=self.device)
+        raw_n_coarse = 0
+        raw_n_fine = 0
+
+        was_training = self.model.training
+        self.model.eval()
+        with torch.no_grad():
+            for batch in eval_loader:
+                x = self._extract_x(batch).to(self.device, non_blocking=True)
+
+                with autocast(device_type=self.device.type, enabled=self.use_amp):
+                    loss_fine, loss_coarse, recon, q_coarse, q_fine, _, _ = self.model(x)
+
+                diff = (recon.float() - x.float()).to(torch.float64)
+                recon_sse += (diff * diff).sum()
+                recon_n += int(x.numel())
+
+                B = int(x.shape[0])
+                Hc, Wc = int(q_coarse.shape[-2]), int(q_coarse.shape[-1])
+                Hf, Wf = int(q_fine.shape[-2]), int(q_fine.shape[-1])
+                n_tokens_coarse = int(B * Hc * Wc)
+                n_tokens_fine = int(B * Hf * Wf)
+
+                commit_sum_coarse += loss_coarse.to(torch.float64) * n_tokens_coarse
+                commit_sum_fine += loss_fine.to(torch.float64) * n_tokens_fine
+                commit_tokens_coarse += n_tokens_coarse
+                commit_tokens_fine += n_tokens_fine
+
+                _, _, _, _, z_fine, z_coarse = self.model.encode_with_prequant(x)
+                idx_coarse = self.model._vq_coarse.get_indices(z_coarse)
+                idx_fine = self.model._vq_fine.get_indices(z_fine)
+
+                counts_coarse += torch.bincount(idx_coarse, minlength=Kc)
+                counts_fine += torch.bincount(idx_fine, minlength=Kf)
+
+                sse_c, n_c = self._vq_raw_latent_sse_and_counts(
+                    z=z_coarse,
+                    embedding_weight=self.model._vq_coarse._embedding.weight,
+                    indices_flat=idx_coarse,
+                )
+                sse_f, n_f = self._vq_raw_latent_sse_and_counts(
+                    z=z_fine,
+                    embedding_weight=self.model._vq_fine._embedding.weight,
+                    indices_flat=idx_fine,
+                )
+                raw_sse_coarse += sse_c
+                raw_sse_fine += sse_f
+                raw_n_coarse += n_c
+                raw_n_fine += n_f
+
+        if was_training:
+            self.model.train()
+
+        recon_mse = float((recon_sse / max(recon_n, 1)).item())
+        perp_coarse = self._perplexity_from_counts(counts_coarse)
+        perp_fine = self._perplexity_from_counts(counts_fine)
+        commit_loss_coarse = float((commit_sum_coarse / max(commit_tokens_coarse, 1)).item())
+        commit_loss_fine = float((commit_sum_fine / max(commit_tokens_fine, 1)).item())
+        raw_latent_mse_coarse = float((raw_sse_coarse / max(raw_n_coarse, 1)).item())
+        raw_latent_mse_fine = float((raw_sse_fine / max(raw_n_fine, 1)).item())
+
+        return {
+            "recon_mse": recon_mse,
+            "perplexity_coarse": perp_coarse,
+            "perplexity_fine": perp_fine,
+            "commit_loss_coarse": commit_loss_coarse,
+            "commit_loss_fine": commit_loss_fine,
+            "raw_latent_mse_coarse": raw_latent_mse_coarse,
+            "raw_latent_mse_fine": raw_latent_mse_fine,
+        }
+
+    def _on_training_end(self) -> None:
+        metrics = self._compute_trainset_metrics_frozen()
+        self._tee("Stage1 final train metrics (frozen model, full train set):")
+        self._tee(f"  recon_mse={metrics['recon_mse']:.8f}")
+        self._tee(
+            f"  perplexity_fine={metrics['perplexity_fine']:.4f}  "
+            f"perplexity_coarse={metrics['perplexity_coarse']:.4f}"
+        )
+        self._tee(
+            f"  commit_loss_fine={metrics['commit_loss_fine']:.8f}  "
+            f"commit_loss_coarse={metrics['commit_loss_coarse']:.8f}"
+        )
+        self._tee(
+            f"  raw_latent_mse_fine={metrics['raw_latent_mse_fine']:.8f}  "
+            f"raw_latent_mse_coarse={metrics['raw_latent_mse_coarse']:.8f}"
+        )
+        self._save_checkpoint(tag="final", avg=self._last_avg)
