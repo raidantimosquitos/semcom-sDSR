@@ -384,8 +384,6 @@ class AudDSRAnomTrainDataset(Dataset):
         spectrogram_shape = (n_mels, T)
         self._mask_generator = AnomalyMapGenerator(
             spectrogram_shape=spectrogram_shape,
-            n_mels=n_mels,
-            T=T,
             zero_mask_prob=0.0,
         )
 
