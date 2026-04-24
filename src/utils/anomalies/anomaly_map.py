@@ -196,11 +196,20 @@ class SpectromorphicMaskStrategy:
             )
 
         i0, i1 = band
-        p_on, p_off = _renewal_params(self.T)
-        mu_on = 1.0 / p_on
-        start_on = random.random() < mu_on / (mu_on + 1.0 / p_off)
-        time_track = _alternating_renewal(self.T, p_on, p_off, start_on)
-        mask[i0:i1, :] = time_track
+
+        # p_on, p_off = _renewal_params(self.T)
+        # mu_on = 1.0 / p_on
+        # start_on = random.random() < mu_on / (mu_on + 1.0 / p_off)
+        # time_track = _alternating_renewal(self.T, p_on, p_off, start_on)
+        # mask[i0:i1, :] = time_track
+
+        # Sample K independent contiguous time segments
+        n_segments = random.randint(1, 5)
+        for _ in range(n_segments):
+            seg_len = random.randint(self.T // 8, self.T // 2)
+            t_start = random.randint(0, max(0, self.T - seg_len))
+            mask[i0:i1, t_start : t_start + seg_len] = 1.0
+
         return mask
 
     def _perlin_mask(self) -> np.ndarray:
