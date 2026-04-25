@@ -294,7 +294,6 @@ def run_stage2(args: argparse.Namespace) -> None:
     )
 
     # Load VQ-VAE from Stage 1 (same architecture as training; support old checkpoint keys)
-    from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
     num_embeddings_coarse = ckpt["num_embeddings_coarse"]
     num_embeddings_fine = ckpt["num_embeddings_fine"]
     embedding_dim_fine = ckpt["embedding_dim_fine"]
@@ -310,7 +309,6 @@ def run_stage2(args: argparse.Namespace) -> None:
         num_residual_layers=num_residual_layers,
     )
     state = dict(ckpt["model_state_dict"])
-    # migrate_vq_vae_state_dict(state)
     vq_vae.load_state_dict(state)
 
     model = build_s_dsr(

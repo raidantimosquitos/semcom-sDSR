@@ -233,11 +233,9 @@ class Stage1Trainer(BaseTrainer):
             self._tee(f"  New best model saved: {best_path} (loss={total_loss:.4f})")
 
     def _load_checkpoint(self, path: str) -> None:
-        from ..utils.checkpoint_compat import migrate_vq_vae_state_dict
 
         ckpt = torch.load(path, map_location=self.device, weights_only=True)
         state = ckpt["model_state_dict"]
-        migrate_vq_vae_state_dict(state)
         self.model.load_state_dict(state)
         self.optimizer.load_state_dict(ckpt["optim_state_dict"])
         self.scaler.load_state_dict(ckpt["scaler_state_dict"])
