@@ -393,7 +393,7 @@ def run_full(args: argparse.Namespace) -> None:
         num_embeddings_fine=1024,
         embedding_dim_coarse=128,
         embedding_dim_fine=128,
-        hidden_channels_coarse=256,
+        hidden_channels_coarse=128,
         hidden_channels_fine=128,
         commitment_cost=0.25,
         decay=0.99,
