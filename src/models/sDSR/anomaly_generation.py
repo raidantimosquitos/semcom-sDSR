@@ -97,10 +97,9 @@ class AnomalyGeneration(nn.Module):
     full codebook (no z/strength).
     """
 
-    def __init__(self, sampling: str = "distant", neighbor_prob: float = 0.05) -> None:
+    def __init__(self, sampling: str = "distant") -> None:
         super().__init__()
         self.sampling = sampling
-        self.neighbor_prob = neighbor_prob
 
     def forward(
         self,
@@ -148,7 +147,6 @@ class AnomalyGeneration(nn.Module):
             z_c = z_coarse if z_coarse is not None else q_coarse
             q_coarse_a = generate_fake_anomalies_distant(
                 z_c, q_coarse, cb_coarse, M_coarse, strength_coarse,
-                neighbor_prob=self.neighbor_prob,
                 closest_skip_frac=0.03,
             )
 
@@ -160,7 +158,6 @@ class AnomalyGeneration(nn.Module):
             z_f = z_fine if z_fine is not None else q_fine
             q_fine_a = generate_fake_anomalies_distant(
                 z_f, q_fine, cb_fine, M_fine, strength_fine,
-                neighbor_prob=self.neighbor_prob,
                 closest_skip_frac=0.05,
             )
         return q_fine_a, q_coarse_a

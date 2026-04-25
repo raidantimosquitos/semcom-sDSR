@@ -29,6 +29,10 @@ class Stage1Trainer(BaseTrainer):
 
     Model must implement forward(x) returning:
         (loss_fine, loss_coarse, recon, q_coarse, q_fine, perplexity_coarse, perplexity_fine)
+
+    Training logic matches the 3DSR-style VQ-VAE loop (forward, VQ losses + reconstruction,
+    backward, step). Reconstruction is L2 (MSE) on spectrograms, computed in float32 outside
+    autocast so AMP does not overflow the recon term in the decoder path.
     """
 
     def __init__(
@@ -36,7 +40,7 @@ class Stage1Trainer(BaseTrainer):
         model: nn.Module,
         dataset: Any,
         machine_type: str = "unknown",
-        lambda_recon: float = 0.25,
+        lambda_recon: float = 1.0,
         lr: float = 2e-4,
         lr_min: float = 1e-5,
         batch_size: int = 64,
@@ -78,6 +82,8 @@ class Stage1Trainer(BaseTrainer):
         self.scaler = GradScaler(self.device.type, enabled=self.use_amp)
         self.best_total_loss = float("inf")
         self._last_ckpt_path: Path | None = None
+        self._last_finite_log: dict[str, float] | None = None
+        self._nonfinite_step_warned = False
 
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         self._tee(
@@ -106,25 +112,56 @@ class Stage1Trainer(BaseTrainer):
         with autocast(device_type=self.device.type, enabled=self.use_amp):
             out = self.model(x)
             loss_fine, loss_coarse, recon, _, _, perp_coarse, perp_fine = out
-            recon_loss = F.mse_loss(recon, x)
-            total_loss = loss_fine + loss_coarse + self.lambda_recon * recon_loss
 
-        self.scaler.scale(total_loss).backward()
+        # L2 recon in fp32 (avoids fp16 MSE blow-ups in decoder under AMP)
+        with autocast(device_type=self.device.type, enabled=False):
+            recon_loss = F.mse_loss(recon.float(), x.float())
+            total_loss = (
+                loss_fine.float()
+                + loss_coarse.float()
+                + self.lambda_recon * recon_loss
+            )
 
-        if self.grad_clip is not None:
-            self.scaler.unscale_(self.optimizer)
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+        if torch.isfinite(total_loss).all():
+            self.scaler.scale(total_loss).backward()
 
-        self.scaler.step(self.optimizer)
+            if self.grad_clip is not None:
+                self.scaler.unscale_(self.optimizer)
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            metrics = {
+                "total": float(total_loss.detach().item()),
+                "recon": float(recon_loss.detach().item()),
+                "loss_fine": float(loss_fine.detach().item()),
+                "loss_coarse": float(loss_coarse.detach().item()),
+                "perplexity_fine": float(perp_fine.detach().item()),
+                "perplexity_coarse": float(perp_coarse.detach().item()),
+                "lr": lr,
+            }
+            self._last_finite_log = metrics
+            return metrics
+
         self.scaler.update()
-
+        if not self._nonfinite_step_warned:
+            self._tee(
+                "Warning: non-finite total loss; skipping optimizer step "
+                "(decoder/recon path overflowed). If this repeats, try --no_amp or lower lr."
+            )
+            self._nonfinite_step_warned = True
+        if self._last_finite_log is not None:
+            fallback = dict(self._last_finite_log)
+            fallback["lr"] = lr
+            return fallback
         return {
-            "total": total_loss.item(),
-            "recon": recon_loss.item(),
-            "loss_fine": loss_fine.item(),
-            "loss_coarse": loss_coarse.item(),
-            "perplexity_fine": perp_fine.item(),
-            "perplexity_coarse": perp_coarse.item(),
+            "total": float("nan"),
+            "recon": float("nan"),
+            "loss_fine": float(loss_fine.detach().item()),
+            "loss_coarse": float(loss_coarse.detach().item()),
+            "perplexity_fine": float(perp_fine.detach().item()),
+            "perplexity_coarse": float(perp_coarse.detach().item()),
             "lr": lr,
         }
 
