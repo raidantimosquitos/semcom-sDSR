@@ -85,12 +85,31 @@ def _renewal_params(T: int) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
-    """Thresholded 2-D Perlin noise, binary output. Falls back to soft noise if empty."""
-    res_y = max(2, min(2 ** random.randint(1, 4), n_mels))
-    res_x = max(2, min(2 ** random.randint(1, 4), T))
-    noise = rand_perlin_2d_np((n_mels, T), (res_y, res_x))
-    mask = (noise > random.uniform(0.3, 0.6)).astype(np.float32)
-    return mask if mask.sum() > 0 else noise.astype(np.float32)
+    """
+    Thresholded 2-D Perlin noise mask (binary float32), aligned with the common
+    """
+    min_perlin_scale = 0
+    perlin_scale = 6  # randint in [0, 5] -> scales in {1,2,4,8,16,32}
+    perlin_scalex = 2 ** int(random.randint(min_perlin_scale, perlin_scale - 1))
+    perlin_scaley = 2 ** int(random.randint(min_perlin_scale, perlin_scale - 1))
+    perlin_scalex = max(1, min(perlin_scalex, T))
+    perlin_scaley = max(1, min(perlin_scaley, n_mels))
+
+    noise = rand_perlin_2d_np((n_mels, T), (perlin_scalex, perlin_scaley))
+
+    # Lightweight rotation augmentation (no extra deps): 0/90/180/270 deg.
+    k = random.randint(0, 3)
+    if k:
+        noise = np.rot90(noise, k=k)
+    # Optional flips (still dependency-free; helps mask variety)
+    if random.random() < 0.5:
+        noise = np.flip(noise, axis=0)  # freq flip
+    if random.random() < 0.5:
+        noise = np.flip(noise, axis=1)  # time flip
+
+    threshold = 0.5
+    perlin_thr = (noise > threshold).astype(np.float32)
+    return perlin_thr
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +225,7 @@ class SpectromorphicMaskStrategy:
         # Sample K independent contiguous time segments
         n_segments = random.randint(1, 5)
         for _ in range(n_segments):
-            seg_len = random.randint(self.T // 8, self.T // 2)
+            seg_len = random.randint(self.T // 64, self.T // 8)
             t_start = random.randint(0, max(0, self.T - seg_len))
             mask[i0:i1, t_start : t_start + seg_len] = 1.0
 
