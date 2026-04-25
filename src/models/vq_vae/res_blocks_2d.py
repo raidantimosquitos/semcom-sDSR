@@ -11,11 +11,11 @@ class Residual(nn.Module):
             nn.ReLU(False),
             nn.Conv2d(in_channels=in_channels,
                       out_channels=num_residual_hiddens,
-                      kernel_size=3, stride=1, padding=1, bias=True),
+                      kernel_size=3, stride=1, padding=1, bias=False),
             nn.ReLU(False),
             nn.Conv2d(in_channels=num_residual_hiddens,
                       out_channels=num_hiddens,
-                      kernel_size=1, stride=1, bias=True)
+                      kernel_size=1, stride=1, bias=False)
         )
 
     def forward(self, x):

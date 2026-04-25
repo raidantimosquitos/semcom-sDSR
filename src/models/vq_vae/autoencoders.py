@@ -100,10 +100,7 @@ class VQ_VAE_2Layer(nn.Module):
         )
 
         # Upsampling layer
-        self._upscale_coarse = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(self.embedding_dim_coarse, self.embedding_dim_coarse, kernel_size=3, stride=1, padding=1),
-        )
+        self._upscale_coarse = nn.ConvTranspose2d(self.embedding_dim_coarse, self.embedding_dim_coarse, kernel_size=4, stride=2, padding=1)
 
         # Vector quantizers
         self._vq_coarse = VectorQuantizerEMA(
