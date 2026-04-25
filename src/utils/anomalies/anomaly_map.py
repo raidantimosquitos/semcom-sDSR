@@ -97,10 +97,6 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
 
     noise = rand_perlin_2d_np((n_mels, T), (perlin_scalex, perlin_scaley))
 
-    # Lightweight rotation augmentation (no extra deps): 0/90/180/270 deg.
-    k = random.randint(0, 3)
-    if k:
-        noise = np.rot90(noise, k=k)
     # Optional flips (still dependency-free; helps mask variety)
     if random.random() < 0.5:
         noise = np.flip(noise, axis=0)  # freq flip
@@ -182,7 +178,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.15,
+        perlin_prob: float = 0.4,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -223,7 +219,7 @@ class SpectromorphicMaskStrategy:
         # mask[i0:i1, :] = time_track
 
         # Sample K independent contiguous time segments
-        n_segments = random.randint(1, 5)
+        n_segments = random.randint(1, 8)
         for _ in range(n_segments):
             seg_len = random.randint(self.T // 64, self.T // 8)
             t_start = random.randint(0, max(0, self.T - seg_len))
