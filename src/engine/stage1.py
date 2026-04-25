@@ -125,9 +125,12 @@ class Stage1Trainer(BaseTrainer):
                 self.scaler.unscale_(self.optimizer)
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
+            scale_before = float(self.scaler.get_scale()) if self.use_amp else 1.0
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            self.lr_scheduler.step()
+            scale_after = float(self.scaler.get_scale()) if self.use_amp else 1.0
+            if scale_after >= scale_before:
+                self.lr_scheduler.step()
 
             lr = self._current_lr()
             metrics = {

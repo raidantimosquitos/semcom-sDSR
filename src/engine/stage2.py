@@ -177,9 +177,14 @@ class Stage2Trainer(BaseTrainer):
             self.scaler.unscale_(self.optimizer)
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
+        scale_before = float(self.scaler.get_scale()) if self.use_amp else 1.0
         self.scaler.step(self.optimizer)
         self.scaler.update()
-        self.lr_scheduler.step()
+        scale_after = float(self.scaler.get_scale()) if self.use_amp else 1.0
+        # When GradScaler detects inf/NaN grads, it skips optimizer.step() and
+        # reduces the scale. Only advance LR schedule when we actually stepped.
+        if scale_after >= scale_before:
+            self.lr_scheduler.step()
 
         lr = self._current_lr()
         return {
