@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
+from torch.optim.lr_scheduler import MultiStepLR
 
 from .base import BaseTrainer
 
@@ -43,7 +44,6 @@ class Stage2Trainer(BaseTrainer):
         lambda_focal: float = 1.0,
         lambda_sub: float = 1.0,
         lr: float = 2e-4,
-        lr_min: float = 1e-5,
         batch_size: int = 16,
         grad_clip: float | None = 1.0,
         log_every: int = 50,
@@ -63,7 +63,6 @@ class Stage2Trainer(BaseTrainer):
         self.lambda_focal = lambda_focal
         self.lambda_sub = lambda_sub
         self.lr = lr
-        self.lr_min = lr_min
         self.total_steps = total_steps
 
         # Dataset run name must match base.machine_type (single type or joined multi-type)
@@ -89,6 +88,12 @@ class Stage2Trainer(BaseTrainer):
         # Optimizer for trainable params only (object_decoder, anomaly_detection)
         trainable = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.Adam(trainable, lr=lr)
+        ts = max(1, int(total_steps))
+        m80 = int(0.8 * ts)
+        milestones = [m80] if m80 > 0 else []
+        self.lr_scheduler = MultiStepLR(
+            self.optimizer, milestones=milestones, gamma=0.1
+        )
         self.scaler = GradScaler(self.device.type, enabled=self.use_amp)
 
         from ..models.sDSR.loss import FocalLoss
@@ -107,13 +112,12 @@ class Stage2Trainer(BaseTrainer):
         n_params = sum(p.numel() for p in trainable)
         self._tee(
             f"Stage2 | Device: {self.device} | AMP: {self.use_amp} | "
-            f"DataLoader workers: {self.num_workers} | Trainable params: {n_params:,}"
+            f"DataLoader workers: {self.num_workers} | Trainable params: {n_params:,} | "
+            f"LR: MultiStepLR milestones={milestones} gamma=0.1"
         )
 
-    def _get_lr(self, step: int, total_steps: int) -> float:
-        progress = step / max(1, total_steps)
-        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return self.lr_min + cosine * (self.lr - self.lr_min)
+    def _current_lr(self) -> float:
+        return float(self.optimizer.param_groups[0]["lr"])
 
     def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
         """
@@ -124,10 +128,6 @@ class Stage2Trainer(BaseTrainer):
         """
         x = batch["image"].to(self.device, non_blocking=True)
         M_gt = batch["anomaly_mask"].to(self.device, non_blocking=True)
-
-        lr = self._get_lr(step, total_steps)
-        for pg in self.optimizer.param_groups:
-            pg["lr"] = lr
 
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -179,7 +179,9 @@ class Stage2Trainer(BaseTrainer):
 
         self.scaler.step(self.optimizer)
         self.scaler.update()
+        self.lr_scheduler.step()
 
+        lr = self._current_lr()
         return {
             "total": total_loss.item(),
             "recon": loss_recon.item(),
@@ -208,6 +210,7 @@ class Stage2Trainer(BaseTrainer):
             "model_state_dict": self.model.state_dict(),
             "optim_state_dict": self.optimizer.state_dict(),
             "scaler_state_dict": self.scaler.state_dict(),
+            "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
             "best_total_loss": self.best_total_loss,
         }
 
@@ -240,6 +243,14 @@ class Stage2Trainer(BaseTrainer):
         self.global_step = ckpt.get("global_step", 0)
         if "best_total_loss" in ckpt:
             self.best_total_loss = ckpt["best_total_loss"]
+        if "lr_scheduler_state_dict" in ckpt:
+            self.lr_scheduler.load_state_dict(ckpt["lr_scheduler_state_dict"])
+        elif self.global_step > 0:
+            self.lr_scheduler.last_epoch = int(self.global_step) - 1
+            self._tee(
+                "Warning: checkpoint has no lr_scheduler_state_dict; "
+                "scheduler last_epoch aligned to global_step (LR may differ from original run)."
+            )
         self._tee(f"Resumed from {path} at step {self.global_step}")
 
     def _on_training_end(self) -> None:
@@ -319,6 +330,7 @@ class Stage2Trainer(BaseTrainer):
             "model_state_dict": self.model.state_dict(),
             "optim_state_dict": self.optimizer.state_dict(),
             "scaler_state_dict": self.scaler.state_dict(),
+            "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
             f"{attr}": value,
         }
         old = self._val_best_ckpt_paths.get(suffix)

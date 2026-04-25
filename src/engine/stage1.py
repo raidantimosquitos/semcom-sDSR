@@ -7,13 +7,13 @@ Any encoder that returns this tuple can be used.
 
 from __future__ import annotations
 
-import math
 from typing import Any
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.data import DataLoader
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
@@ -30,9 +30,6 @@ class Stage1Trainer(BaseTrainer):
     Model must implement forward(x) returning:
         (loss_fine, loss_coarse, recon, q_coarse, q_fine, perplexity_coarse, perplexity_fine)
 
-    Training logic matches the 3DSR-style VQ-VAE loop (forward, VQ losses + reconstruction,
-    backward, step). Reconstruction is L2 (MSE) on spectrograms, computed in float32 outside
-    autocast so AMP does not overflow the recon term in the decoder path.
     """
 
     def __init__(
@@ -42,8 +39,7 @@ class Stage1Trainer(BaseTrainer):
         machine_type: str = "unknown",
         lambda_recon: float = 1.0,
         lr: float = 2e-4,
-        lr_min: float = 1e-5,
-        batch_size: int = 64,
+        batch_size: int = 256,
         grad_clip: float | None = 1.0,
         log_every: int = 100,
         ckpt_every: int = 2000,
@@ -56,7 +52,6 @@ class Stage1Trainer(BaseTrainer):
         self.machine_type = machine_type
         self.lambda_recon = lambda_recon
         self.lr = lr
-        self.lr_min = lr_min
         self.dataset = dataset
         self.total_steps = total_steps
 
@@ -79,6 +74,12 @@ class Stage1Trainer(BaseTrainer):
         )
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        ts = max(1, int(total_steps))
+        m80, m90 = int(0.8 * ts), int(0.9 * ts)
+        milestones = sorted({m for m in (m80, m90) if m > 0})
+        self.lr_scheduler = MultiStepLR(
+            self.optimizer, milestones=milestones, gamma=0.1
+        )
         self.scaler = GradScaler(self.device.type, enabled=self.use_amp)
         self.best_total_loss = float("inf")
         self._last_ckpt_path: Path | None = None
@@ -88,13 +89,12 @@ class Stage1Trainer(BaseTrainer):
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         self._tee(
             f"Stage1 | Device: {self.device} | AMP: {self.use_amp} | "
-            f"DataLoader workers: {self.num_workers} | Params: {n_params:,}"
+            f"DataLoader workers: {self.num_workers} | Params: {n_params:,} | "
+            f"LR: MultiStepLR milestones={milestones} gamma=0.1"
         )
 
-    def _get_lr(self, step: int, total_steps: int) -> float:
-        progress = step / max(1, total_steps)
-        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return self.lr_min + cosine * (self.lr - self.lr_min)
+    def _current_lr(self) -> float:
+        return float(self.optimizer.param_groups[0]["lr"])
 
     def _step(self, batch: Any, step: int, total_steps: int) -> dict[str, float]:
         if isinstance(batch, (list, tuple)):
@@ -102,10 +102,6 @@ class Stage1Trainer(BaseTrainer):
         else:
             x = batch
         x = x.to(self.device, non_blocking=True)
-
-        lr = self._get_lr(step, total_steps)
-        for pg in self.optimizer.param_groups:
-            pg["lr"] = lr
 
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -131,7 +127,9 @@ class Stage1Trainer(BaseTrainer):
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            self.lr_scheduler.step()
 
+            lr = self._current_lr()
             metrics = {
                 "total": float(total_loss.detach().item()),
                 "recon": float(recon_loss.detach().item()),
@@ -151,9 +149,10 @@ class Stage1Trainer(BaseTrainer):
                 "(decoder/recon path overflowed). If this repeats, try --no_amp or lower lr."
             )
             self._nonfinite_step_warned = True
+        lr_log = self._current_lr()
         if self._last_finite_log is not None:
             fallback = dict(self._last_finite_log)
-            fallback["lr"] = lr
+            fallback["lr"] = lr_log
             return fallback
         return {
             "total": float("nan"),
@@ -162,7 +161,7 @@ class Stage1Trainer(BaseTrainer):
             "loss_coarse": float(loss_coarse.detach().item()),
             "perplexity_fine": float(perp_fine.detach().item()),
             "perplexity_coarse": float(perp_coarse.detach().item()),
-            "lr": lr,
+            "lr": lr_log,
         }
 
     def _log(self, avg: dict[str, float], its_sec: float) -> None:
@@ -182,6 +181,7 @@ class Stage1Trainer(BaseTrainer):
             "model_state_dict": self.model.state_dict(),
             "optim_state_dict": self.optimizer.state_dict(),
             "scaler_state_dict": self.scaler.state_dict(),
+            "lr_scheduler_state_dict": self.lr_scheduler.state_dict(),
             "best_total_loss": self.best_total_loss,
             "target_T": int(self.dataset.target_T),
             "n_mels": int(self.dataset.data.shape[2]),
@@ -241,6 +241,14 @@ class Stage1Trainer(BaseTrainer):
         self.global_step = ckpt["global_step"]
         if "best_total_loss" in ckpt:
             self.best_total_loss = ckpt["best_total_loss"]
+        if "lr_scheduler_state_dict" in ckpt:
+            self.lr_scheduler.load_state_dict(ckpt["lr_scheduler_state_dict"])
+        elif self.global_step > 0:
+            self.lr_scheduler.last_epoch = int(self.global_step) - 1
+            self._tee(
+                "Warning: checkpoint has no lr_scheduler_state_dict; "
+                "scheduler last_epoch aligned to global_step (LR may differ from original run)."
+            )
         self._tee(f"Resumed from {path} at step {self.global_step}")
 
     def _extract_x(self, batch: Any) -> torch.Tensor:
