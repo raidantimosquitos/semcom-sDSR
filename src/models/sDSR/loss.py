@@ -24,7 +24,7 @@ class FocalLoss(nn.Module):
         gamma: float = 2.0,
         alpha: float | None = None,
         reduction: str = "mean",
-        smoothing: float = 0.0,
+        smoothing: float = 1e-5,
     ) -> None:
         """
         Args:
