@@ -233,86 +233,39 @@ class SpectromorphicMaskStrategy:
         #     t_start = random.randint(0, max(0, self.T - seg_len))
         #     mask[i0:i1, t_start : t_start + seg_len] = 1.0
 
+        min_band_frac = 0.05
+        max_band_frac = 0.4
+        num_segs_range = (2, 6)
+        min_aug_frac = 0.2
+        max_aug_frac = 0.8
 
-        
-        rng = np.random.default_rng()
-        min_band_width = 8
-        max_band_width = 32
-        min_splits = 1
-        max_splits = 6
-        p_activate_segment = 0.7
-        min_event_len = 3
-        max_event_len = 20
+         # ── Step 1: frequency band ───────────────────────────────────────────────
+        band_h = random.randint(
+            max(1, int(min_band_frac * self.n_mels)),
+            max(1, int(max_band_frac * self.n_mels)),
+        )
+        band_lo = random.randint(0, self.n_mels - band_h)
+        band_hi = band_lo + band_h  # exclusive
 
+        # ── Step 2: partition time axis into N contiguous segments ───────────────
+        num_segs = random.randint(*num_segs_range)
+        # Draw (num_segs - 1) unique interior cut points, then sort
+        cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
+        boundaries = [0] + cut_points + [self.T]
+        segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
 
-        # ---- 1. Frequency band (safe) ----
-        max_band_width = min(max_band_width, self.n_mels)
-        min_band_width = min(min_band_width, max_band_width)
+        # ── Step 3: augment a random consecutive run within each segment ─────────
+        for seg_start, seg_end in segments:
+            seg_len = seg_end - seg_start
+            if seg_len < 1:
+                continue
 
-        band_width = rng.integers(min_band_width, max_band_width + 1)
-        f_start_max = self.n_mels - band_width
-        f_start = rng.integers(0, f_start_max + 1) if f_start_max > 0 else 0
-        f_end = f_start + band_width
-
-        # ---- 2. Time segmentation (safe) ----
-        max_splits = min(max_splits, max(1, self.T - 1))
-        min_splits = min(min_splits, max_splits)
-
-        n_splits = rng.integers(min_splits, max_splits + 1)
-
-        if n_splits > 0:
-            split_points = np.sort(
-                rng.choice(np.arange(1, self.T), size=n_splits, replace=False)
+            run_len = random.randint(
+                max(1, int(min_aug_frac * seg_len)),
+                max(1, int(max_aug_frac * seg_len)),
             )
-            segments = np.split(np.arange(self.T), split_points)
-        else:
-            segments = [np.arange(self.T)]
-
-        # ---- 3. Segment-wise anomaly generation ----
-        for seg in segments:
-            seg_len = len(seg)
-            if seg_len == 0:
-                continue
-
-            # Activate segment?
-            if rng.random() > p_activate_segment:
-                continue
-
-            seg_start = seg[0]
-            seg_end = seg[-1] + 1
-
-            # ---- Safe event length bounds ----
-            max_len = min(max_event_len, seg_len)
-            min_len = min(min_event_len, max_len)
-
-            # If even 1 frame isn't possible (shouldn't happen, but safe)
-            if max_len < 1:
-                continue
-
-            # Number of events (bounded by segment size)
-            max_events = max(1, seg_len // max(1, min_len))
-            n_events = rng.integers(1, min(3, max_events) + 1)
-
-            for _ in range(n_events):
-                # Recompute bounds (important if seg_len is tiny)
-                max_len = min(max_event_len, seg_len)
-                min_len = min(min_event_len, max_len)
-
-                if min_len > max_len:
-                    continue  # safety fallback
-
-                event_len = rng.integers(min_len, max_len + 1)
-
-                t_start_max = seg_end - event_len
-                if t_start_max < seg_start:
-                    t0 = seg_start
-                else:
-                    t0 = rng.integers(seg_start, t_start_max + 1)
-
-                t1 = t0 + event_len
-
-                mask[f_start:f_end, t0:t1] = 1
-
+            run_start = random.randint(0, seg_len - run_len)
+            mask[band_lo:band_hi, seg_start + run_start : seg_start + run_start + run_len] = 1.0
 
         return mask
 
