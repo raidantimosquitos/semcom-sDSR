@@ -99,8 +99,8 @@ class VQ_VAE_2Layer(nn.Module):
             self.hidden_channels_fine + self.embedding_dim_coarse, self.embedding_dim_fine, kernel_size=1, stride=1
         )
 
-        # Upsampling layer
-        self._upscale_coarse = nn.ConvTranspose2d(self.embedding_dim_coarse, self.embedding_dim_fine, kernel_size=4, stride=2, padding=1)
+        # Upscaling layer
+        self._upscale_coarse = nn.ConvTranspose2d(self.embedding_dim_coarse, self.embedding_dim_coarse, kernel_size=4, stride=2, padding=1)
 
         # Vector quantizers
         self._vq_coarse = VectorQuantizerEMA(
