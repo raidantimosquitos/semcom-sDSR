@@ -287,7 +287,6 @@ def run_stage2(args: argparse.Namespace) -> None:
     # spectromorphic masks are chosen per sample from dataset machine_type.
     train_dataset = AudDSRAnomTrainDataset(
         q_vae_dataset,
-        strategy="audio_specific",
         zero_mask_prob=0.5,
         adversarial_dataset=adversarial_dataset,
         machine_type=single_machine_type,

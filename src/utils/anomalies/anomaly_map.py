@@ -134,7 +134,7 @@ def _sample_mel_band(
         hi = min(f_max_hz, b_hi)
         if hi - lo < 1.0:
             continue
-
+            
         bw = random.uniform(
             min(bw_min_hz, hi - lo),
             min(bw_max_hz, hi - lo),
@@ -200,17 +200,17 @@ class SpectromorphicMaskStrategy:
         """Mel band × renewal-modulated time vector."""
         mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
 
-        band = _sample_mel_band(
-            self.n_mels, self.f_min_hz, self.f_max_hz, self.bw_min_hz, self.bw_max_hz
-        )
-        if band is None:
-            # Hard fallback: tiny band, partial time via a single renewal
-            band = _hz_band_to_mel_bins(
-                self.f_min_hz, self._FALLBACK_BW_HZ,
-                self.n_mels, self.f_min_hz, self.f_max_hz,
-            )
+        # band = _sample_mel_band(
+        #     self.n_mels, self.f_min_hz, self.f_max_hz, self.bw_min_hz, self.bw_max_hz
+        # )
+        # if band is None:
+        #     # Hard fallback: tiny band, partial time via a single renewal
+        #     band = _hz_band_to_mel_bins(
+        #         self.f_min_hz, self._FALLBACK_BW_HZ,
+        #         self.n_mels, self.f_min_hz, self.f_max_hz,
+        #     )
 
-        i0, i1 = band
+        # i0, i1 = band
 
         # rng = np.random.default_rng()
         # band_width = rng.integers(6, 50 + 1)
@@ -227,11 +227,57 @@ class SpectromorphicMaskStrategy:
         # mask[i0:i1, :] = time_track
 
         # Sample K independent contiguous time segments
-        n_segments = random.randint(1, 4)
-        for _ in range(n_segments):
-            seg_len = random.randint(self.T // 20, self.T // 4 + 1)
-            t_start = random.randint(0, max(0, self.T - seg_len))
-            mask[i0:i1, t_start : t_start + seg_len] = 1.0
+        # n_segments = random.randint(1, 4)
+        # for _ in range(n_segments):
+        #     seg_len = random.randint(self.T // 20, self.T // 4 + 1)
+        #     t_start = random.randint(0, max(0, self.T - seg_len))
+        #     mask[i0:i1, t_start : t_start + seg_len] = 1.0
+
+
+        
+        rng = np.random.default_rng()
+        min_band_width = 8
+        max_band_width = 32
+        min_splits = 1
+        max_splits = 6
+        p_activate_segment = 0.7
+        min_event_len = 3
+        max_event_len = 20
+
+
+        # ---- 1. Sample frequency band ----
+        band_width = rng.integers(min_band_width, max_band_width + 1)
+        f_start = rng.integers(0, self.n_mels - band_width + 1)
+        f_end = f_start + band_width
+
+        # ---- 2. Split time axis into segments ----
+        n_splits = rng.integers(min_splits, max_splits + 1)
+
+        # Sample split points and sort
+        split_points = np.sort(rng.choice(np.arange(1, self.T), size=n_splits, replace=False))
+        segments = np.split(np.arange(self.T), split_points)
+
+        # ---- 3. Within each segment, activate anomalies ----
+        for seg in segments:
+            if len(seg) == 0:
+                continue
+
+            # Decide whether this segment contains anomalies
+            if rng.random() > p_activate_segment:
+                continue
+
+            seg_start, seg_end = seg[0], seg[-1] + 1
+            seg_len = seg_end - seg_start
+
+            # Number of anomaly events inside this segment
+            n_events = rng.integers(1, 3)
+
+            for _ in range(n_events):
+                event_len = rng.integers(min_event_len, min(max_event_len, seg_len) + 1)
+                t0 = rng.integers(seg_start, seg_end - event_len + 1)
+                t1 = t0 + event_len
+
+                mask[f_start:f_end, t0:t1] = 1
 
         return mask
 
@@ -265,8 +311,6 @@ class AnomalyMapGenerator:
     Args:
         spectrogram_shape: ``(n_mels, T)`` of the model input.
         q_shape: output shape (defaults to ``spectrogram_shape``).
-        zero_mask_prob: probability of an all-zero (normal) mask when
-            ``force_anomaly=False``.
         **strategy_kwargs: forwarded to :class:`SpectromorphicMaskStrategy`.
     """
 
@@ -274,13 +318,11 @@ class AnomalyMapGenerator:
         self,
         spectrogram_shape: tuple[int, int],
         q_shape: tuple[int, int] | None = None,
-        zero_mask_prob: float = 0.5,
         **strategy_kwargs,
     ) -> None:
         n_mels, T = spectrogram_shape
         self.spectrogram_shape = spectrogram_shape
         self.q_shape = q_shape or spectrogram_shape
-        self.zero_mask_prob = zero_mask_prob
         self._strategy = SpectromorphicMaskStrategy(
             n_mels=n_mels, T=T, q_shape=self.q_shape, **strategy_kwargs
         )
@@ -289,29 +331,18 @@ class AnomalyMapGenerator:
         self,
         batch_size: int,
         device: torch.device | str,
-        force_anomaly: bool = False,
     ) -> torch.Tensor:
         """
         Generate ``(B, 1, *q_shape)`` anomaly masks.
 
-        If ``force_anomaly=True``, all masks are non-zero.
-        Otherwise each is zeroed with probability ``zero_mask_prob``.
+        This generator **only** produces anomaly masks (non-zero). Sampling
+        normal/zero masks is handled at the dataset level.
         """
-        if force_anomaly:
-            return self._strategy(batch_size, device)
-
-        masks = []
-        for _ in range(batch_size):
-            if random.random() < self.zero_mask_prob:
-                masks.append(torch.zeros(1, 1, *self.spectrogram_shape, device=device))
-            else:
-                masks.append(self._strategy(1, device))
-        return torch.cat(masks, dim=0)
+        return self._strategy(batch_size, device)
 
     def generate_for_training_sample(
         self,
         device: torch.device | str,
-        force_anomaly: bool = True,
     ) -> torch.Tensor:
         """Convenience wrapper for a single sample."""
-        return self.generate(1, device, force_anomaly=force_anomaly)
+        return self.generate(1, device)
