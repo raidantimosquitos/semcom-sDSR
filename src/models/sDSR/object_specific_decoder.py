@@ -30,8 +30,8 @@ class ObjectSpecificDecoder(nn.Module):
         embedding_dim: Tuple[int, int],
         hidden_channels: Tuple[int, int],
         num_residual_layers: int,
+        coarse_upscaler: nn.Module,
         use_subspace_restriction: bool = True,
-        coarse_upscaler: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self._embedding_dim_coarse, self._embedding_dim_fine = embedding_dim
@@ -40,10 +40,9 @@ class ObjectSpecificDecoder(nn.Module):
         self._coarse_upscaler = coarse_upscaler
 
         # The upsampler must stay frozen (borrowed from Stage-1 VQ-VAE-2).
-        if self._coarse_upscaler is not None:
-            for p in self._coarse_upscaler.parameters():
-                p.requires_grad = False
-            self._coarse_upscaler.eval()
+        for p in self._coarse_upscaler.parameters():
+            p.requires_grad = False
+        self._coarse_upscaler.eval()
 
         if use_subspace_restriction:
             self._subspace_coarse = SubspaceRestrictionModule(embedding_size=self._embedding_dim_coarse)
@@ -59,7 +58,7 @@ class ObjectSpecificDecoder(nn.Module):
         )
 
     def _upsample_coarse_to_fine_grid(
-        self, q_coarse: torch.Tensor, q_fine: torch.Tensor
+        self, q_coarse: torch.Tensor
     ) -> torch.Tensor:
         """
         Upsample coarse latent to fine latent grid.
@@ -67,15 +66,10 @@ class ObjectSpecificDecoder(nn.Module):
         If a VQ-VAE-2 upsampler is provided, it is used (frozen).
         Otherwise fall back to bilinear interpolation.
         """
-        if self._coarse_upscaler is not None:
-            with torch.no_grad():
-                q_coarse_up = self._coarse_upscaler(q_coarse)
-            # Ensure the SRN never backprops into the frozen upsampler output.
-            return q_coarse_up.detach()
-
-        return F.interpolate(
-            q_coarse, size=q_fine.shape[-2:], mode="bilinear", align_corners=False
-        )
+        with torch.no_grad():
+            q_coarse_up = self._coarse_upscaler(q_coarse)
+        # Ensure the SRN never backprops into the frozen upsampler output.
+        return q_coarse_up.detach()
 
     def forward(
         self,
@@ -112,13 +106,13 @@ class ObjectSpecificDecoder(nn.Module):
             assert self._subspace_coarse is not None and self._subspace_fine is not None
             recon_feat_coarse, q_coarse_r, _ = self._subspace_coarse(q_coarse, vq_coarse)
             recon_feat_fine, q_fine_r, _ = self._subspace_fine(q_fine, vq_fine)
-            q_coarse_up = self._upsample_coarse_to_fine_grid(q_coarse_r, q_fine_r)
+            q_coarse_up = self._upsample_coarse_to_fine_grid(q_coarse_r)
             x_s = self.spectrogram_reconstruction_network(q_coarse_up, q_fine_r)
             if return_aux:
                 aux["recon_feat_coarse"] = recon_feat_coarse
                 aux["recon_feat_fine"] = recon_feat_fine
         else:
-            q_coarse_up = self._upsample_coarse_to_fine_grid(q_coarse, q_fine)
+            q_coarse_up = self._upsample_coarse_to_fine_grid(q_coarse)
             x_s = self.spectrogram_reconstruction_network(q_coarse_up, q_fine)
 
         if return_aux:
@@ -160,12 +154,6 @@ class SpectrogramReconstructionNetwork(nn.Module):
             nn.ReLU(inplace=True),
         )
         self._mp1 = nn.MaxPool2d(kernel_size=2)
-        # self._mp1 = nn.Sequential(
-        #     nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, stride=2, padding=1),
-        #     norm_layer(in_channels * 2),
-        #     nn.ReLU(inplace=True),
-        # )
-
         self._block2 = nn.Sequential(
             nn.Conv2d(in_channels * 2, in_channels * 2, kernel_size=3, padding=1),
             norm_layer(in_channels * 2),
@@ -175,18 +163,12 @@ class SpectrogramReconstructionNetwork(nn.Module):
             nn.ReLU(inplace=True),
         )
         self._mp2 = nn.MaxPool2d(kernel_size=2)
-        # self._mp2 = nn.Sequential(
-        #     nn.Conv2d(in_channels * 4, in_channels * 4, kernel_size=3, stride=2, padding=1),
-        #     norm_layer(in_channels * 4),
-        #     nn.ReLU(inplace=True),
-        # )
+        self._bottleneck_conv = nn.Conv2d(in_channels * 4, 64, kernel_size=1)
 
-        self._bottleneck_conv = nn.Conv2d(in_channels * 4, in_channels // 2, kernel_size=1)
+        self._upblock1 = nn.ConvTranspose2d(64, 64, kernel_size=4, stride=2, padding=1)
+        self._upblock2 = nn.ConvTranspose2d(64, 64, kernel_size=4, stride=2, padding=1)
 
-        self._upblock1 = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, kernel_size=4, stride=2, padding=1)
-        self._upblock2 = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, kernel_size=4, stride=2, padding=1)
-
-        self._conv_1 = nn.Conv2d(in_channels // 2, hidden_channels, kernel_size=3, stride=1, padding=1)
+        self._conv_1 = nn.Conv2d(64, hidden_channels, kernel_size=3, stride=1, padding=1)
 
         self._residual_stack = ResidualStack(
             hidden_channels, hidden_channels, num_residual_layers, half

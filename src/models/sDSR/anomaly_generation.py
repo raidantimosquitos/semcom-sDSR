@@ -245,7 +245,7 @@ class AnomalyGeneration(nn.Module):
             z_c = z_coarse if z_coarse is not None else q_coarse
             q_coarse_a = generate_fake_anomalies_distant(
                 z_c, q_coarse, cb_coarse, M_coarse, strength_coarse,
-                closest_skip_frac=0.03,
+                closest_skip_frac=0.05,
             )
 
         if not augment_fine:
