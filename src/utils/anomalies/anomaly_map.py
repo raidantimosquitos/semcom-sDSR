@@ -235,9 +235,6 @@ class SpectromorphicMaskStrategy:
 
         min_band_frac = 0.05
         max_band_frac = 0.4
-        num_segs_range = (1, 6)
-        min_aug_frac = 0.2
-        max_aug_frac = 1.0
 
          # ── Step 1: frequency band ───────────────────────────────────────────────
         band_h = random.randint(
@@ -248,21 +245,23 @@ class SpectromorphicMaskStrategy:
         band_hi = band_lo + band_h  # exclusive
 
         # ── Step 2: partition time axis into N contiguous segments ───────────────
-        num_segs = random.randint(*num_segs_range)
+        num_segs = random.randint(2, random.randint(2, 8))
         # Draw (num_segs - 1) unique interior cut points, then sort
         cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
         boundaries = [0] + cut_points + [self.T]
         segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
 
         # ── Step 3: augment a random consecutive run within each segment ─────────
+        aug_lo = random.uniform(0.05, 0.40)
+        aug_hi = random.uniform(aug_lo + 0.10, min(aug_lo + 0.60, 0.95))
         for seg_start, seg_end in segments:
             seg_len = seg_end - seg_start
             if seg_len < 1:
                 continue
 
             run_len = random.randint(
-                max(1, int(min_aug_frac * seg_len)),
-                max(1, int(max_aug_frac * seg_len)),
+                max(1, int(aug_lo * seg_len)),
+                max(1, int(aug_hi * seg_len)),
             )
             run_start = random.randint(0, seg_len - run_len)
             mask[band_lo:band_hi, seg_start + run_start : seg_start + run_start + run_len] = 1.0
