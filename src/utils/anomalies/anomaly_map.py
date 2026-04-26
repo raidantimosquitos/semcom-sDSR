@@ -212,13 +212,13 @@ class SpectromorphicMaskStrategy:
 
         i0, i1 = band
 
-        rng = np.random.default_rng()
-        band_width = rng.integers(6, 50 + 1)
-        f_start = rng.integers(0, self.n_mels - band_width + 1)
-        f_end = f_start + band_width
+        # rng = np.random.default_rng()
+        # band_width = rng.integers(6, 50 + 1)
+        # f_start = rng.integers(0, self.n_mels - band_width + 1)
+        # f_end = f_start + band_width
 
-        i0 = f_start
-        i1 = f_end
+        # i0 = f_start
+        # i1 = f_end
 
         # p_on, p_off = _renewal_params(self.T)
         # mu_on = 1.0 / p_on
