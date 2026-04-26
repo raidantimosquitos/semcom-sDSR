@@ -213,7 +213,7 @@ class SpectromorphicMaskStrategy:
         i0, i1 = band
 
         rng = np.random.default_rng()
-        band_width = rng.integers(8, 32 + 1)
+        band_width = rng.integers(6, 50 + 1)
         f_start = rng.integers(0, self.n_mels - band_width + 1)
         f_end = f_start + band_width
 
@@ -227,9 +227,9 @@ class SpectromorphicMaskStrategy:
         # mask[i0:i1, :] = time_track
 
         # Sample K independent contiguous time segments
-        n_segments = random.randint(1, 5+1)
+        n_segments = random.randint(1, 4)
         for _ in range(n_segments):
-            seg_len = random.randint(self.T // 64, self.T // 8 + 1)
+            seg_len = random.randint(self.T // 20, self.T // 4 + 1)
             t_start = random.randint(0, max(0, self.T - seg_len))
             mask[i0:i1, t_start : t_start + seg_len] = 1.0
 
