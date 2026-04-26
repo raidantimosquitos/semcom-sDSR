@@ -235,9 +235,9 @@ class SpectromorphicMaskStrategy:
 
         min_band_frac = 0.05
         max_band_frac = 0.4
-        num_segs_range = (2, 6)
+        num_segs_range = (1, 6)
         min_aug_frac = 0.2
-        max_aug_frac = 0.8
+        max_aug_frac = 1.0
 
          # ── Step 1: frequency band ───────────────────────────────────────────────
         band_h = random.randint(

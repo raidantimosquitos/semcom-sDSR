@@ -19,8 +19,8 @@ BATCH_SIZE=16
 
 # Single shared stage1 trained on all machine types (same run_name as experiment_grid.sh)
 RUN_NAME="ToyCar+ToyConveyor+fan+pump+slider+valve"
-STAGE1_DIR="${CKPT_DIR}/stage1/${RUN_NAME}"
-STAGE1_BEST="${STAGE1_DIR}/stage1_${RUN_NAME}_best.pt"
+STAGE1_DIR="${CKPT_DIR}/stage1_e64_h128_Kc512_Kf512/stage1/${RUN_NAME}"
+STAGE1_BEST="${STAGE1_DIR}/stage1_${RUN_NAME}_final.pt"
 # Optional: override if you use a different stage1 path or stamp
 if [[ -n "${STAGE1_CKPT:-}" ]]; then
   STAGE1_BEST="$STAGE1_CKPT"
