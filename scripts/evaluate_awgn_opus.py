@@ -38,7 +38,7 @@ from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
 from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
 from src.utils.audio import standardize_spectrogram
-from src.utils.stage1_norm import load_norm_from_stage1_ckpt
+from src.utils.audio import standardize_spectrogram
 
 from src.comm.bitflip_ber import load_ber_curve_csv, bitflip_bytes
 from src.comm.ogg_payload import bitflip_ogg_payload_pages
@@ -366,8 +366,9 @@ def main() -> None:
     print(f"[opus] using ffmpeg binary: {ffmpeg_bin}")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    use_norm = bool(stage1_ckpt.get("spectrogram_standardize", True))
-    norm_mean, norm_std = load_norm_from_stage1_ckpt(stage1_ckpt) if use_norm else (None, None)
+    # Normalization is disabled project-wide: always evaluate in raw log-mel dB.
+    use_norm = False
+    norm_mean, norm_std = None, None
 
     train_ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,

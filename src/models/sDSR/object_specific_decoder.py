@@ -66,10 +66,10 @@ class ObjectSpecificDecoder(nn.Module):
         If a VQ-VAE-2 upsampler is provided, it is used (frozen).
         Otherwise fall back to bilinear interpolation.
         """
+        # Upscaler is borrowed from frozen stage-1 VQ-VAE; keep it out of autograd.
         with torch.no_grad():
             q_coarse_up = self._coarse_upscaler(q_coarse)
-        # Ensure the SRN never backprops into the frozen upsampler output.
-        return q_coarse_up.detach()
+        return q_coarse_up
 
     def forward(
         self,

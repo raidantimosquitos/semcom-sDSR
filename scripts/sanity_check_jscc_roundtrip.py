@@ -71,13 +71,9 @@ def main() -> None:
     jscc = JSCCDualMap(coarse=coarse_cfg, fine=fine_cfg).eval().to(device)
     jscc.load_state_dict(jscc_ckpt["jscc_state_dict"])
 
-    use_norm = bool(stage1.get("spectrogram_standardize", True))
-    if use_norm:
-        from src.utils.stage1_norm import load_norm_from_stage1_ckpt
-
-        norm_mean, norm_std = load_norm_from_stage1_ckpt(stage1)
-    else:
-        norm_mean, norm_std = None, None
+    # Normalization is disabled project-wide: always use raw log-mel dB.
+    use_norm = False
+    norm_mean, norm_std = None, None
 
     ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,

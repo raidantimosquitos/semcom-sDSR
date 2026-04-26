@@ -28,7 +28,6 @@ from src.engine.stage1 import Stage1Trainer
 from src.engine.stage2 import Stage2Trainer
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
-from src.utils.stage1_norm import load_norm_from_stage1_ckpt
 from src.utils.nn import weights_init
 
 
@@ -71,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument(
         "--no_norm",
         action="store_true",
-        help="Disable spectrogram standardization (use raw log-mel dB). If set, stage2/eval will also skip normalization when using this stage1 checkpoint.",
+        help="(Deprecated) Standardization is disabled project-wide; inputs are always raw log-mel dB.",
     )
 
     # Stage 2: one or more machine types (joint Stage 2 if multiple; default single fan)
@@ -177,7 +176,7 @@ def build_s_dsr(
 
 def run_stage1(args: argparse.Namespace) -> None:
     machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
-    standardize = not bool(getattr(args, "no_norm", False))
+    standardize = False
     if len(machine_types) == 1:
         dataset = DCASE2020Task2LogMelDataset(
             root=args.data_path,
@@ -227,8 +226,8 @@ def run_stage1(args: argparse.Namespace) -> None:
 
 def run_stage2(args: argparse.Namespace) -> None:
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    use_norm = bool(ckpt.get("spectrogram_standardize", True))
-    norm_mean, norm_std = load_norm_from_stage1_ckpt(ckpt) if use_norm else (None, None)
+    use_norm = False
+    norm_mean, norm_std = None, None
 
     machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
     if len(machine_types) > 1 and args.machine_id is not None:

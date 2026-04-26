@@ -101,7 +101,7 @@ class sDSR(nn.Module):
         self._anomaly_detection = AnomalyDetectionModule(
             in_channels=2,
             out_channels=2,
-            base_width=128,
+            base_width=64,
         )
 
         self._anomaly_generation = AnomalyGeneration(
@@ -137,8 +137,8 @@ class sDSR(nn.Module):
         )
 
     def _get_q_shape(self, n_mels: int, T: int) -> tuple[int, int]:
-        """Infer q_fine spatial shape from spectrogram (fine x2/x4 down -> 64x80 for 128x320)."""
-        H = n_mels // 2
+        """Infer q_fine spatial shape from spectrogram (fine x4/x4 down -> 32x80 for 128x320)."""
+        H = n_mels // 4
         W = T // 4
         return (max(1, H), max(1, W))
 
@@ -190,6 +190,7 @@ class sDSR(nn.Module):
             self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
+        # Inference: detach reconstructions so seg gradients don't flow upstream.
         m_out = self._anomaly_detection(x_specific.detach(), x_general.detach())
         if return_intermediates:
             return m_out, x_general, x_specific
@@ -219,6 +220,7 @@ class sDSR(nn.Module):
             self._vq_vae._vq_coarse, self._vq_vae._vq_fine,
             return_aux=False,
         )
+        # Inference: detach reconstructions so seg gradients don't flow upstream.
         m_out = self._anomaly_detection(x_specific.detach(), x_general.detach())
         if return_intermediates:
             return m_out, x_general, x_specific
@@ -291,6 +293,7 @@ class sDSR(nn.Module):
         use_coarse_a = is_coarse_only + is_both
         q_coarse_used = use_coarse_a * q_coarse_a + (1.0 - use_coarse_a) * q_coarse
 
+        # Stage-1 is frozen in stage-2 training: keep recompute/decoding out of autograd.
         with torch.no_grad():
             q_fine_recomp, z_fine_recomp = self._vq_vae.recompute_fine_from_coarse(
                 f_fine, q_coarse_used
@@ -321,7 +324,9 @@ class sDSR(nn.Module):
             return_aux=True,
         )
         x_specific, aux = out_dec
-        m_out = self._anomaly_detection(x_specific.detach(), x_general.detach())
+        # Training: match original behavior — let seg loss backprop into stage-2 modules.
+        # (Stage-1 is frozen and x_general is computed under no_grad.)
+        m_out = self._anomaly_detection(x_specific, x_general)
 
         # DSR-style focal target: same max_pool projection as feature injection,
         # then nearest-upsample to spectrogram resolution, mix by inj_mode.

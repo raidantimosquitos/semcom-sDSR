@@ -196,21 +196,9 @@ class Stage1Trainer(BaseTrainer):
             "hidden_channels_coarse": int(self.model.hidden_channels_coarse),
             "num_residual_layers": int(self.model.num_residual_layers),
         }
-        payload["spectrogram_standardize"] = bool(getattr(self.dataset, "standardize", True))
-        payload["spectrogram_norm_type"] = str(getattr(self.dataset, "norm_type", "unknown"))
-        norm_stats = getattr(self.dataset, "norm_stats", None)
-        if norm_stats:
-            payload["norm_stats"] = {
-                mt: {"mean": mean.cpu().clone(), "std": std.cpu().clone()}
-                for mt, (mean, std) in norm_stats.items()
-            }
-            payload["machine_types"] = list(norm_stats.keys())
-        else:
-            norm_mean = getattr(self.dataset, "norm_mean", None)
-            norm_std = getattr(self.dataset, "norm_std", None)
-            if norm_mean is not None and norm_std is not None:
-                payload["norm_mean"] = norm_mean.cpu().clone()
-                payload["norm_std"] = norm_std.cpu().clone()
+        # Normalization is disabled project-wide: checkpoints do not carry norm stats.
+        payload["spectrogram_standardize"] = False
+        payload["spectrogram_norm_type"] = "none"
 
         # 1. Delete previous latest checkpoint before saving new one
         tag = tag or f"iter_{self.global_step:06d}"
