@@ -245,39 +245,74 @@ class SpectromorphicMaskStrategy:
         max_event_len = 20
 
 
-        # ---- 1. Sample frequency band ----
+        # ---- 1. Frequency band (safe) ----
+        max_band_width = min(max_band_width, self.n_mels)
+        min_band_width = min(min_band_width, max_band_width)
+
         band_width = rng.integers(min_band_width, max_band_width + 1)
-        f_start = rng.integers(0, self.n_mels - band_width + 1)
+        f_start_max = self.n_mels - band_width
+        f_start = rng.integers(0, f_start_max + 1) if f_start_max > 0 else 0
         f_end = f_start + band_width
 
-        # ---- 2. Split time axis into segments ----
+        # ---- 2. Time segmentation (safe) ----
+        max_splits = min(max_splits, max(1, self.T - 1))
+        min_splits = min(min_splits, max_splits)
+
         n_splits = rng.integers(min_splits, max_splits + 1)
 
-        # Sample split points and sort
-        split_points = np.sort(rng.choice(np.arange(1, self.T), size=n_splits, replace=False))
-        segments = np.split(np.arange(self.T), split_points)
+        if n_splits > 0:
+            split_points = np.sort(
+                rng.choice(np.arange(1, self.T), size=n_splits, replace=False)
+            )
+            segments = np.split(np.arange(self.T), split_points)
+        else:
+            segments = [np.arange(self.T)]
 
-        # ---- 3. Within each segment, activate anomalies ----
+        # ---- 3. Segment-wise anomaly generation ----
         for seg in segments:
-            if len(seg) == 0:
+            seg_len = len(seg)
+            if seg_len == 0:
                 continue
 
-            # Decide whether this segment contains anomalies
+            # Activate segment?
             if rng.random() > p_activate_segment:
                 continue
 
-            seg_start, seg_end = seg[0], seg[-1] + 1
-            seg_len = seg_end - seg_start
+            seg_start = seg[0]
+            seg_end = seg[-1] + 1
 
-            # Number of anomaly events inside this segment
-            n_events = rng.integers(1, 3)
+            # ---- Safe event length bounds ----
+            max_len = min(max_event_len, seg_len)
+            min_len = min(min_event_len, max_len)
+
+            # If even 1 frame isn't possible (shouldn't happen, but safe)
+            if max_len < 1:
+                continue
+
+            # Number of events (bounded by segment size)
+            max_events = max(1, seg_len // max(1, min_len))
+            n_events = rng.integers(1, min(3, max_events) + 1)
 
             for _ in range(n_events):
-                event_len = rng.integers(min_event_len, min(max_event_len, seg_len) + 1)
-                t0 = rng.integers(seg_start, seg_end - event_len + 1)
+                # Recompute bounds (important if seg_len is tiny)
+                max_len = min(max_event_len, seg_len)
+                min_len = min(min_event_len, max_len)
+
+                if min_len > max_len:
+                    continue  # safety fallback
+
+                event_len = rng.integers(min_len, max_len + 1)
+
+                t_start_max = seg_end - event_len
+                if t_start_max < seg_start:
+                    t0 = seg_start
+                else:
+                    t0 = rng.integers(seg_start, t_start_max + 1)
+
                 t1 = t0 + event_len
 
                 mask[f_start:f_end, t0:t1] = 1
+
 
         return mask
 
