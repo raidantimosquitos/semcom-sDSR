@@ -11,6 +11,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def shuffle_patches(x: torch.Tensor, patch_size: int) -> torch.Tensor:
+    """
+    Shuffle non-overlapping patches using unfold/fold (reference DSR).
+
+    Note: if H/W are not divisible by patch_size, unfold will drop the border
+    and fold will leave those regions as zeros (same as the reference code).
+    """
+    if patch_size <= 1:
+        return x
+    ps = int(patch_size)
+    u = F.unfold(x, kernel_size=ps, stride=ps, padding=0)
+    pu = torch.cat([b_[:, torch.randperm(b_.shape[-1], device=x.device)][None, ...] for b_ in u], dim=0)
+    f = F.fold(pu, x.shape[-2:], kernel_size=ps, stride=ps, padding=0)
+    return f
+
+
 def spec_to_latent_pool_stride(
     H_spec: int,
     W_spec: int,
@@ -64,6 +80,7 @@ def generate_fake_anomalies_distant(
     mask: torch.Tensor,
     strength: torch.Tensor | float,
     closest_skip_frac: float = 0.05,
+    use_shuffle: bool = True,
 ) -> torch.Tensor:
     """
     Replace feature vectors in mask regions with codebook samples.
@@ -118,6 +135,13 @@ def generate_fake_anomalies_distant(
         chosen = topk_indices[torch.arange(topk_indices.shape[0], device=device), rand_col]
         random_vecs = cb[chosen]
         random_embeddings[k] = random_vecs.view(H, W, C).permute(2, 0, 1)
+
+    # Optional patch-shuffle mode (as in reference DSR code)
+    if use_shuffle:
+        use_shuffle_draw = torch.rand((), device=device).item()
+        if use_shuffle_draw > 0.5:
+            psize_factor = int(torch.randint(0, 4, (1,), device=device).item())  # 0..3 => 1,2,4,8
+            random_embeddings = shuffle_patches(embeddings, 2**psize_factor)
 
     mask_exp = mask.expand_as(embeddings)
     return mask_exp * random_embeddings + (1 - mask_exp) * embeddings
