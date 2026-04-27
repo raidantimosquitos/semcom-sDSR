@@ -15,6 +15,7 @@ from typing import Sequence
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.ndimage import rotate as nd_rotate
 
 from .perlin import rand_perlin_2d_np
 
@@ -90,6 +91,8 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     """
     min_perlin_scale = 0
     perlin_scale = 6  # randint in [0, 5] -> scales in {1,2,4,8,16,32}
+    angle_deg = random.uniform(-45.0, 45.0)
+    
     perlin_scaley = 2 ** int(random.randint(min_perlin_scale, perlin_scale - 1))
 
     scaley_exp = int(math.log2(perlin_scaley))
@@ -99,6 +102,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     perlin_scaley = max(1, min(perlin_scaley, n_mels))
 
     noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex))
+    noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
 
     # Optional flips (still dependency-free; helps mask variety)
     if random.random() < 0.5:
