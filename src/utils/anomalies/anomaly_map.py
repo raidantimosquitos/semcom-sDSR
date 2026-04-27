@@ -90,8 +90,11 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     """
     min_perlin_scale = 0
     perlin_scale = 6  # randint in [0, 5] -> scales in {1,2,4,8,16,32}
-    perlin_scalex = 2 ** int(random.randint(min_perlin_scale, perlin_scale - 1))
     perlin_scaley = 2 ** int(random.randint(min_perlin_scale, perlin_scale - 1))
+
+    scaley_exp = int(math.log2(perlin_scaley))
+
+    perlin_scalex = 2 ** int(random.randint(scaley_exp, perlin_scale - 1))
     perlin_scalex = max(1, min(perlin_scalex, T))
     perlin_scaley = max(1, min(perlin_scaley, n_mels))
 
@@ -236,20 +239,35 @@ class SpectromorphicMaskStrategy:
         min_band_frac = 0.05
         max_band_frac = 0.4
 
-         # ── Step 1: frequency band ───────────────────────────────────────────────
-        band_h = random.randint(
-            max(1, int(min_band_frac * self.n_mels)),
-            max(1, int(max_band_frac * self.n_mels)),
-        )
+        min_scale = 0
+        max_scale = 4
+
+        freq_scale = 2 ** int(random.randint(min_scale, max_scale))
+        base_unit = max(1, int(min_band_frac * self.n_mels))
+        band_h = min(freq_scale * base_unit, int(max_band_frac * self.n_mels))
         band_lo = random.randint(0, self.n_mels - band_h)
         band_hi = band_lo + band_h  # exclusive
 
-        # ── Step 2: partition time axis into N contiguous segments ───────────────
-        num_segs = random.randint(2, random.randint(2, 8))
-        # Draw (num_segs - 1) unique interior cut points, then sort
+        time_scale = 2 ** int(random.randint(0, 4))
+        num_segs = max(2, min(time_scale, self.T // 4))
         cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
         boundaries = [0] + cut_points + [self.T]
         segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+
+        #  # ── Step 1: frequency band ───────────────────────────────────────────────
+        # band_h = random.randint(
+        #     max(1, int(min_band_frac * self.n_mels)),
+        #     max(1, int(max_band_frac * self.n_mels)),
+        # )
+        # band_lo = random.randint(0, self.n_mels - band_h)
+        # band_hi = band_lo + band_h  # exclusive
+
+        # # ── Step 2: partition time axis into N contiguous segments ───────────────
+        # num_segs = random.randint(2, random.randint(2, 8))
+        # # Draw (num_segs - 1) unique interior cut points, then sort
+        # cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
+        # boundaries = [0] + cut_points + [self.T]
+        # segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
 
         # ── Step 3: augment a random consecutive run within each segment ─────────
         aug_lo = random.uniform(0.05, 0.40)
@@ -265,8 +283,16 @@ class SpectromorphicMaskStrategy:
             )
             run_start = random.randint(0, seg_len - run_len)
             mask[band_lo:band_hi, seg_start + run_start : seg_start + run_start + run_len] = 1.0
+        
 
-        return mask
+        flip_freq = random.random() < 0.5
+        flip_time = random.random() < 0.5
+        if flip_freq:
+            mask = np.flip(mask, axis=0)
+        if flip_time:
+            mask = np.flip(mask, axis=1)
+
+        return np.ascontiguousarray(mask)
 
     def _perlin_mask(self) -> np.ndarray:
         return _perlin_mask(self.n_mels, self.T)
