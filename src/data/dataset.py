@@ -224,20 +224,31 @@ class DCASE2020Task2LogMelDataset(Dataset):
         target_T = ((MEL_TIME_CROP + 15) // 16) * 16  # 320
         self._use_composite_ids = len(machine_types) > 1
 
+        def _has_wavs(p: Path) -> bool:
+            try:
+                return p.is_dir() and any(p.glob("*.wav"))
+            except OSError:
+                return False
+
         # 1. Load each type; when include_test=True, also load test/ (normal + anomaly).
         for mt in sorted(machine_types):
             train_dir = root_path / mt / "train"
-            spectrograms, machine_id_strs = load_mel_for_dir(
-                train_dir,
-                sample_rate,
-                self.mel_transform,
-                self.to_db,
-                self._FILENAME_RE,
-                standardize=False,
-            )
+            spectrograms: list[torch.Tensor] = []
+            machine_id_strs: list[str] = []
+
+            # Prefer train/ if present; some roots (e.g. eval) only have test/.
+            if _has_wavs(train_dir):
+                spectrograms, machine_id_strs = load_mel_for_dir(
+                    train_dir,
+                    sample_rate,
+                    self.mel_transform,
+                    self.to_db,
+                    self._FILENAME_RE,
+                    standardize=False,
+                )
             if include_test:
                 test_dir = root_path / mt / "test"
-                if test_dir.exists():
+                if _has_wavs(test_dir):
                     spec_test, mid_test = load_mel_for_dir(
                         test_dir,
                         sample_rate,
@@ -249,11 +260,24 @@ class DCASE2020Task2LogMelDataset(Dataset):
                     spectrograms = spectrograms + spec_test
                     machine_id_strs = machine_id_strs + mid_test
 
+            if not spectrograms:
+                logging.warning(
+                    f"DCASE2020Task2LogMelDataset: skip {mt} under root={root_path} "
+                    f"(no wavs in train/ and {'test/' if include_test else 'test disabled'})"
+                )
+                continue
+
             spectrograms = [s[..., :MEL_TIME_CROP] for s in spectrograms]
             stacked_mt = torch.stack(spectrograms)
             all_spectrograms.append(stacked_mt)
             all_machine_id_strs.extend(machine_id_strs)
             all_machine_type_strs.extend([mt] * len(machine_id_strs))
+
+        if not all_spectrograms:
+            raise FileNotFoundError(
+                f"No usable audio found under root={root_path}. "
+                "Expected at least one of {machine}/train/*.wav, or {machine}/test/*.wav when include_test=True."
+            )
 
         self.data = torch.cat(all_spectrograms, dim=0)
         # No standardization; keep raw log-mel dB.
