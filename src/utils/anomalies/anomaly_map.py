@@ -88,7 +88,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     """
     Thresholded 2-D Perlin noise mask (binary float32), aligned with the common
     """
-    min_perlin_scale = 3
+    min_perlin_scale = 0
     perlin_scale = 6  # randint in [0, 5] -> scales in {1,2,4,8,16,32}
     perlin_scaley = 2 ** int(random.randint(min_perlin_scale, perlin_scale - 1))
 
