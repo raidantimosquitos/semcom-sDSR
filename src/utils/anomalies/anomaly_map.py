@@ -1,7 +1,7 @@
 """
 Spectromorphic anomaly mask generation for sDSR training.
 
-One strategy: pick a mel band (stratified Hz → mel), modulate over time
+One strategy: pick a mel band (uniform Hz → mel), modulate over time
 with alternating geometric renewal runs. Perlin noise as an optional
 regularizer. Never produces a fully-filled time strip.
 """
@@ -115,10 +115,6 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
 # Frequency band sampler
 # ---------------------------------------------------------------------------
 
-# Stratified Hz bands (low / mid / high). Keeps coverage of the full spectrum.
-_HZ_STRATA: list[tuple[float, float]] = [(0.0, 1000.0), (1000.0, 3000.0), (3000.0, 8000.0)]
-
-
 def _sample_mel_band(
     n_mels: int,
     f_min_hz: float,
@@ -128,21 +124,27 @@ def _sample_mel_band(
     max_tries: int = 32,
 ) -> tuple[int, int] | None:
     """
-    Sample one mel band via stratified Hz selection.
+    Sample one mel band via uniform Hz selection.
     Returns (i0, i1) or None if no valid band found within max_tries.
     """
     for _ in range(max_tries):
-        b_lo, b_hi = random.choice(_HZ_STRATA)
-        lo = max(f_min_hz, b_lo)
-        hi = min(f_max_hz, b_hi)
-        if hi - lo < 1.0:
+        lo = float(f_min_hz)
+        hi = float(f_max_hz)
+        if hi - lo < 2.0:
             continue
-            
-        bw = random.uniform(
-            min(bw_min_hz, hi - lo),
-            min(bw_max_hz, hi - lo),
-        )
-        f0 = random.uniform(lo, hi - bw)
+
+        # Uniformly sample bandwidth, then uniformly sample its start frequency.
+        max_bw = max(1.0, hi - lo)
+        bw_lo = float(np.clip(min(bw_min_hz, bw_max_hz), 1.0, max_bw))
+        bw_hi = float(np.clip(max(bw_min_hz, bw_max_hz), bw_lo, max_bw))
+        bw = random.uniform(bw_lo, bw_hi)
+
+        # Ensure f0 is valid even in edge cases where bw ≈ (hi - lo).
+        f0_hi = hi - bw
+        if f0_hi <= lo:
+            f0 = lo
+        else:
+            f0 = random.uniform(lo, f0_hi)
         i0, i1 = _hz_band_to_mel_bins(f0, bw, n_mels, f_min_hz, f_max_hz)
         if i1 > i0:
             return i0, i1
@@ -158,7 +160,7 @@ class SpectromorphicMaskStrategy:
     Spectromorphic anomaly masks: a mel band modulated over time.
 
     Each mask is one of:
-      - **Band + renewal** (prob ``1 - perlin_prob``): a stratified Hz band
+      - **Band + renewal** (prob ``1 - perlin_prob``): a uniform Hz band
         mapped to mel bins, activated over time by alternating geometric runs.
         Never a fully continuous strip — the renewal process always creates gaps.
       - **Perlin** (prob ``perlin_prob``): thresholded 2-D Perlin noise for
@@ -185,7 +187,7 @@ class SpectromorphicMaskStrategy:
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
-        bw_max_hz: float = 1_000.0,
+        bw_max_hz: float = 2_000.0,
         **_: object,
     ) -> None:
         self.n_mels = n_mels
@@ -203,110 +205,40 @@ class SpectromorphicMaskStrategy:
         """Mel band × renewal-modulated time vector."""
         mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
 
-        # band = _sample_mel_band(
-        #     self.n_mels, self.f_min_hz, self.f_max_hz, self.bw_min_hz, self.bw_max_hz
-        # )
-        # if band is None:
-        #     # Hard fallback: tiny band, partial time via a single renewal
-        #     band = _hz_band_to_mel_bins(
-        #         self.f_min_hz, self._FALLBACK_BW_HZ,
-        #         self.n_mels, self.f_min_hz, self.f_max_hz,
-        #     )
+        band = _sample_mel_band(
+            self.n_mels, self.f_min_hz, self.f_max_hz, self.bw_min_hz, self.bw_max_hz
+        )
+        if band is None:
+            # Hard fallback: tiny band, partial time via a single renewal
+            band = _hz_band_to_mel_bins(
+                self.f_min_hz, self._FALLBACK_BW_HZ,
+                self.n_mels, self.f_min_hz, self.f_max_hz,
+            )
 
-        # i0, i1 = band
-
-        # rng = np.random.default_rng()
-        # band_width = rng.integers(6, 50 + 1)
-        # f_start = rng.integers(0, self.n_mels - band_width + 1)
-        # f_end = f_start + band_width
-
-        # i0 = f_start
-        # i1 = f_end
-
-        # p_on, p_off = _renewal_params(self.T)
-        # mu_on = 1.0 / p_on
-        # start_on = random.random() < mu_on / (mu_on + 1.0 / p_off)
-        # time_track = _alternating_renewal(self.T, p_on, p_off, start_on)
-        # mask[i0:i1, :] = time_track
-
-        # Sample K independent contiguous time segments
-        # n_segments = random.randint(1, 4)
-        # for _ in range(n_segments):
-        #     seg_len = random.randint(self.T // 20, self.T // 4 + 1)
-        #     t_start = random.randint(0, max(0, self.T - seg_len))
-        #     mask[i0:i1, t_start : t_start + seg_len] = 1.0
-
-        rng = np.random.default_rng()
-
-        # ── Coarse grid dimensions ────────────────────────────────────────────────
-        C_F = self.n_mels // 8          # 16 freq cells
-        C_T = self.T // 8               # 40 time cells
-        cell_f = self.n_mels // C_F     # 8  mel bins per cell
-        cell_t = self.T // C_T          # 8  time frames per cell
-
-        # ── Step 1: frequency band in coarse cells ───────────────────────────────
-        # Min 2 coarse cells (16 mel bins) so band survives both fine and coarse projection.
-        # Max 6 coarse cells (48 mel bins, ~37% of axis) keeps anomaly localised.
-        band_h_cells = int(rng.integers(2, 7))                          # [2, 6] cells
-        band_lo_cell = int(rng.integers(0, C_F - band_h_cells + 1))
-        band_hi_cell = band_lo_cell + band_h_cells                      # exclusive
-
-        band_lo = band_lo_cell * cell_f
-        band_hi = band_hi_cell * cell_f
+        i0, i1 = band
 
         # ── Step 2: time segments in coarse cells ────────────────────────────────
-        # Partition the time axis into N coarse-cell-aligned segments, then
-        # activate a contiguous run within each. Min run = 2 cells so the activated
-        # region spans ≥1 fine cell and ≥1 coarse cell unambiguously.
-        num_segs = int(rng.integers(1, 5))                              # [1, 4] segments
+        num_segs = int(random.randint(1, 6))                              # 
+        # Draw (num_segs - 1) unique interior cut points, then sort
+        cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
+        boundaries = [0] + cut_points + [self.T]
+        segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
 
-        # Draw segment boundaries as coarse cell indices
-        if num_segs == 1:
-            cut_cells = []
-        else:
-            cut_cells = sorted(
-                rng.choice(np.arange(1, C_T), size=min(num_segs - 1, C_T - 1), replace=False).tolist()
-            )
-        seg_boundaries = [0] + cut_cells + [C_T]
-        segments_cells = [
-            (seg_boundaries[i], seg_boundaries[i + 1])
-            for i in range(len(seg_boundaries) - 1)
-        ]
 
-        # ── Step 3: activate a run within each segment ───────────────────────────
-        # Run occupies [aug_lo, aug_hi] fraction of the segment, minimum 2 cells.
-        # aug_lo/hi sampled once per mask for temporal coherence across segments.
-        aug_lo_frac = rng.uniform(0.25, 0.55)
-        aug_hi_frac = rng.uniform(aug_lo_frac + 0.15, min(aug_lo_frac + 0.55, 1.0))
-
-        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
-
-        for seg_lo_c, seg_hi_c in segments_cells:
-            seg_len_c = seg_hi_c - seg_lo_c
-            if seg_len_c < 2:
-                # Segment too short for a meaningful run — skip rather than inject noise
+        # ── Step 3: augment a random consecutive run within each segment ─────────
+        min_aug_frac = 0.2
+        max_aug_frac = 0.8
+        for seg_start, seg_end in segments:
+            seg_len = seg_end - seg_start
+            if seg_len < 1:
                 continue
 
-            run_len_c = int(np.clip(
-                rng.integers(
-                    max(2, int(aug_lo_frac * seg_len_c)),
-                    max(3, int(aug_hi_frac * seg_len_c) + 1),
-                ),
-                2, seg_len_c,
-            ))
-            run_start_c = int(rng.integers(0, seg_len_c - run_len_c + 1))
-
-            t_lo = (seg_lo_c + run_start_c) * cell_t
-            t_hi = t_lo + run_len_c * cell_t
-
-            mask[band_lo:band_hi, t_lo:t_hi] = 1.0
-
-        # Fallback: if all segments were skipped (e.g. very short T), activate
-        # a single central 2×4 cell block as a minimal valid mask.
-        if mask.sum() == 0:
-            f_c = C_F // 2
-            t_c = C_T // 2
-            mask[f_c * cell_f:(f_c + 2) * cell_f, t_c * cell_t:(t_c + 4) * cell_t] = 1.0
+            run_len = random.randint(
+                max(1, int(min_aug_frac * seg_len)),
+                max(1, int(max_aug_frac * seg_len)),
+            )
+            run_start = random.randint(0, seg_len - run_len)
+            mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
 
         return mask
 
