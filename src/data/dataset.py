@@ -292,6 +292,68 @@ class DCASE2020Task2LogMelDataset(Dataset):
         return x_logmel, 0, mid
 
 
+class ConcatLogMelDataset(Dataset):
+    """
+    Concatenate multiple precomputed :class:`DCASE2020Task2LogMelDataset` into one.
+
+    Intended for Stage 1 only when you want to train representation learning on
+    multiple DCASE roots (e.g. dev + eval + additional).
+    """
+
+    def __init__(self, datasets: list[DCASE2020Task2LogMelDataset]) -> None:
+        if not datasets:
+            raise ValueError("ConcatLogMelDataset: datasets must be non-empty")
+
+        t0 = int(datasets[0].target_T)
+        s0 = tuple(datasets[0].data.shape[1:])
+        for ds in datasets[1:]:
+            if int(ds.target_T) != t0:
+                raise ValueError(
+                    f"ConcatLogMelDataset: target_T mismatch {t0} vs {int(ds.target_T)}"
+                )
+            if tuple(ds.data.shape[1:]) != s0:
+                raise ValueError(
+                    f"ConcatLogMelDataset: data shape mismatch {s0} vs {tuple(ds.data.shape[1:])}"
+                )
+
+        self.datasets = datasets
+        self.target_T = t0
+
+        # Merge tensors + metadata lists so downstream code can read `.data` and `.machine_type`.
+        self.data = torch.cat([ds.data for ds in datasets], dim=0)
+        self._machine_id_strs = sum((list(ds._machine_id_strs) for ds in datasets), [])
+        self._machine_type_strs = sum((list(ds._machine_type_strs) for ds in datasets), [])
+        self._use_composite_ids = any(getattr(ds, "_use_composite_ids", False) for ds in datasets)
+
+        # Informational fields
+        self.machine_type = "+".join(sorted({str(ds.machine_type) for ds in datasets}))
+        if self._use_composite_ids:
+            self.machine_ids = sorted(
+                {
+                    composite_machine_id(mt, mid)
+                    for mt, mid in zip(self._machine_type_strs, self._machine_id_strs)
+                }
+            )
+        else:
+            self.machine_ids = sorted(set(self._machine_id_strs))
+
+        print(
+            f"ConcatLogMelDataset: {len(datasets)} roots | {len(self.data)} spectrograms, "
+            f"shape {tuple(self.data.shape)} | IDs: {len(self.machine_ids)} | "
+            f"{self.data.nbytes / 1e9:.2f} GB in RAM"
+        )
+
+    def __len__(self) -> int:
+        return int(self.data.shape[0])
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, str]:
+        x_logmel = self.data[idx]
+        mid = self._machine_id_strs[idx]
+        if self._use_composite_ids:
+            mid = composite_machine_id(self._machine_type_strs[idx], mid)
+        return x_logmel, 0, mid
+
+
 class AudDSRAnomTrainDataset(Dataset):
     """
     Stage-2 training dataset: wraps a normal spectrogram dataset and adds

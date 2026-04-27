@@ -23,6 +23,7 @@ from src.data.dataset import (
     DCASE2020Task2LogMelDataset,
     DCASE2020Task2TestDataset,
     AudDSRAnomTrainDataset,
+    ConcatLogMelDataset,
 )
 from src.engine.stage1 import Stage1Trainer
 from src.engine.stage2 import Stage2Trainer
@@ -67,6 +68,17 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument("--lambda_recon", type=float, default=1.0)
     s1.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     s1.add_argument("--include_test", action="store_true", help="Include test data in stage1 training")
+    s1.add_argument(
+        "--stage1_data_paths",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Stage1-only: one or more DCASE dataset roots to merge (e.g. "
+            "dataset/dcase2020_task2_dev_dataset dataset/dcase2020_task2_eval_dataset "
+            "dataset/dcase2020_task2_additional_train_dataset). If omitted, uses --data_path."
+        ),
+    )
     s1.add_argument(
         "--no_norm",
         action="store_true",
@@ -177,22 +189,21 @@ def build_s_dsr(
 def run_stage1(args: argparse.Namespace) -> None:
     machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
     standardize = False
-    if len(machine_types) == 1:
-        dataset = DCASE2020Task2LogMelDataset(
-            root=args.data_path,
-            machine_type=machine_types[0],
-            standardize=standardize,
-        )
-        run_name = machine_types[0]
-    else:
-        include_test = args.include_test
-        dataset = DCASE2020Task2LogMelDataset(
-            root=args.data_path,
+    run_name = machine_types[0] if len(machine_types) == 1 else "+".join(sorted(machine_types))
+
+    roots = getattr(args, "stage1_data_paths", None) or [args.data_path]
+    include_test = bool(getattr(args, "include_test", False))
+
+    ds_list = [
+        DCASE2020Task2LogMelDataset(
+            root=r,
             machine_types=machine_types,
             include_test=include_test,
             standardize=standardize,
         )
-        run_name = "+".join(sorted(machine_types))
+        for r in roots
+    ]
+    dataset = ds_list[0] if len(ds_list) == 1 else ConcatLogMelDataset(ds_list)
     _, _, n_mels, T = dataset.data.shape
 
     model = build_vq_vae(
