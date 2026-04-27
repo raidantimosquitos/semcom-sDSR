@@ -102,13 +102,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     perlin_scaley = max(1, min(perlin_scaley, n_mels))
 
     noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex))
-    noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
-
-    # Optional flips (still dependency-free; helps mask variety)
-    if random.random() < 0.5:
-        noise = np.flip(noise, axis=0)  # freq flip
-    if random.random() < 0.5:
-        noise = np.flip(noise, axis=1)  # time flip
+    # noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
 
     threshold = float(np.percentile(noise, random.uniform(55, 80)))
     perlin_thr = (noise > threshold).astype(np.float32)
@@ -187,7 +181,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.4,
+        perlin_prob: float = 0.6,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
