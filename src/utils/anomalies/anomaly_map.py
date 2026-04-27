@@ -88,7 +88,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     """
     Thresholded 2-D Perlin noise mask (binary float32), aligned with the common
     """
-    min_perlin_scale = 0
+    min_perlin_scale = 3
     perlin_scale = 6  # randint in [0, 5] -> scales in {1,2,4,8,16,32}
     perlin_scaley = 2 ** int(random.randint(min_perlin_scale, perlin_scale - 1))
 
@@ -98,7 +98,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     perlin_scalex = max(1, min(perlin_scalex, T))
     perlin_scaley = max(1, min(perlin_scaley, n_mels))
 
-    noise = rand_perlin_2d_np((n_mels, T), (perlin_scalex, perlin_scaley))
+    noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex))
 
     # Optional flips (still dependency-free; helps mask variety)
     if random.random() < 0.5:
@@ -106,7 +106,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     if random.random() < 0.5:
         noise = np.flip(noise, axis=1)  # time flip
 
-    threshold = 0.5
+    threshold = float(np.percentile(noise, random.uniform(55, 80)))
     perlin_thr = (noise > threshold).astype(np.float32)
     return perlin_thr
 
@@ -236,63 +236,79 @@ class SpectromorphicMaskStrategy:
         #     t_start = random.randint(0, max(0, self.T - seg_len))
         #     mask[i0:i1, t_start : t_start + seg_len] = 1.0
 
-        min_band_frac = 0.05
-        max_band_frac = 0.4
+        rng = np.random.default_rng()
 
-        min_scale = 0
-        max_scale = 4
+        # ── Coarse grid dimensions ────────────────────────────────────────────────
+        C_F = self.n_mels // 8          # 16 freq cells
+        C_T = self.T // 8               # 40 time cells
+        cell_f = self.n_mels // C_F     # 8  mel bins per cell
+        cell_t = self.T // C_T          # 8  time frames per cell
 
-        freq_scale = 2 ** int(random.randint(min_scale, max_scale))
-        base_unit = max(1, int(min_band_frac * self.n_mels))
-        band_h = min(freq_scale * base_unit, int(max_band_frac * self.n_mels))
-        band_lo = random.randint(0, self.n_mels - band_h)
-        band_hi = band_lo + band_h  # exclusive
+        # ── Step 1: frequency band in coarse cells ───────────────────────────────
+        # Min 2 coarse cells (16 mel bins) so band survives both fine and coarse projection.
+        # Max 6 coarse cells (48 mel bins, ~37% of axis) keeps anomaly localised.
+        band_h_cells = int(rng.integers(2, 7))                          # [2, 6] cells
+        band_lo_cell = int(rng.integers(0, C_F - band_h_cells + 1))
+        band_hi_cell = band_lo_cell + band_h_cells                      # exclusive
 
-        time_scale = 2 ** int(random.randint(0, 4))
-        num_segs = max(2, min(time_scale, self.T // 4))
-        cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
-        boundaries = [0] + cut_points + [self.T]
-        segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+        band_lo = band_lo_cell * cell_f
+        band_hi = band_hi_cell * cell_f
 
-        #  # ── Step 1: frequency band ───────────────────────────────────────────────
-        # band_h = random.randint(
-        #     max(1, int(min_band_frac * self.n_mels)),
-        #     max(1, int(max_band_frac * self.n_mels)),
-        # )
-        # band_lo = random.randint(0, self.n_mels - band_h)
-        # band_hi = band_lo + band_h  # exclusive
+        # ── Step 2: time segments in coarse cells ────────────────────────────────
+        # Partition the time axis into N coarse-cell-aligned segments, then
+        # activate a contiguous run within each. Min run = 2 cells so the activated
+        # region spans ≥1 fine cell and ≥1 coarse cell unambiguously.
+        num_segs = int(rng.integers(1, 5))                              # [1, 4] segments
 
-        # # ── Step 2: partition time axis into N contiguous segments ───────────────
-        # num_segs = random.randint(2, random.randint(2, 8))
-        # # Draw (num_segs - 1) unique interior cut points, then sort
-        # cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
-        # boundaries = [0] + cut_points + [self.T]
-        # segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+        # Draw segment boundaries as coarse cell indices
+        if num_segs == 1:
+            cut_cells = []
+        else:
+            cut_cells = sorted(
+                rng.choice(np.arange(1, C_T), size=min(num_segs - 1, C_T - 1), replace=False).tolist()
+            )
+        seg_boundaries = [0] + cut_cells + [C_T]
+        segments_cells = [
+            (seg_boundaries[i], seg_boundaries[i + 1])
+            for i in range(len(seg_boundaries) - 1)
+        ]
 
-        # ── Step 3: augment a random consecutive run within each segment ─────────
-        aug_lo = random.uniform(0.05, 0.40)
-        aug_hi = random.uniform(aug_lo + 0.10, min(aug_lo + 0.60, 0.95))
-        for seg_start, seg_end in segments:
-            seg_len = seg_end - seg_start
-            if seg_len < 1:
+        # ── Step 3: activate a run within each segment ───────────────────────────
+        # Run occupies [aug_lo, aug_hi] fraction of the segment, minimum 2 cells.
+        # aug_lo/hi sampled once per mask for temporal coherence across segments.
+        aug_lo_frac = rng.uniform(0.25, 0.55)
+        aug_hi_frac = rng.uniform(aug_lo_frac + 0.15, min(aug_lo_frac + 0.55, 1.0))
+
+        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
+
+        for seg_lo_c, seg_hi_c in segments_cells:
+            seg_len_c = seg_hi_c - seg_lo_c
+            if seg_len_c < 2:
+                # Segment too short for a meaningful run — skip rather than inject noise
                 continue
 
-            run_len = random.randint(
-                max(1, int(aug_lo * seg_len)),
-                max(1, int(aug_hi * seg_len)),
-            )
-            run_start = random.randint(0, seg_len - run_len)
-            mask[band_lo:band_hi, seg_start + run_start : seg_start + run_start + run_len] = 1.0
-        
+            run_len_c = int(np.clip(
+                rng.integers(
+                    max(2, int(aug_lo_frac * seg_len_c)),
+                    max(3, int(aug_hi_frac * seg_len_c) + 1),
+                ),
+                2, seg_len_c,
+            ))
+            run_start_c = int(rng.integers(0, seg_len_c - run_len_c + 1))
 
-        flip_freq = random.random() < 0.5
-        flip_time = random.random() < 0.5
-        if flip_freq:
-            mask = np.flip(mask, axis=0)
-        if flip_time:
-            mask = np.flip(mask, axis=1)
+            t_lo = (seg_lo_c + run_start_c) * cell_t
+            t_hi = t_lo + run_len_c * cell_t
 
-        return np.ascontiguousarray(mask)
+            mask[band_lo:band_hi, t_lo:t_hi] = 1.0
+
+        # Fallback: if all segments were skipped (e.g. very short T), activate
+        # a single central 2×4 cell block as a minimal valid mask.
+        if mask.sum() == 0:
+            f_c = C_F // 2
+            t_c = C_T // 2
+            mask[f_c * cell_f:(f_c + 2) * cell_f, t_c * cell_t:(t_c + 4) * cell_t] = 1.0
+
+        return mask
 
     def _perlin_mask(self) -> np.ndarray:
         return _perlin_mask(self.n_mels, self.T)
