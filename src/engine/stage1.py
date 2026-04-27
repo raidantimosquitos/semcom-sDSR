@@ -145,7 +145,10 @@ class Stage1Trainer(BaseTrainer):
             self._last_finite_log = metrics
             return metrics
 
-        self.scaler.update()
+        # If AMP overflowed before any scaler.step(), GradScaler may not have recorded
+        # inf checks; calling update() would raise:
+        #   AssertionError: No inf checks were recorded prior to update.
+        # In that case we simply skip the optimizer step and keep going.
         if not self._nonfinite_step_warned:
             self._tee(
                 "Warning: non-finite total loss; skipping optimizer step "

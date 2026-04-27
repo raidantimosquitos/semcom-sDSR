@@ -36,6 +36,10 @@ def load_mel_for_dir(
             wav = wav.mean(0, keepdim=True)
         mel = mel_transform(wav)
         log_mel_db = to_db(mel).float()  # (1, n_mels, T)
+        # Safety: different corpora may contain silence/degenerate audio producing
+        # NaN/±inf after log or dB conversion in some torchaudio builds.
+        # Keep everything finite so a single "poison" clip can't destabilize Stage 1.
+        log_mel_db = torch.nan_to_num(log_mel_db, nan=0.0, posinf=0.0, neginf=-80.0)
         if standardize:
             log_mel_db = standardize_spectrogram(log_mel_db, mean=norm_mean, std=norm_std)
         spectrograms.append(log_mel_db)
