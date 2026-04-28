@@ -104,7 +104,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex))
     noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
 
-    threshold = float(np.percentile(noise, random.uniform(55, 80)))
+    threshold = 0.5
     perlin_thr = (noise > threshold).astype(np.float32)
     return perlin_thr
 
@@ -226,9 +226,9 @@ class SpectromorphicMaskStrategy:
         i0, i1 = band_lo, band_hi
 
         # ── Step 2: time segments in coarse cells ────────────────────────────────
-        num_segs = int(random.randint(1, 6))
-        min_aug_frac = 0.2
-        max_aug_frac = 0.8
+        num_segs = int(random.randint(1, 3))
+        min_aug_frac = 0.1
+        max_aug_frac = 1.0
 
 
         # Draw (num_segs - 1) unique interior cut points, then sort
