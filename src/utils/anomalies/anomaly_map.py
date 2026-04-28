@@ -181,7 +181,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.2,
+        perlin_prob: float = 0.5,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -226,8 +226,8 @@ class SpectromorphicMaskStrategy:
         i0, i1 = band_lo, band_hi
 
         # ── Step 2: time segments in coarse cells ────────────────────────────────
-        num_segs = int(random.randint(1, 3))
-        min_aug_frac = 0.1
+        num_segs = int(random.randint(1, 10))
+        min_aug_frac = 0.2
         max_aug_frac = 1.0
 
 
