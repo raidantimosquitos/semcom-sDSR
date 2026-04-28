@@ -10,17 +10,17 @@ from typing import Callable
 
 _EPS = 1e-8
 
-def log_mel_db_to_01(log_mel_db: torch.Tensor, *, top_db: float = 80.0) -> torch.Tensor:
+def log_mel_db_to_normalized_db(log_mel_db: torch.Tensor, *, top_db: float = 80.0) -> torch.Tensor:
     """
-    Map log-mel in dB to [0, 1] deterministically assuming the dB range is [-top_db, 0].
+    Map log-mel in dB to normalized dB in [-1, 0] deterministically.
 
     This matches the common "ref=max, top_db=80" style used in many DCASE pipelines:
-    0 dB -> 1, -top_db dB -> 0 (values outside are clamped).
+    0 dB -> 0, -top_db dB -> -1 (values outside are clamped).
     """
     if top_db <= 0:
         raise ValueError(f"top_db must be > 0, got {top_db}")
-    x = (log_mel_db + float(top_db)) / float(top_db)
-    return x.clamp_(0.0, 1.0)
+    x = log_mel_db.clamp(min=-float(top_db), max=0.0) / float(top_db)
+    return x
 
 def load_mel_for_dir(
     audio_dir: Path,
@@ -53,7 +53,7 @@ def load_mel_for_dir(
         log_mel_db = torch.nan_to_num(log_mel_db, nan=0.0, posinf=0.0, neginf=-top_db)
 
         if map_to_01:
-            log_mel_db = log_mel_db_to_01(log_mel_db, top_db=top_db)
+            log_mel_db = log_mel_db_to_normalized_db(log_mel_db, top_db=top_db)
 
         spectrograms.append(log_mel_db)
         
