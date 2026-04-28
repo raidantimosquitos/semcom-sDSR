@@ -70,15 +70,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
         include_test: bool = True,
         # Normalization is intentionally disabled project-wide (work in raw log-mel dB).
         # These args are kept for backward compatibility but are ignored.
-        norm_mean: torch.Tensor | None = None,
-        norm_std: torch.Tensor | None = None,
-        standardize: bool = False,
-        compute_norm_stats: bool = False,
     ):
         # Hard-disable any standardization to keep values in proper dB scale end-to-end.
-        self.standardize = False
-        self.norm_type = "none"
-        self._compute_norm_stats = False
         if machine_types is not None:
             if machine_id is not None:
                 raise ValueError("machine_id filter only applies to single machine_type")
@@ -93,8 +86,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
                 f_max,
                 top_db,
                 include_test,
-                norm_mean=norm_mean,
-                norm_std=norm_std,
             )
         elif machine_type is not None:
             self._init_single(
@@ -108,8 +99,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
                 f_max,
                 top_db,
                 machine_id,
-                norm_mean=norm_mean,
-                norm_std=norm_std,
             )
         else:
             raise ValueError("Provide either machine_type or machine_types")
@@ -126,8 +115,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_max: float,
         top_db: float,
         machine_id: str | None = None,
-        norm_mean: torch.Tensor | None = None,
-        norm_std: torch.Tensor | None = None,
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -147,7 +134,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
             self.mel_transform,
             self.to_db,
             self._FILENAME_RE,
-            standardize=False,
+            map_to_01=True,
         )
 
         # Truncate to MEL_TIME_CROP (shortest spectrogram alignment)
@@ -201,9 +188,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_max: float,
         top_db: float,
         include_test: bool = True,
-        *,
-        norm_mean: torch.Tensor | None = None,
-        norm_std: torch.Tensor | None = None,
     ) -> None:
         self.mel_transform = T.MelSpectrogram(
             sample_rate=sample_rate,
@@ -244,7 +228,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
                     self.mel_transform,
                     self.to_db,
                     self._FILENAME_RE,
-                    standardize=False,
+                    map_to_01=True,
                 )
             if include_test:
                 test_dir = root_path / mt / "test"
@@ -255,7 +239,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
                         self.mel_transform,
                         self.to_db,
                         self._FILENAME_RE_TEST,
-                        standardize=False,
+                        map_to_01=True,
                     )
                     spectrograms = spectrograms + spec_test
                     machine_id_strs = machine_id_strs + mid_test
