@@ -91,7 +91,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     """
     min_perlin_scale = 0
     perlin_scale = 6  # randint in [0, 5] -> scales in {1,2,4,8,16,32}
-    angle_deg = random.uniform(-45.0, 45.0)
+    angle_deg = random.uniform(-15.0, 15.0)
     
     perlin_scaley = 2 ** int(random.randint(min_perlin_scale, perlin_scale - 1))
 
@@ -102,7 +102,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     perlin_scaley = max(1, min(perlin_scaley, n_mels))
 
     noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex))
-    # noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
+    noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
 
     threshold = float(np.percentile(noise, random.uniform(55, 80)))
     perlin_thr = (noise > threshold).astype(np.float32)
@@ -181,7 +181,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.4,
+        perlin_prob: float = 0.2,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -213,7 +213,7 @@ class SpectromorphicMaskStrategy:
         #         self.n_mels, self.f_min_hz, self.f_max_hz,
         #     )
         min_band_frac: float = 0.05
-        max_band_frac: float = 0.40
+        max_band_frac: float = 0.20
 
         # Step 1: frequency band (domain-constrained bounds stay fixed)
         band_h = random.randint(
@@ -226,7 +226,11 @@ class SpectromorphicMaskStrategy:
         i0, i1 = band_lo, band_hi
 
         # ── Step 2: time segments in coarse cells ────────────────────────────────
-        num_segs = int(random.randint(1, 6))                              # 
+        if random.random() < 0.2:
+            num_segs = int(random.randint(1, 3))
+        else:
+            num_segs = int(random.randint(3, 6))
+
         # Draw (num_segs - 1) unique interior cut points, then sort
         cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
         boundaries = [0] + cut_points + [self.T]
@@ -234,8 +238,13 @@ class SpectromorphicMaskStrategy:
 
 
         # ── Step 3: augment a random consecutive run within each segment ─────────
-        min_aug_frac = 0.2
-        max_aug_frac = 0.8
+        if random.random() < 0.1:
+            min_aug_frac = 0.4
+            max_aug_frac = 0.8
+        else:
+            min_aug_frac = 0.05
+            max_aug_frac = 0.40
+
         for seg_start, seg_end in segments:
             seg_len = seg_end - seg_start
             if seg_len < 1:

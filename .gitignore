@@ -27,3 +27,6 @@ example_bitstreams/
 example_bitstreams_ldpc_qpsk_smoketest/
 example_bitstreams_ldpc_qpsk_highsnr/
 example_bitstreams_qpsk_highsnr/
+
+# Assets
+assets/
