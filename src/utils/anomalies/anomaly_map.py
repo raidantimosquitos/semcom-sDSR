@@ -203,17 +203,27 @@ class SpectromorphicMaskStrategy:
         """Mel band × renewal-modulated time vector."""
         mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
 
-        band = _sample_mel_band(
-            self.n_mels, self.f_min_hz, self.f_max_hz, self.bw_min_hz, self.bw_max_hz
-        )
-        if band is None:
-            # Hard fallback: tiny band, partial time via a single renewal
-            band = _hz_band_to_mel_bins(
-                self.f_min_hz, self._FALLBACK_BW_HZ,
-                self.n_mels, self.f_min_hz, self.f_max_hz,
-            )
+        # band = _sample_mel_band(
+        #     self.n_mels, self.f_min_hz, self.f_max_hz, self.bw_min_hz, self.bw_max_hz
+        # )
+        # if band is None:
+        #     # Hard fallback: tiny band, partial time via a single renewal
+        #     band = _hz_band_to_mel_bins(
+        #         self.f_min_hz, self._FALLBACK_BW_HZ,
+        #         self.n_mels, self.f_min_hz, self.f_max_hz,
+        #     )
+        min_band_frac: float = 0.05
+        max_band_frac: float = 0.40
 
-        i0, i1 = band
+        # Step 1: frequency band (domain-constrained bounds stay fixed)
+        band_h = random.randint(
+            max(1, int(min_band_frac * self.n_mels)),
+            max(1, int(max_band_frac * self.n_mels)),
+        )
+        band_lo = random.randint(0, self.n_mels - band_h)
+        band_hi = band_lo + band_h
+
+        i0, i1 = band_lo, band_hi
 
         # ── Step 2: time segments in coarse cells ────────────────────────────────
         num_segs = int(random.randint(1, 6))                              # 
