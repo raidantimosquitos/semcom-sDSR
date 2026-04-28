@@ -36,9 +36,6 @@ from src.data.dataset import MEL_TIME_CROP, DCASE2020Task2LogMelDataset, DCASE20
 from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
-from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
-from src.utils.audio import standardize_spectrogram
-from src.utils.audio import standardize_spectrogram
 
 from src.comm.bitflip_ber import load_ber_curve_csv, bitflip_bytes
 from src.comm.ogg_payload import bitflip_ogg_payload_pages
@@ -209,10 +206,9 @@ def wav_to_logmel(
     mel = mel_transform(wav)
     log_mel = to_db(mel).float()  # (1,n_mels,T)
     log_mel = log_mel[..., :MEL_TIME_CROP]
-    x = standardize_spectrogram(log_mel, mean=norm_mean, std=norm_std)
-    if target_T is not None and x.shape[-1] < target_T:
-        x = F.pad(x, (0, target_T - x.shape[-1]), mode="constant", value=0.0)
-    return x
+    if target_T is not None and log_mel.shape[-1] < target_T:
+        log_mel = F.pad(log_mel, (0, target_T - log_mel.shape[-1]), mode="constant", value=0.0)
+    return log_mel
 
 
 class OpusBaselineWrapper(nn.Module):
@@ -366,26 +362,16 @@ def main() -> None:
     print(f"[opus] using ffmpeg binary: {ffmpeg_bin}")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    # Normalization is disabled project-wide: always evaluate in raw log-mel dB.
-    use_norm = False
-    norm_mean, norm_std = None, None
 
     train_ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         include_test=False,
-        norm_mean=norm_mean,
-        norm_std=norm_std,
-        standardize=use_norm,
-        compute_norm_stats=False,
     )
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         target_T=train_ds.target_T,
-        norm_mean=norm_mean,
-        norm_std=norm_std,
-        standardize=use_norm,
     )
     _, _, n_mels, T = train_ds.data.shape
 
@@ -398,7 +384,6 @@ def main() -> None:
         decay=0.99,
     )
     st1 = dict(stage1_ckpt["model_state_dict"])
-    migrate_vq_vae_state_dict(st1)
     vq_vae.load_state_dict(st1)
 
     model = build_s_dsr(
@@ -411,7 +396,6 @@ def main() -> None:
     )
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     st2 = dict(stage2["model_state_dict"])
-    migrate_vq_vae_state_dict(st2)
     model.load_state_dict(st2)
     model = model.to(device)
 
@@ -467,8 +451,6 @@ def main() -> None:
                     ffmpeg_bin=ffmpeg_bin,
                     opus_cache_dir=str(opus_cache_dir),
                     target_T=train_ds.target_T,
-                    norm_mean=norm_mean,
-                    norm_std=norm_std,
                 )
                 evaluator = AnomalyEvaluator(
                     model=model,

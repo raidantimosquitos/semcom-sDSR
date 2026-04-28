@@ -27,7 +27,6 @@ if str(_ROOT) not in sys.path:
 
 from src.data.dataset import DCASE2020Task2LogMelDataset
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
-from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
 from src.comm.jscc_cnn import JSCCDualMap, JSCCMapConfig
 
 
@@ -61,7 +60,6 @@ def main() -> None:
         decay=0.99,
     )
     st = dict(stage1["model_state_dict"])
-    migrate_vq_vae_state_dict(st)
     vq_vae.load_state_dict(st)
     vq_vae = vq_vae.eval().to(device)
 
@@ -79,10 +77,6 @@ def main() -> None:
         root=args.data_path,
         machine_type=args.machine_type,
         include_test=False,
-        norm_mean=norm_mean,
-        norm_std=norm_std,
-        standardize=use_norm,
-        compute_norm_stats=False,
     )
     x, _lbl, _mid = next(iter(torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0)))
     x = x.to(device)

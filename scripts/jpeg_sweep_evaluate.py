@@ -189,27 +189,17 @@ def parse_args() -> argparse.Namespace:
 
 def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    # Normalization is disabled project-wide: always evaluate in raw log-mel dB.
-    use_norm = False
-    _norm_mean, _norm_std = None, None
 
     train_ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         machine_id=args.machine_id,
-        norm_mean=_norm_mean,
-        norm_std=_norm_std,
-        standardize=use_norm,
-        compute_norm_stats=False,
     )
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         target_T=train_ds.target_T,
         machine_id=args.machine_id,
-        norm_mean=_norm_mean,
-        norm_std=_norm_std,
-        standardize=use_norm,
     )
     _, _, n_mels, T = train_ds.data.shape
 
@@ -230,10 +220,8 @@ def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
         commitment_cost=0.25,
         decay=0.99,
     )
-    from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
 
     state1 = dict(stage1_ckpt["model_state_dict"])
-    migrate_vq_vae_state_dict(state1)
     vq_vae.load_state_dict(state1)
 
     model = build_s_dsr(
@@ -246,7 +234,6 @@ def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
 
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     state2 = dict(stage2["model_state_dict"])
-    migrate_vq_vae_state_dict(state2)
     model.load_state_dict(state2)
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")

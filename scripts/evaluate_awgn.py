@@ -23,7 +23,6 @@ from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestData
 from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
-from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
 
 from src.comm.bitflip_ber import load_ber_curve_csv, bitflip_bytes
 
@@ -233,26 +232,16 @@ def main() -> None:
     NAN = float("nan")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    # Normalization is disabled project-wide: always evaluate in raw log-mel dB.
-    use_norm = False
-    norm_mean, norm_std = None, None
 
     train_ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         include_test=False,
-        norm_mean=norm_mean,
-        norm_std=norm_std,
-        standardize=use_norm,
-        compute_norm_stats=False,
     )
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         target_T=train_ds.target_T,
-        norm_mean=norm_mean,
-        norm_std=norm_std,
-        standardize=use_norm,
     )
     _, _, n_mels, T = train_ds.data.shape
 
@@ -265,7 +254,6 @@ def main() -> None:
         decay=0.99,
     )
     st1 = dict(stage1_ckpt["model_state_dict"])
-    migrate_vq_vae_state_dict(st1)
     vq_vae.load_state_dict(st1)
 
     model = build_s_dsr(
@@ -278,7 +266,6 @@ def main() -> None:
     )
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     st2 = dict(stage2["model_state_dict"])
-    migrate_vq_vae_state_dict(st2)
     model.load_state_dict(st2)
     model = model.to(device)
     vq_vae = vq_vae.to(device)

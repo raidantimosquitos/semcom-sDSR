@@ -17,7 +17,6 @@ from torch.utils.data import DataLoader
 
 from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestDataset
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
-from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,7 +70,6 @@ def main() -> None:
         decay=0.99,
     )
     state = dict(ckpt["model_state_dict"])
-    migrate_vq_vae_state_dict(state)
     model.load_state_dict(state)
     model.to(device)
     model.eval()

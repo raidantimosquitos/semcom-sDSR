@@ -176,9 +176,6 @@ def main() -> None:
 def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     """Run evaluation; all user-facing output via tee (terminal + log file)."""
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    # Normalization is disabled project-wide: always evaluate in raw log-mel dB.
-    use_norm = False
-    norm_mean, norm_std = None, None
 
     if args.machine_types is not None:
         if args.machine_id is not None:
@@ -187,37 +184,23 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
             root=args.data_path,
             machine_types=list(args.machine_types),
             include_test=False,
-            norm_mean=norm_mean,
-            norm_std=norm_std,
-            standardize=use_norm,
-            compute_norm_stats=False,
         )
         test_ds = DCASE2020Task2TestDataset(
             root=args.data_path,
             machine_types=list(args.machine_types),
             target_T=train_ds.target_T,
-            norm_mean=norm_mean,
-            norm_std=norm_std,
-            standardize=use_norm,
         )
     else:
         train_ds = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=args.machine_type,
             machine_id=args.machine_id,
-            norm_mean=norm_mean,
-            norm_std=norm_std,
-            standardize=use_norm,
-            compute_norm_stats=False,
         )
         test_ds = DCASE2020Task2TestDataset(
             root=args.data_path,
             machine_type=args.machine_type,
             target_T=train_ds.target_T,
             machine_id=args.machine_id,
-            norm_mean=norm_mean,
-            norm_std=norm_std,
-            standardize=use_norm,
         )
     _, _, n_mels, T = train_ds.data.shape
 
@@ -238,9 +221,7 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         commitment_cost=0.25,
         decay=0.99,
     )
-    from src.utils.checkpoint_compat import migrate_vq_vae_state_dict
     state = dict(stage1_ckpt["model_state_dict"])
-    migrate_vq_vae_state_dict(state)
     vq_vae.load_state_dict(state)
 
     # Full sDSR: Stage 1 modules (frozen in training) + Stage 2 modules
@@ -253,7 +234,6 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
 
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     stage2_state = dict(stage2["model_state_dict"])
-    migrate_vq_vae_state_dict(stage2_state)
     model.load_state_dict(stage2_state)
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")

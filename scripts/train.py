@@ -188,7 +188,6 @@ def build_s_dsr(
 
 def run_stage1(args: argparse.Namespace) -> None:
     machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
-    standardize = False
     run_name = machine_types[0] if len(machine_types) == 1 else "+".join(sorted(machine_types))
 
     roots = getattr(args, "stage1_data_paths", None) or [args.data_path]
@@ -199,7 +198,6 @@ def run_stage1(args: argparse.Namespace) -> None:
             root=r,
             machine_types=machine_types,
             include_test=include_test,
-            standardize=standardize,
         )
         for r in roots
     ]
@@ -237,8 +235,6 @@ def run_stage1(args: argparse.Namespace) -> None:
 
 def run_stage2(args: argparse.Namespace) -> None:
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    use_norm = False
-    norm_mean, norm_std = None, None
 
     machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
     if len(machine_types) > 1 and args.machine_id is not None:
@@ -252,10 +248,6 @@ def run_stage2(args: argparse.Namespace) -> None:
         q_vae_dataset = DCASE2020Task2LogMelDataset(
             **ds_common,
             machine_id=args.machine_id,
-            norm_mean=norm_mean,
-            norm_std=norm_std,
-            standardize=use_norm,
-            compute_norm_stats=False,
         )
         run_name = machine_types[0]
     else:
@@ -263,10 +255,6 @@ def run_stage2(args: argparse.Namespace) -> None:
             root=args.data_path,
             machine_types=machine_types,
             include_test=False,
-            norm_mean=norm_mean,
-            norm_std=norm_std,
-            standardize=use_norm,
-            compute_norm_stats=False,
         )
         run_name = "+".join(sorted(machine_types))
 
@@ -278,10 +266,6 @@ def run_stage2(args: argparse.Namespace) -> None:
         q_vae_full = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=machine_types[0],
-            norm_mean=norm_mean,
-            norm_std=norm_std,
-            standardize=use_norm,
-            compute_norm_stats=False,
         )
         adversarial_indices = [
             i for i in range(len(q_vae_full._machine_id_strs))
@@ -339,18 +323,12 @@ def run_stage2(args: argparse.Namespace) -> None:
                 root=args.data_path,
                 machine_type=machine_types[0],
                 target_T=q_vae_dataset.target_T,
-                norm_mean=norm_mean,
-                norm_std=norm_std,
-                standardize=use_norm,
             )
         else:
             val_dataset = DCASE2020Task2TestDataset(
                 root=args.data_path,
                 machine_types=machine_types,
                 target_T=q_vae_dataset.target_T,
-                norm_mean=norm_mean,
-                norm_std=norm_std,
-                standardize=use_norm,
             )
 
     trainer = Stage2Trainer(

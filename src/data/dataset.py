@@ -140,9 +140,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
         # Truncate to MEL_TIME_CROP (shortest spectrogram alignment)
         spectrograms = [s[..., :MEL_TIME_CROP] for s in spectrograms]
         stacked = torch.stack(spectrograms)
-        # No standardization; keep raw log-mel dB.
-        self.norm_mean = None
-        self.norm_std = None
 
         target_T = ((MEL_TIME_CROP + 15) // 16) * 16  # 32
 
@@ -264,9 +261,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
             )
 
         self.data = torch.cat(all_spectrograms, dim=0)
-        # No standardization; keep raw log-mel dB.
-        self.norm_mean = None
-        self.norm_std = None
 
         pad = target_T - self.data.shape[-1]
         if pad > 0:
