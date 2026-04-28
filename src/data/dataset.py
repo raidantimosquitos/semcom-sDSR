@@ -134,7 +134,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
             self.mel_transform,
             self.to_db,
             self._FILENAME_RE,
-            map_to_01=True,
+            map_to_01=False,
         )
 
         # Truncate to MEL_TIME_CROP (shortest spectrogram alignment)
@@ -225,7 +225,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
                     self.mel_transform,
                     self.to_db,
                     self._FILENAME_RE,
-                    map_to_01=True,
+                    map_to_01=False,
                 )
             if include_test:
                 test_dir = root_path / mt / "test"
@@ -236,7 +236,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
                         self.mel_transform,
                         self.to_db,
                         self._FILENAME_RE_TEST,
-                        map_to_01=True,
+                        map_to_01=False,
                     )
                     spectrograms = spectrograms + spec_test
                     machine_id_strs = machine_id_strs + mid_test
