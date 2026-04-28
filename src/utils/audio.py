@@ -29,7 +29,7 @@ def load_mel_for_dir(
     to_db: Callable[[torch.Tensor], torch.Tensor],
     filename_re: re.Pattern[str],
     *,
-    map_to_01: bool = True,
+    map_to_01: bool = False,
 ) -> tuple[list[torch.Tensor], list[str]]:
     files = sorted(audio_dir.glob("*.wav"))
     assert files, f"No .wav files found in {audio_dir}"

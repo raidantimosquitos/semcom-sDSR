@@ -105,18 +105,27 @@ class Stage1Trainer(BaseTrainer):
 
         self.optimizer.zero_grad(set_to_none=True)
 
-        with autocast(device_type=self.device.type, enabled=self.use_amp):
-            out = self.model(x)
-            loss_fine, loss_coarse, recon, _, _, perp_coarse, perp_fine = out
+        def _forward(enabled_amp: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            """
+            Forward pass returning (total_loss, recon_loss, loss_fine, loss_coarse, perplexities... packed later).
 
-        # L2 recon in fp32 (avoids fp16 MSE blow-ups in decoder under AMP)
-        with autocast(device_type=self.device.type, enabled=False):
-            recon_loss = F.mse_loss(recon.float(), x.float())
-            total_loss = (
-                loss_fine.float()
-                + loss_coarse.float()
-                + self.lambda_recon * recon_loss
-            )
+            Note: recon_loss and total_loss are always computed in fp32.
+            """
+            with autocast(device_type=self.device.type, enabled=enabled_amp):
+                out_local = self.model(x)
+                loss_fine_l, loss_coarse_l, recon_l, _, _, perp_coarse_l, perp_fine_l = out_local
+
+            # L2 recon in fp32 (avoids fp16 MSE blow-ups in decoder under AMP)
+            with autocast(device_type=self.device.type, enabled=False):
+                recon_loss_l = F.mse_loss(recon_l.float(), x.float())
+                total_loss_l = (
+                    loss_fine_l.float()
+                    + loss_coarse_l.float()
+                    + self.lambda_recon * recon_loss_l
+                )
+            return total_loss_l, recon_loss_l, loss_fine_l, loss_coarse_l, perp_coarse_l, perp_fine_l
+
+        total_loss, recon_loss, loss_fine, loss_coarse, perp_coarse, perp_fine = _forward(self.use_amp)
 
         if torch.isfinite(total_loss).all():
             self.scaler.scale(total_loss).backward()
@@ -144,6 +153,37 @@ class Stage1Trainer(BaseTrainer):
             }
             self._last_finite_log = metrics
             return metrics
+
+        # AMP/non-finite guard:
+        # If autocast produced inf/nan (often due to decoder activations overflowing in fp16),
+        # retry the step in full fp32 so training doesn't silently stall.
+        if self.use_amp:
+            total_loss_32, recon_loss_32, loss_fine_32, loss_coarse_32, perp_coarse_32, perp_fine_32 = _forward(False)
+            if torch.isfinite(total_loss_32).all():
+                total_loss_32.backward()
+                if self.grad_clip is not None:
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                self.optimizer.step()
+                self.lr_scheduler.step()
+
+                lr = self._current_lr()
+                metrics = {
+                    "total": float(total_loss_32.detach().item()),
+                    "recon": float(recon_loss_32.detach().item()),
+                    "loss_fine": float(loss_fine_32.detach().item()),
+                    "loss_coarse": float(loss_coarse_32.detach().item()),
+                    "perplexity_fine": float(perp_fine_32.detach().item()),
+                    "perplexity_coarse": float(perp_coarse_32.detach().item()),
+                    "lr": lr,
+                }
+                self._last_finite_log = metrics
+                if not self._nonfinite_step_warned:
+                    self._tee(
+                        "Warning: non-finite total loss under AMP; retried step in fp32. "
+                        "If this repeats frequently, consider --no_amp or lower lr."
+                    )
+                    self._nonfinite_step_warned = True
+                return metrics
 
         # If AMP overflowed before any scaler.step(), GradScaler may not have recorded
         # inf checks; calling update() would raise:
