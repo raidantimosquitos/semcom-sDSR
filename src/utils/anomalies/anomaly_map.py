@@ -226,7 +226,7 @@ class SpectromorphicMaskStrategy:
         i0, i1 = band_lo, band_hi
 
         # ── Step 2: time segments in coarse cells ────────────────────────────────
-        num_segs = int(random.randint(1, 10))
+        num_segs = int(random.randint(1, 6))
         min_aug_frac = 0.2
         max_aug_frac = 1.0
 
