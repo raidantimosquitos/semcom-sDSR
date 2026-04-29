@@ -12,15 +12,15 @@ _EPS = 1e-8
 
 def log_mel_db_to_normalized_db(log_mel_db: torch.Tensor, *, top_db: float = 80.0) -> torch.Tensor:
     """
-    Map log-mel in dB to normalized dB in [-1, 0] deterministically.
+    Map log-mel in dB to normalized dB in [-1, 1] deterministically.
 
     This matches the common "ref=max, top_db=80" style used in many DCASE pipelines:
     0 dB -> 0, -top_db dB -> -1 (values outside are clamped).
     """
     if top_db <= 0:
         raise ValueError(f"top_db must be > 0, got {top_db}")
-    x = log_mel_db.clamp(min=-float(top_db), max=0.0) / float(top_db)
-    return x
+    mel_norm = (log_mel_db + top_db / 2) / (top_db / 2)
+    return mel_norm
 
 def load_mel_for_dir(
     audio_dir: Path,
@@ -51,6 +51,7 @@ def load_mel_for_dir(
         # NaN/±inf after log or dB conversion in some torchaudio builds.
         # Keep everything finite so a single "poison" clip can't destabilize Stage 1.
         log_mel_db = torch.nan_to_num(log_mel_db, nan=0.0, posinf=0.0, neginf=-top_db)
+        log_mel_db = log_mel_db.clamp(min=-top_db, max=0.0)
 
         if map_to_01:
             log_mel_db = log_mel_db_to_normalized_db(log_mel_db, top_db=top_db)
