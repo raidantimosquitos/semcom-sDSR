@@ -2,7 +2,7 @@
 """
 Compute mean reconstruction MSE of a Stage-1 VQ-VAE checkpoint on the full DCASE test set.
 
-Uses the same test pipeline as DCASE2020Task2TestDataset (per-clip standardization, crop, pad).
+Uses the same test pipeline as DCASE2020Task2TestDataset (crop, pad, global mel norm from checkpoint).
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestDataset
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
+from src.utils.audio import mel_norm_from_stage1_ckpt
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,19 +41,26 @@ def main() -> None:
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
+    ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    mel_mean, mel_std, mel_stats_eps = mel_norm_from_stage1_ckpt(ckpt)
+
     train_ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,
         machine_types=list(args.machine_types),
         include_test=False,
+        mel_mean=mel_mean,
+        mel_std=mel_std,
+        mel_stats_eps=mel_stats_eps,
     )
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
         machine_types=list(args.machine_types),
         target_T=train_ds.target_T,
+        mel_mean=mel_mean,
+        mel_std=mel_std,
+        mel_stats_eps=mel_stats_eps,
     )
     _, _, n_mels, T = train_ds.data.shape
-
-    ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
     num_embeddings_coarse = ckpt["num_embeddings_coarse"]
     num_embeddings_fine = ckpt["num_embeddings_fine"]
     embedding_dim_coarse = ckpt["embedding_dim_coarse"]

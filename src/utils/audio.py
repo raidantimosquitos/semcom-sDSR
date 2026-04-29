@@ -1,26 +1,78 @@
+import re
+from pathlib import Path
+from typing import Any, Callable
+
+import matplotlib.colors as colors
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torchaudio
-import matplotlib.pyplot as plt
-import matplotlib.colors as colors
-from pathlib import Path
-import numpy as np
 import torchaudio.transforms as T
-import re
-from typing import Callable
 
-_EPS = 1e-8
+_DEFAULT_MEL_STATS_EPS = 1e-6
 
-def log_mel_db_to_normalized_db(log_mel_db: torch.Tensor, *, top_db: float = 80.0) -> torch.Tensor:
+
+def make_mel_spectrogram(
+    *,
+    sample_rate: int = 16_000,
+    n_fft: int = 1024,
+    hop_length: int = 512,
+    n_mels: int = 128,
+    f_min: float = 0.0,
+    f_max: float = 8_000.0,
+) -> T.MelSpectrogram:
+    return T.MelSpectrogram(
+        sample_rate=sample_rate,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        n_mels=n_mels,
+        f_min=f_min,
+        f_max=f_max,
+    )
+
+
+def amplitude_to_db_power() -> T.AmplitudeToDB:
+    """Power mel to full-range dB (no ``top_db`` dynamic-range floor)."""
+    return T.AmplitudeToDB(stype="power", top_db=None)
+
+
+def mel_db_to_finite(log_mel_db: torch.Tensor) -> torch.Tensor:
+    """Replace NaN/Inf after dB; keep full dynamic range (no fixed dB clamp)."""
+    return torch.nan_to_num(log_mel_db, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def apply_global_mel_norm(
+    x: torch.Tensor,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    *,
+    eps: float = _DEFAULT_MEL_STATS_EPS,
+) -> torch.Tensor:
+    """``(x - mean) / (std + eps)`` with broadcastable ``mean``/``std`` (e.g. shape ``(1, n_mels, 1)``)."""
+    return (x - mean.to(device=x.device, dtype=x.dtype)) / (std.to(device=x.device, dtype=x.dtype) + eps)
+
+
+def mel_norm_from_stage1_ckpt(
+    ckpt: dict[str, Any],
+    *,
+    eps_default: float = _DEFAULT_MEL_STATS_EPS,
+) -> tuple[torch.Tensor, torch.Tensor, float]:
     """
-    Map log-mel in dB to normalized dB in [-1, 1] deterministically.
+    Load per-mel global normalization from a Stage-1 checkpoint.
 
-    This matches the common "ref=max, top_db=80" style used in many DCASE pipelines:
-    0 dB -> 0, -top_db dB -> -1 (values outside are clamped).
+    Raises:
+        KeyError: if required keys are missing (old checkpoints without mel stats).
     """
-    if top_db <= 0:
-        raise ValueError(f"top_db must be > 0, got {top_db}")
-    mel_norm = (log_mel_db + top_db / 2) / (top_db / 2)
-    return mel_norm
+    if "spectrogram_mel_mean" not in ckpt or "spectrogram_mel_std" not in ckpt:
+        raise KeyError(
+            "Stage-1 checkpoint missing 'spectrogram_mel_mean' / 'spectrogram_mel_std'. "
+            "Retrain stage1 with the current pipeline or pass a stats file via --mel_stats_pt."
+        )
+    mean = ckpt["spectrogram_mel_mean"].detach().cpu().float().clone()
+    std = ckpt["spectrogram_mel_std"].detach().cpu().float().clone()
+    eps = float(ckpt.get("mel_stats_eps", eps_default))
+    return mean, std, eps
+
 
 def load_mel_for_dir(
     audio_dir: Path,
@@ -28,14 +80,11 @@ def load_mel_for_dir(
     mel_transform: T.MelSpectrogram,
     to_db: Callable[[torch.Tensor], torch.Tensor],
     filename_re: re.Pattern[str],
-    *,
-    map_to_01: bool = False,
 ) -> tuple[list[torch.Tensor], list[str]]:
     files = sorted(audio_dir.glob("*.wav"))
     assert files, f"No .wav files found in {audio_dir}"
     spectrograms: list[torch.Tensor] = []
     machine_id_strs: list[str] = []
-    top_db = float(getattr(to_db, "top_db", 80.0) or 80.0)
     for path in files:
         m = filename_re.match(path.name)
         mid = m.group(1) if m else "id_00"
@@ -47,18 +96,11 @@ def load_mel_for_dir(
             wav = wav.mean(0, keepdim=True)
         mel = mel_transform(wav)
         log_mel_db = to_db(mel).float()  # (1, n_mels, T)
-        # Safety: different corpora may contain silence/degenerate audio producing
-        # NaN/±inf after log or dB conversion in some torchaudio builds.
-        # Keep everything finite so a single "poison" clip can't destabilize Stage 1.
-        log_mel_db = torch.nan_to_num(log_mel_db, nan=0.0, posinf=0.0, neginf=-top_db)
-        log_mel_db = log_mel_db.clamp(min=-top_db, max=0.0)
-
-        if map_to_01:
-            log_mel_db = log_mel_db_to_normalized_db(log_mel_db, top_db=top_db)
-
+        log_mel_db = mel_db_to_finite(log_mel_db)
         spectrograms.append(log_mel_db)
-        
+
     return spectrograms, machine_id_strs
+
 
 def log_mel_to_rgb(log_mel: torch.Tensor, cmap: colors.Colormap | None = None) -> torch.Tensor:
     """Convert log-mel spectrogram (1 or 2D) to RGB tensor (3, n_mels, T) in [0, 1]."""

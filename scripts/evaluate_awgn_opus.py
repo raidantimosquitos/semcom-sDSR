@@ -5,7 +5,7 @@ OPUS waveform baseline:
 - Encode to Opus (Ogg Opus) bytes via ffmpeg
 - (Optional) transmit bytes through LDPC+QPSK+AWGN and decode
 - Decode Opus back to wav via ffmpeg
-- Recompute log-mel spectrogram and standardize/crop/pad to match dataset
+- Recompute log-mel spectrogram, crop/pad, apply global mel norm from Stage-1 checkpoint
 - Run sDSR Stage2 evaluation (AUC/pAUC@0.1)
 
 Requires:
@@ -28,11 +28,17 @@ from pathlib import Path
 import numpy as np
 import torch
 import torchaudio
-import torchaudio.transforms as T
 import torch.nn.functional as F
 import torch.nn as nn
 
 from src.data.dataset import MEL_TIME_CROP, DCASE2020Task2LogMelDataset, DCASE2020Task2TestDataset
+from src.utils.audio import (
+    amplitude_to_db_power,
+    apply_global_mel_norm,
+    make_mel_spectrogram,
+    mel_db_to_finite,
+    mel_norm_from_stage1_ckpt,
+)
 from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
@@ -180,35 +186,25 @@ def preencode_opus_testset(
 def wav_to_logmel(
     wav: torch.Tensor,
     sr: int,
+    mel_transform: nn.Module,
+    to_db: nn.Module,
     *,
+    mel_mean: torch.Tensor,
+    mel_std: torch.Tensor,
+    mel_stats_eps: float = 1e-6,
     sample_rate: int = 16000,
-    n_fft: int = 1024,
-    hop_length: int = 512,
-    n_mels: int = 128,
-    top_db: float = 80.0,
     target_T: int | None = None,
-    norm_mean: torch.Tensor | None = None,
-    norm_std: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if sr != sample_rate:
         wav = torchaudio.functional.resample(wav, sr, sample_rate)
     if wav.shape[0] > 1:
         wav = wav.mean(0, keepdim=True)
-    mel_transform = T.MelSpectrogram(
-        sample_rate=sample_rate,
-        n_fft=n_fft,
-        hop_length=hop_length,
-        n_mels=n_mels,
-        f_min=0.0,
-        f_max=8000.0,
-    )
-    to_db = T.AmplitudeToDB(top_db=top_db)
     mel = mel_transform(wav)
-    log_mel = to_db(mel).float()  # (1,n_mels,T)
+    log_mel = mel_db_to_finite(to_db(mel).float())  # (1,n_mels,T)
     log_mel = log_mel[..., :MEL_TIME_CROP]
     if target_T is not None and log_mel.shape[-1] < target_T:
         log_mel = F.pad(log_mel, (0, target_T - log_mel.shape[-1]), mode="constant", value=0.0)
-    return log_mel
+    return apply_global_mel_norm(log_mel, mel_mean, mel_std, eps=mel_stats_eps)
 
 
 class OpusBaselineWrapper(nn.Module):
@@ -256,8 +252,9 @@ class OpusTestDataset(torch.utils.data.Dataset):
         ffmpeg_bin: str,
         opus_cache_dir: str | None,
         target_T: int,
-        norm_mean: torch.Tensor | None = None,
-        norm_std: torch.Tensor | None = None,
+        mel_mean: torch.Tensor,
+        mel_std: torch.Tensor,
+        mel_stats_eps: float = 1e-6,
     ) -> None:
         self.base = base
         # critical: evaluator keys results by dataset.machine_type
@@ -273,8 +270,11 @@ class OpusTestDataset(torch.utils.data.Dataset):
         self.ffmpeg_bin = str(ffmpeg_bin)
         self.opus_cache_dir = Path(opus_cache_dir) if opus_cache_dir else None
         self.target_T = int(target_T)
-        self.norm_mean = norm_mean.detach().cpu().clone() if norm_mean is not None else None
-        self.norm_std = norm_std.detach().cpu().clone() if norm_std is not None else None
+        self._mel_mean = mel_mean.detach().cpu().float().clone()
+        self._mel_std = mel_std.detach().cpu().float().clone()
+        self._mel_stats_eps = float(mel_stats_eps)
+        self._mel_transform = make_mel_spectrogram()
+        self._to_db = amplitude_to_db_power()
         self._rng = np.random.default_rng(self.seed)
         self._cu_total = 0
         self._n_total = 0
@@ -347,9 +347,12 @@ class OpusTestDataset(torch.utils.data.Dataset):
         x = wav_to_logmel(
             wav_d,
             sr_d,
+            self._mel_transform,
+            self._to_db,
+            mel_mean=self._mel_mean,
+            mel_std=self._mel_std,
+            mel_stats_eps=self._mel_stats_eps,
             target_T=self.target_T,
-            norm_mean=self.norm_mean,
-            norm_std=self.norm_std,
         )
         return x, label, machine_id
 
@@ -362,16 +365,23 @@ def main() -> None:
     print(f"[opus] using ffmpeg binary: {ffmpeg_bin}")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    mel_mean, mel_std, mel_stats_eps = mel_norm_from_stage1_ckpt(stage1_ckpt)
 
     train_ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         include_test=False,
+        mel_mean=mel_mean,
+        mel_std=mel_std,
+        mel_stats_eps=mel_stats_eps,
     )
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         target_T=train_ds.target_T,
+        mel_mean=mel_mean,
+        mel_std=mel_std,
+        mel_stats_eps=mel_stats_eps,
     )
     _, _, n_mels, T = train_ds.data.shape
 
@@ -451,6 +461,9 @@ def main() -> None:
                     ffmpeg_bin=ffmpeg_bin,
                     opus_cache_dir=str(opus_cache_dir),
                     target_T=train_ds.target_T,
+                    mel_mean=mel_mean,
+                    mel_std=mel_std,
+                    mel_stats_eps=mel_stats_eps,
                 )
                 evaluator = AnomalyEvaluator(
                     model=model,

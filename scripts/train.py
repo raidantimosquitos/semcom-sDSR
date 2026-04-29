@@ -19,6 +19,7 @@ from typing import Literal, Tuple
 import torch
 from torch.utils.data import Subset
 
+from src.data.compute_mel_stats import compute_global_mel_mean_std
 from src.data.dataset import (
     DCASE2020Task2LogMelDataset,
     DCASE2020Task2TestDataset,
@@ -26,6 +27,7 @@ from src.data.dataset import (
     ConcatLogMelDataset,
 )
 from src.engine.stage1 import Stage1Trainer
+from src.utils.audio import mel_norm_from_stage1_ckpt
 from src.engine.stage2 import Stage2Trainer
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
@@ -82,8 +84,20 @@ def parse_args() -> argparse.Namespace:
     s1.add_argument(
         "--no_norm",
         action="store_true",
-        help="(Deprecated) Standardization is disabled project-wide; inputs are always raw log-mel dB.",
+        help="(Deprecated; ignored.) Global per-mel mean/std from train data is always applied.",
     )
+    s1.add_argument(
+        "--mel_stats_include_test",
+        action="store_true",
+        help="When computing mel mean/std (no --resume / --mel_stats_pt), also pool official test/ wavs.",
+    )
+    s1.add_argument(
+        "--mel_stats_pt",
+        type=str,
+        default=None,
+        help="Optional path to a .pt dict with spectrogram_mel_mean, spectrogram_mel_std (and optional mel_stats_eps).",
+    )
+    s1.add_argument("--mel_stats_eps", type=float, default=1e-6, help="Std floor for global mel normalization.")
 
     # Stage 2: one or more machine types (joint Stage 2 if multiple; default single fan)
     s2 = sub.choices["stage2"]
@@ -190,14 +204,37 @@ def run_stage1(args: argparse.Namespace) -> None:
     machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
     run_name = machine_types[0] if len(machine_types) == 1 else "+".join(sorted(machine_types))
 
+    if getattr(args, "no_norm", False):
+        print("Warning: --no_norm is deprecated and ignored; global mel normalization is always used.")
+
     roots = getattr(args, "stage1_data_paths", None) or [args.data_path]
     include_test = bool(getattr(args, "include_test", False))
+
+    if args.resume:
+        resume_ckpt = torch.load(args.resume, map_location="cpu", weights_only=True)
+        mel_mean, mel_std, mel_stats_eps = mel_norm_from_stage1_ckpt(resume_ckpt)
+        mel_stats_include_test = bool(resume_ckpt.get("mel_stats_include_test", False))
+    elif getattr(args, "mel_stats_pt", None):
+        st = torch.load(args.mel_stats_pt, map_location="cpu", weights_only=True)
+        mel_mean, mel_std, mel_stats_eps = mel_norm_from_stage1_ckpt(st)
+        mel_stats_include_test = bool(st.get("mel_stats_include_test", False))
+    else:
+        mel_stats_include_test = bool(getattr(args, "mel_stats_include_test", False))
+        mel_mean, mel_std = compute_global_mel_mean_std(
+            list(roots),
+            machine_types,
+            include_test_for_stats=mel_stats_include_test,
+        )
+        mel_stats_eps = float(getattr(args, "mel_stats_eps", 1e-6))
 
     ds_list = [
         DCASE2020Task2LogMelDataset(
             root=r,
             machine_types=machine_types,
             include_test=include_test,
+            mel_mean=mel_mean,
+            mel_std=mel_std,
+            mel_stats_eps=mel_stats_eps,
         )
         for r in roots
     ]
@@ -229,12 +266,17 @@ def run_stage1(args: argparse.Namespace) -> None:
         use_amp=not args.no_amp,
         device=args.device,
         num_workers=args.num_workers,
+        mel_mean=mel_mean,
+        mel_std=mel_std,
+        mel_stats_eps=mel_stats_eps,
+        mel_stats_include_test=mel_stats_include_test,
     )
     trainer.train(n_iterations=args.n_iter, resume_from=args.resume)
 
 
 def run_stage2(args: argparse.Namespace) -> None:
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    mel_mean, mel_std, mel_stats_eps = mel_norm_from_stage1_ckpt(ckpt)
 
     machine_types = args.machine_type if isinstance(args.machine_type, list) else [args.machine_type]
     if len(machine_types) > 1 and args.machine_id is not None:
@@ -244,7 +286,13 @@ def run_stage2(args: argparse.Namespace) -> None:
         )
 
     if len(machine_types) == 1:
-        ds_common: dict = dict(root=args.data_path, machine_type=machine_types[0])
+        ds_common: dict = dict(
+            root=args.data_path,
+            machine_type=machine_types[0],
+            mel_mean=mel_mean,
+            mel_std=mel_std,
+            mel_stats_eps=mel_stats_eps,
+        )
         q_vae_dataset = DCASE2020Task2LogMelDataset(
             **ds_common,
             machine_id=args.machine_id,
@@ -255,6 +303,9 @@ def run_stage2(args: argparse.Namespace) -> None:
             root=args.data_path,
             machine_types=machine_types,
             include_test=False,
+            mel_mean=mel_mean,
+            mel_std=mel_std,
+            mel_stats_eps=mel_stats_eps,
         )
         run_name = "+".join(sorted(machine_types))
 
@@ -266,6 +317,9 @@ def run_stage2(args: argparse.Namespace) -> None:
         q_vae_full = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=machine_types[0],
+            mel_mean=mel_mean,
+            mel_std=mel_std,
+            mel_stats_eps=mel_stats_eps,
         )
         adversarial_indices = [
             i for i in range(len(q_vae_full._machine_id_strs))
@@ -323,12 +377,18 @@ def run_stage2(args: argparse.Namespace) -> None:
                 root=args.data_path,
                 machine_type=machine_types[0],
                 target_T=q_vae_dataset.target_T,
+                mel_mean=mel_mean,
+                mel_std=mel_std,
+                mel_stats_eps=mel_stats_eps,
             )
         else:
             val_dataset = DCASE2020Task2TestDataset(
                 root=args.data_path,
                 machine_types=machine_types,
                 target_T=q_vae_dataset.target_T,
+                mel_mean=mel_mean,
+                mel_std=mel_std,
+                mel_stats_eps=mel_stats_eps,
             )
 
     trainer = Stage2Trainer(
@@ -374,6 +434,10 @@ def run_full(args: argparse.Namespace) -> None:
         lambda_recon=1.0,
         resume=None,
         include_test=False,
+        stage1_data_paths=None,
+        mel_stats_include_test=False,
+        mel_stats_pt=None,
+        mel_stats_eps=1e-6,
         num_embeddings_coarse=512,
         num_embeddings_fine=1024,
         embedding_dim_coarse=128,

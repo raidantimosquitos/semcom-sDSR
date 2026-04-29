@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestDataset
+from src.utils.audio import mel_norm_from_stage1_ckpt
 from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
@@ -232,16 +233,23 @@ def main() -> None:
     NAN = float("nan")
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    mel_mean, mel_std, mel_stats_eps = mel_norm_from_stage1_ckpt(stage1_ckpt)
 
     train_ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         include_test=False,
+        mel_mean=mel_mean,
+        mel_std=mel_std,
+        mel_stats_eps=mel_stats_eps,
     )
     test_ds = DCASE2020Task2TestDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         target_T=train_ds.target_T,
+        mel_mean=mel_mean,
+        mel_std=mel_std,
+        mel_stats_eps=mel_stats_eps,
     )
     _, _, n_mels, T = train_ds.data.shape
 

@@ -26,6 +26,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src.data.dataset import DCASE2020Task2LogMelDataset
+from src.utils.audio import mel_norm_from_stage1_ckpt
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.comm.jscc_cnn import JSCCDualMap, JSCCMapConfig
 
@@ -51,6 +52,7 @@ def main() -> None:
         torch.cuda.manual_seed_all(args.seed)
 
     stage1 = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    mel_mean, mel_std, mel_stats_eps = mel_norm_from_stage1_ckpt(stage1)
     vq_vae = VQ_VAE_2Layer(
         hidden_channels=(stage1["hidden_channels_coarse"], stage1["hidden_channels_fine"]),
         num_residual_layers=stage1["num_residual_layers"],
@@ -69,14 +71,13 @@ def main() -> None:
     jscc = JSCCDualMap(coarse=coarse_cfg, fine=fine_cfg).eval().to(device)
     jscc.load_state_dict(jscc_ckpt["jscc_state_dict"])
 
-    # Normalization is disabled project-wide: always use raw log-mel dB.
-    use_norm = False
-    norm_mean, norm_std = None, None
-
     ds = DCASE2020Task2LogMelDataset(
         root=args.data_path,
         machine_type=args.machine_type,
         include_test=False,
+        mel_mean=mel_mean,
+        mel_std=mel_std,
+        mel_stats_eps=mel_stats_eps,
     )
     x, _lbl, _mid = next(iter(torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0)))
     x = x.to(device)
