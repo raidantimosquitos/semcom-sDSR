@@ -7,7 +7,7 @@ Any encoder that returns this tuple can be used.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 from pathlib import Path
 
 import torch
@@ -48,23 +48,12 @@ class Stage1Trainer(BaseTrainer):
         device: str = "cuda",
         total_steps: int = 20000,
         num_workers: int = 0,
-        mel_mean: Optional[torch.Tensor] = None,
-        mel_std: Optional[torch.Tensor] = None,
-        mel_stats_eps: float = 1e-6,
-        mel_stats_include_test: bool = False,
     ) -> None:
         self.machine_type = machine_type
         self.lambda_recon = lambda_recon
         self.lr = lr
         self.dataset = dataset
         self.total_steps = total_steps
-
-        if mel_mean is None or mel_std is None:
-            raise ValueError("Stage1Trainer requires mel_mean and mel_std (for checkpoint metadata).")
-        self._ckpt_mel_mean = mel_mean.detach().cpu().float().clone()
-        self._ckpt_mel_std = mel_std.detach().cpu().float().clone()
-        self._ckpt_mel_stats_eps = float(mel_stats_eps)
-        self._ckpt_mel_stats_include_test = bool(mel_stats_include_test)
 
         # Dataset is already for a single machine_type; no filtering needed
         if getattr(dataset, "machine_type", None) not in (None, machine_type):
@@ -250,12 +239,8 @@ class Stage1Trainer(BaseTrainer):
             "hidden_channels_coarse": int(self.model.hidden_channels_coarse),
             "num_residual_layers": int(self.model.num_residual_layers),
         }
-        payload["spectrogram_mel_mean"] = self._ckpt_mel_mean.clone()
-        payload["spectrogram_mel_std"] = self._ckpt_mel_std.clone()
-        payload["mel_stats_eps"] = self._ckpt_mel_stats_eps
-        payload["mel_stats_include_test"] = self._ckpt_mel_stats_include_test
-        payload["spectrogram_standardize"] = True
-        payload["spectrogram_norm_type"] = "global_mel"
+        payload["spectrogram_standardize"] = False
+        payload["spectrogram_norm_type"] = "clamped_logmel"
 
         # 1. Delete previous latest checkpoint before saving new one
         tag = tag or f"iter_{self.global_step:06d}"

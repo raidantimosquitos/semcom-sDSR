@@ -34,7 +34,6 @@ from src.data.dataset import (
 from src.engine.evaluator import AnomalyEvaluator
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
-from src.utils.audio import mel_norm_from_stage1_ckpt
 
 
 def parse_args() -> argparse.Namespace:
@@ -177,8 +176,6 @@ def main() -> None:
 def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     """Run evaluation; all user-facing output via tee (terminal + log file)."""
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    mel_mean, mel_std, mel_stats_eps = mel_norm_from_stage1_ckpt(stage1_ckpt)
-
     if args.machine_types is not None:
         if args.machine_id is not None:
             raise ValueError("--machine_id cannot be used with --machine_types")
@@ -186,35 +183,23 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
             root=args.data_path,
             machine_types=list(args.machine_types),
             include_test=False,
-            mel_mean=mel_mean,
-            mel_std=mel_std,
-            mel_stats_eps=mel_stats_eps,
         )
         test_ds = DCASE2020Task2TestDataset(
             root=args.data_path,
             machine_types=list(args.machine_types),
             target_T=train_ds.target_T,
-            mel_mean=mel_mean,
-            mel_std=mel_std,
-            mel_stats_eps=mel_stats_eps,
         )
     else:
         train_ds = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_type=args.machine_type,
             machine_id=args.machine_id,
-            mel_mean=mel_mean,
-            mel_std=mel_std,
-            mel_stats_eps=mel_stats_eps,
         )
         test_ds = DCASE2020Task2TestDataset(
             root=args.data_path,
             machine_type=args.machine_type,
             target_T=train_ds.target_T,
             machine_id=args.machine_id,
-            mel_mean=mel_mean,
-            mel_std=mel_std,
-            mel_stats_eps=mel_stats_eps,
         )
     _, _, n_mels, T = train_ds.data.shape
 

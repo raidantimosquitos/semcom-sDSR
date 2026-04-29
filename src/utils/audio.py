@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 import matplotlib.colors as colors
 import matplotlib.pyplot as plt
@@ -8,9 +8,6 @@ import numpy as np
 import torch
 import torchaudio
 import torchaudio.transforms as T
-
-_DEFAULT_MEL_STATS_EPS = 1e-6
-
 
 def make_mel_spectrogram(
     *,
@@ -31,47 +28,15 @@ def make_mel_spectrogram(
     )
 
 
-def amplitude_to_db_power() -> T.AmplitudeToDB:
-    """Power mel to full-range dB (no ``top_db`` dynamic-range floor)."""
-    return T.AmplitudeToDB(stype="power", top_db=None)
+def amplitude_to_db_power(*, top_db: float = 80.0) -> T.AmplitudeToDB:
+    """Power mel to dB with fixed dynamic-range clamp via ``top_db``."""
+    return T.AmplitudeToDB(stype="power", top_db=top_db)
 
 
-def mel_db_to_finite(log_mel_db: torch.Tensor) -> torch.Tensor:
-    """Replace NaN/Inf after dB; keep full dynamic range (no fixed dB clamp)."""
-    return torch.nan_to_num(log_mel_db, nan=0.0, posinf=0.0, neginf=0.0)
-
-
-def apply_global_mel_norm(
-    x: torch.Tensor,
-    mean: torch.Tensor,
-    std: torch.Tensor,
-    *,
-    eps: float = _DEFAULT_MEL_STATS_EPS,
-) -> torch.Tensor:
-    """``(x - mean) / (std + eps)`` with broadcastable ``mean``/``std`` (e.g. shape ``(1, n_mels, 1)``)."""
-    return (x - mean.to(device=x.device, dtype=x.dtype)) / (std.to(device=x.device, dtype=x.dtype) + eps)
-
-
-def mel_norm_from_stage1_ckpt(
-    ckpt: dict[str, Any],
-    *,
-    eps_default: float = _DEFAULT_MEL_STATS_EPS,
-) -> tuple[torch.Tensor, torch.Tensor, float]:
-    """
-    Load per-mel global normalization from a Stage-1 checkpoint.
-
-    Raises:
-        KeyError: if required keys are missing (old checkpoints without mel stats).
-    """
-    if "spectrogram_mel_mean" not in ckpt or "spectrogram_mel_std" not in ckpt:
-        raise KeyError(
-            "Stage-1 checkpoint missing 'spectrogram_mel_mean' / 'spectrogram_mel_std'. "
-            "Retrain stage1 with the current pipeline or pass a stats file via --mel_stats_pt."
-        )
-    mean = ckpt["spectrogram_mel_mean"].detach().cpu().float().clone()
-    std = ckpt["spectrogram_mel_std"].detach().cpu().float().clone()
-    eps = float(ckpt.get("mel_stats_eps", eps_default))
-    return mean, std, eps
+def mel_db_to_finite(log_mel_db: torch.Tensor, *, top_db: float = 80.0) -> torch.Tensor:
+    """Replace NaN/Inf and clamp to [-top_db, top_db] dB."""
+    x = torch.nan_to_num(log_mel_db, nan=0.0, posinf=top_db, neginf=-top_db)
+    return x.clamp(min=-top_db, max=top_db)
 
 
 def load_mel_for_dir(

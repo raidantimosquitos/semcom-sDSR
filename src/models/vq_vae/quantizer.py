@@ -37,11 +37,11 @@ class VectorQuantizerEMA(nn.Module):
         self._distance_chunk_size = int(distance_chunk_size)
 
         self._embedding = nn.Embedding(num_embeddings, embedding_dim)
-        self._embedding.weight.data.normal_()
+        self._embedding.weight.data.normal_(0,0.1)
 
         self.register_buffer("_ema_cluster_size", torch.zeros(num_embeddings))
         self._ema_w = nn.Parameter(torch.empty(num_embeddings, embedding_dim))
-        self._ema_w.data.normal_()
+        self._ema_w.data.normal_(0,0.1)
 
     def _nearest_embedding_indices(self, flat_input: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         """

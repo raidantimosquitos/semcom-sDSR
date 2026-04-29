@@ -13,7 +13,6 @@ from torch.utils.data import DataLoader, Dataset
 from ..utils.anomalies import AnomalyMapGenerator
 from ..utils.audio import (
     amplitude_to_db_power,
-    apply_global_mel_norm,
     load_mel_for_dir,
     make_mel_spectrogram,
     mel_db_to_finite,
@@ -38,8 +37,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
     All training samples are normal (no anomalies), so label is always 0..    
     
     For multiple types: (1) each type is truncated to 313 samples;
-    (2) zero-pad to the next multiple of 16 (320);
-    (3) apply global per-mel mean/std from Stage-1 training statistics. Same order for a single type.
+    (2) keep clamped log-mel dB (no standardization);
+    (3) then zero-pad to the next multiple of 16 (320). Same order for a single type.
 
     __getitem__ returns (spectrogram, label, machine_id) with label 0 = normal.
     When ``machine_types`` has more than one entry, ``machine_id`` is composite:
@@ -70,18 +69,9 @@ class DCASE2020Task2LogMelDataset(Dataset):
         n_mels: int = 128,
         f_min: float = 0.0,
         f_max: float = 8_000.0,
-        mel_mean: torch.Tensor | None = None,
-        mel_std: torch.Tensor | None = None,
-        mel_stats_eps: float = 1e-6,
         machine_id: str | None = None,
         include_test: bool = True,
     ):
-        if mel_mean is None or mel_std is None:
-            raise ValueError("DCASE2020Task2LogMelDataset requires mel_mean and mel_std (from stage1 ckpt or compute_global_mel_mean_std).")
-        self._mel_mean = mel_mean.detach().cpu().float().clone()
-        self._mel_std = mel_std.detach().cpu().float().clone()
-        self._mel_stats_eps = float(mel_stats_eps)
-
         if machine_types is not None:
             if machine_id is not None:
                 raise ValueError("machine_id filter only applies to single machine_type")
@@ -143,7 +133,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
             self._FILENAME_RE,
         )
 
-        # Truncate to MEL_TIME_CROP (shortest spectrogram alignment)
+        # Truncate to MEL_TIME_CROP and keep clamped log-mel dB values.
         spectrograms = [s[..., :MEL_TIME_CROP] for s in spectrograms]
         stacked = torch.stack(spectrograms)
 
@@ -153,9 +143,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
         if pad > 0:
             stacked = F.pad(stacked, (0, pad), mode="constant", value=0.0)
 
-        self.data = apply_global_mel_norm(
-            stacked, self._mel_mean, self._mel_std, eps=self._mel_stats_eps
-        )
+        self.data = stacked
         self.target_T = target_T
         self.machine_ids = sorted(set(machine_id_strs))
         self._machine_id_strs = machine_id_strs
@@ -271,10 +259,6 @@ class DCASE2020Task2LogMelDataset(Dataset):
         if pad > 0:
             self.data = F.pad(self.data, (0, pad), mode="constant", value=0.0)
 
-        self.data = apply_global_mel_norm(
-            self.data, self._mel_mean, self._mel_std, eps=self._mel_stats_eps
-        )
-
         self.target_T = target_T
         self._machine_id_strs = all_machine_id_strs
         self._machine_type_strs = all_machine_type_strs
@@ -295,8 +279,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, str]:
         # label 0 = normal (all training samples are normal)
-        # self.data stores globally normalized log-mel (N, 1, n_mels, T)
-        x_logmel = self.data[idx]  # (1, 1, n_mels, T)
+        # self.data stores clamped log-mel dB (N, 1, n_mels, T)
+        x_logmel = self.data[idx]  # (1, n_mels, T)
         mid = self._machine_id_strs[idx]
         if getattr(self, "_use_composite_ids", False):
             mid = composite_machine_id(self._machine_type_strs[idx], mid)
@@ -485,16 +469,7 @@ class DCASE2020Task2TestDataset(Dataset):
         f_max: float = 8_000.0,
         target_T: int | None = None,
         machine_id: str | None = None,
-        mel_mean: torch.Tensor | None = None,
-        mel_std: torch.Tensor | None = None,
-        mel_stats_eps: float = 1e-6,
     ):
-        if mel_mean is None or mel_std is None:
-            raise ValueError("DCASE2020Task2TestDataset requires mel_mean and mel_std (same as Stage-1 training).")
-        self._mel_mean = mel_mean.detach().cpu().float().clone()
-        self._mel_std = mel_std.detach().cpu().float().clone()
-        self._mel_stats_eps = float(mel_stats_eps)
-
         if (machine_type is None) == (machine_types is None):
             raise ValueError("Provide exactly one of machine_type or machine_types")
         if machine_types is not None:
@@ -641,21 +616,13 @@ class DCASE2020Task2TestDataset(Dataset):
             wav = wav.mean(0, keepdim=True)
         mel = self.mel_transform(wav)
         log_mel = mel_db_to_finite(self.to_db(mel).float())  # (1, n_mels, T)
-        # Match training: crop time, pad in raw dB, then global mel norm.
+        # Match training: crop time, keep clamped log-mel dB, then pad.
         log_mel = log_mel[..., :MEL_TIME_CROP]
-        standardized_mel = log_mel
-
-        T = standardized_mel.shape[-1]
+        out_mel = log_mel
+        T = out_mel.shape[-1]
         if self.target_T is not None and T < self.target_T:
-            standardized_mel = F.pad(standardized_mel, (0, self.target_T - T), mode="constant", value=0.0)
-
-        standardized_mel = apply_global_mel_norm(
-            standardized_mel,
-            self._mel_mean,
-            self._mel_std,
-            eps=self._mel_stats_eps,
-        )
-        return standardized_mel, label, machine_id
+            out_mel = F.pad(out_mel, (0, self.target_T - T), mode="constant", value=0.0)
+        return out_mel, label, machine_id
 
 
 def make_dataloader(dataset: DCASE2020Task2LogMelDataset | DCASE2020Task2TestDataset, batch_size: int = 256) -> DataLoader:
@@ -669,8 +636,6 @@ def make_dataloader(dataset: DCASE2020Task2LogMelDataset | DCASE2020Task2TestDat
 
 if __name__ == "__main__":
     import os
-
-    from .compute_mel_stats import compute_global_mel_mean_std
 
     # Smoke test: use one machine type to limit RAM (full multi-type can OOM)
     DATA_ROOT = Path(os.environ.get("DATA_PATH", "")) or (
@@ -690,11 +655,8 @@ if __name__ == "__main__":
 
     print(f"Dataset root: {DATA_ROOT}")
 
-    mel_mean, mel_std = compute_global_mel_mean_std(
-        [root_str], MACHINE_TYPES, include_test_for_stats=False
-    )
     dataset = DCASE2020Task2LogMelDataset(
-        root=root_str, machine_types=MACHINE_TYPES, mel_mean=mel_mean, mel_std=mel_std
+        root=root_str, machine_types=MACHINE_TYPES
     )
     if len(MACHINE_TYPES) > 1:
         _, _, mid0 = dataset[0]
@@ -713,15 +675,11 @@ if __name__ == "__main__":
         root=root_str,
         machine_type=MACHINE_TYPE_TEST,
         target_T=dataset.target_T,
-        mel_mean=mel_mean,
-        mel_std=mel_std,
     )
     test_joint = DCASE2020Task2TestDataset(
         root=root_str,
         machine_types=MACHINE_TYPES,
         target_T=dataset.target_T,
-        mel_mean=mel_mean,
-        mel_std=mel_std,
     )
     if len(MACHINE_TYPES) > 1:
         assert len(test_joint) > 0
