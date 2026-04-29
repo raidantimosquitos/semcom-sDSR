@@ -10,7 +10,7 @@ Modules:
 - sDSRConfig: configuration dataclass
 """
 
-from .s_dsr import sDSR, sDSRConfig, SAMPLING_PRESETS
+from .s_dsr import sDSR, sDSRConfig
 from .object_specific_decoder import ObjectSpecificDecoder
 from .anomaly_detection import AnomalyDetectionModule
 from .anomaly_generation import (
@@ -26,7 +26,6 @@ from .loss import FocalLoss
 __all__ = [
     "sDSR",
     "sDSRConfig",
-    "SAMPLING_PRESETS",
     "ObjectSpecificDecoder",
     "SubspaceRestrictionModule",
     "SubspaceRestrictionNetwork",
