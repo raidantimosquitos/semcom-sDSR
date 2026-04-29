@@ -34,7 +34,7 @@ def amplitude_to_db_power(*, top_db: float = 80.0) -> T.AmplitudeToDB:
 
 
 def mel_db_to_finite(log_mel_db: torch.Tensor, *, top_db: float = 80.0) -> torch.Tensor:
-    """Replace NaN/Inf and clamp to [-top_db, 20.0] dB."""
+    """Replace NaN/Inf and clamp to [-top_db, top_db] dB."""
     x = torch.nan_to_num(log_mel_db, nan=0.0, posinf=20.0, neginf=-top_db)
     return x.clamp(min=-top_db, max=top_db)
 
@@ -65,18 +65,3 @@ def load_mel_for_dir(
         spectrograms.append(log_mel_db)
 
     return spectrograms, machine_id_strs
-
-
-def log_mel_to_rgb(log_mel: torch.Tensor, cmap: colors.Colormap | None = None) -> torch.Tensor:
-    """Convert log-mel spectrogram (1 or 2D) to RGB tensor (3, n_mels, T) in [0, 1]."""
-    if cmap is None:
-        cmap = plt.get_cmap("jet")
-    log_mel_np = log_mel.squeeze().cpu().numpy()
-    lo, hi = float(log_mel_np.min()), float(log_mel_np.max())
-    span = hi - lo
-    if span <= 0:
-        span = 1.0
-    log_mel_norm = (log_mel_np - lo) / span
-    rgba: np.ndarray = np.asarray(cmap(log_mel_norm))
-    rgb = rgba[..., :3]
-    return torch.from_numpy(rgb.copy()).float().permute(2, 0, 1)

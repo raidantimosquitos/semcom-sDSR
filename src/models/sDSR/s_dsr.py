@@ -25,17 +25,6 @@ from .anomaly_generation import (
 from .anomaly_detection import AnomalyDetectionModule
 
 
-# Per-machine-type codebook sampling presets (derived from L2 distance maps)
-SAMPLING_PRESETS: dict[str, dict] = {
-    "pump":         {"anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
-    "slider":       {"anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
-    "valve":        {"anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
-    "ToyCar":       {"anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
-    "ToyConveyor":  {"anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
-    "fan":          {"anomaly_strength_fine": (0.2, 0.99), "anomaly_strength_coarse": (0.2, 0.98)},
-}
-
-
 @dataclass
 class sDSRConfig:
     """Configuration for sDSR model."""
@@ -46,19 +35,13 @@ class sDSRConfig:
     n_mels: int = 128
     T: int = 320
     anomaly_sampling: Literal["distant", "uniform"] = "distant"
-    anomaly_strength_fine: Tuple[float, float] = (0.2, 0.99)
-    anomaly_strength_coarse: Tuple[float, float] = (0.2, 0.98)
+    anomaly_strength_fine: Tuple[float, float] = (0.2, 1.0)
+    anomaly_strength_coarse: Tuple[float, float] = (0.2, 1.0)
     use_subspace_restriction: bool = False
     # Stage-2 latent injection: "uniform" = P(fine-only)=P(coarse-only)=P(both)=1/3;
     # "dsr" = P(both)=0.5, P(fine-only)=P(coarse-only)=0.25 (same tree as DSR use_both then use_hi/use_lo).
     anomaly_inj_distribution: Literal["uniform", "dsr"] = "dsr"
     machine_type: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.machine_type is not None and self.machine_type in SAMPLING_PRESETS:
-            preset = SAMPLING_PRESETS[self.machine_type]
-            self.anomaly_strength_fine = preset.get("anomaly_strength_fine", self.anomaly_strength_fine)
-            self.anomaly_strength_coarse = preset.get("anomaly_strength_coarse", self.anomaly_strength_coarse)
 
 
 class sDSR(nn.Module):
