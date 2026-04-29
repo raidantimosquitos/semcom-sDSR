@@ -41,7 +41,6 @@ class Stage2Trainer(BaseTrainer):
         machine_type: str = "unknown",
         machine_id: str | None = None,
         lambda_recon: float = 10.0,
-        lambda_focal: float = 1.0,
         lambda_sub: float = 1.0,
         lr: float = 2e-4,
         batch_size: int = 16,
@@ -60,7 +59,6 @@ class Stage2Trainer(BaseTrainer):
         self.machine_type = machine_type
         self.machine_id = machine_id
         self.lambda_recon = lambda_recon
-        self.lambda_focal = lambda_focal
         self.lambda_sub = lambda_sub
         self.lr = lr
         self.total_steps = total_steps
@@ -145,7 +143,7 @@ class Stage2Trainer(BaseTrainer):
 
             total_loss = (
                 self.lambda_recon * loss_recon
-                + self.lambda_focal * loss_focal
+                + loss_focal
             )
 
             # Subspace restriction: L2(recon_feat, q) on full batch (normal + anomalous).

@@ -213,7 +213,7 @@ class SpectromorphicMaskStrategy:
         #         self.n_mels, self.f_min_hz, self.f_max_hz,
         #     )
         min_band_frac: float = 0.01
-        max_band_frac: float = 0.2
+        max_band_frac: float = 0.1
 
         # Step 1: frequency band (domain-constrained bounds stay fixed)
         band_h = random.randint(

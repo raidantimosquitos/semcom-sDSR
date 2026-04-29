@@ -106,7 +106,6 @@ def parse_args() -> argparse.Namespace:
     s2.add_argument("--stage1_ckpt", type=str, required=True, help="Path to Stage 1 checkpoint")
     s2.add_argument("--lr", type=float, default=2e-4)
     s2.add_argument("--lambda_recon", type=float, default=0.1)
-    s2.add_argument("--lambda_focal", type=float, default=1.0)
     s2.add_argument("--lambda_sub", type=float, default=1.0, help="Weight for subspace restriction loss L2(F̃, Q)")
     s2.add_argument("--anomaly_sampling", type=str, default="distant", choices=["distant", "uniform"], help="Anomaly sampling strategy")
     s2.add_argument(
@@ -343,7 +342,6 @@ def run_stage2(args: argparse.Namespace) -> None:
         machine_type=run_name,
         machine_id=args.machine_id,
         lambda_recon=args.lambda_recon,
-        lambda_focal=args.lambda_focal,
         lambda_sub=args.lambda_sub,
         lr=args.lr,
         total_steps=args.n_iter,
@@ -412,7 +410,6 @@ def run_full(args: argparse.Namespace) -> None:
         stage1_ckpt=stage1_ckpt,
         lr=2e-4,
         lambda_recon=10.0,
-        lambda_focal=1.0,
         lambda_sub=1.0,
         val_every=0,
         anomaly_sampling="distant",

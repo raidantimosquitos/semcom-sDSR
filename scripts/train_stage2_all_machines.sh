@@ -64,7 +64,9 @@ for machine_type in "${MACHINE_TYPES[@]}"; do
     --n_iter "$N_ITER" \
     --batch_size "$BATCH_SIZE" \
     --anomaly_sampling "distant" \
-    --val_every 2000
+    --val_every 2000 \
+    --no_amp \
+    --num_workers 32
 
 done
 
