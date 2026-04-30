@@ -25,6 +25,8 @@ class FocalLoss(nn.Module):
         alpha: float | None = None,
         reduction: str = "mean",
         smoothing: float = 1e-5,
+        from_logits: bool = True,
+        eps: float = 1e-8,
     ) -> None:
         """
         Args:
@@ -38,22 +40,25 @@ class FocalLoss(nn.Module):
         self.alpha = alpha
         self.reduction = reduction
         self.smoothing = smoothing
+        self.from_logits = from_logits
+        self.eps = eps
 
     def forward(
         self,
-        logits: torch.Tensor,
+        inputs: torch.Tensor,
         target: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
-            logits: (B, 2, H, W) or (B, 1, H, W) — class logits
+            inputs: (B, 2, H, W) or (B, 1, H, W) — class logits (from_logits=True)
+                    or class probabilities (from_logits=False, e.g. softmax output)
             target: (B, 1, H, W) or (B, 2, H, W) — ground-truth anomaly map
                     values in {0, 1} for binary; if (B, 1, H, W), expanded to 2ch
 
         Returns:
             Focal loss scalar
         """
-        B, C, H, W = logits.shape
+        B, C, H, W = inputs.shape
         if target.dim() == 3:
             target = target.unsqueeze(1)  # (B, H, W) -> (B, 1, H, W)
         if target.shape[1] == 1 and C == 2:
@@ -69,8 +74,13 @@ class FocalLoss(nn.Module):
         if self.smoothing > 0:
             target_2ch = target_2ch * (1 - self.smoothing) + self.smoothing / C
 
-        log_probs = F.log_softmax(logits, dim=1)
-        probs = torch.exp(log_probs)
+        if self.from_logits:
+            log_probs = F.log_softmax(inputs, dim=1)
+            probs = torch.exp(log_probs)
+        else:
+            probs = inputs.clamp(min=self.eps, max=1.0 - self.eps)
+            # When provided probabilities, compute log(p) directly.
+            log_probs = probs.log()
         pt = (target_2ch * probs).sum(dim=1, keepdim=True).squeeze(1)
         focal_weight = (1 - pt) ** self.gamma
 

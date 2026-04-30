@@ -95,7 +95,7 @@ class Stage2Trainer(BaseTrainer):
         self.scaler = GradScaler(self.device.type, enabled=self.use_amp)
 
         from ..models.sDSR.loss import FocalLoss
-        self.focal_loss = FocalLoss(gamma=2.0)
+        self.focal_loss = FocalLoss(gamma=2.0, from_logits=False)
 
         self.best_total_loss = float("inf")
         self._last_ckpt_path: Path | None = None
@@ -139,7 +139,8 @@ class Stage2Trainer(BaseTrainer):
             # For normal samples: object decoder learns x_specific ≈ x. For anomalous:
             # decoder learns to reconstruct original normal x from corrected codes.
             loss_recon = F.mse_loss(out["x"], x_specific)
-            loss_focal = self.focal_loss(m_out, M)
+            m_prob = torch.softmax(m_out, dim=1)
+            loss_focal = self.focal_loss(m_prob, M)
 
             total_loss = (
                 self.lambda_recon * loss_recon

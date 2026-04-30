@@ -21,6 +21,8 @@ conda run -n sDSR pip install --no-build-isolation pyldpc
 
 ```bash
 gsutil -m cp -r gs://semcom-sdsr-training-data-1772509648/dcase2020_task2/dcase2020_task2_dev_dataset ./dataset
+gsutil -m cp -r gs://semcom-sdsr-training-data-1772509648/dcase2020_task2/dcase2020_task2_additional_train_dataset ./dataset
+gsutil -m cp -r gs://semcom-sdsr-training-data-1772509648/dcase2020_task2/dcase2020_task2_eval_dataset ./dataset
 ```
 
 ## BER-calibrated bitflip baselines (OPUS/JPEG)
