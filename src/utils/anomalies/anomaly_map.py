@@ -181,7 +181,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.95,
+        perlin_prob: float = 0.2,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -212,13 +212,13 @@ class SpectromorphicMaskStrategy:
         #         self.f_min_hz, self._FALLBACK_BW_HZ,
         #         self.n_mels, self.f_min_hz, self.f_max_hz,
         #     )
-        min_band_frac: float = 0.01
-        max_band_frac: float = 0.1
+        min_band_frac: float = 0.125
+        max_band_frac: float = 0.25
 
         # Step 1: frequency band (domain-constrained bounds stay fixed)
         band_h = random.randint(
-            max(1, int(min_band_frac * self.n_mels)),
-            max(1, int(max_band_frac * self.n_mels)),
+            max(28, int(min_band_frac * self.n_mels)),
+            max(82, int(max_band_frac * self.n_mels)),
         )
         band_lo = random.randint(0, self.n_mels - band_h)
         band_hi = band_lo + band_h
@@ -226,9 +226,9 @@ class SpectromorphicMaskStrategy:
         i0, i1 = band_lo, band_hi
 
         # ── Step 2: time segments in coarse cells ────────────────────────────────
-        num_segs = int(random.randint(1, 3))
-        min_aug_frac = 0.1
-        max_aug_frac = 1.0
+        num_segs = int(random.randint(3, 6))
+        min_aug_frac = 0.05
+        max_aug_frac = 0.15
 
 
         # Draw (num_segs - 1) unique interior cut points, then sort
