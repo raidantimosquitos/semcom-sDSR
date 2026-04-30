@@ -163,7 +163,7 @@ class SpectrogramReconstructionNetwork(nn.Module):
             nn.ReLU(inplace=True),
         )
         self._mp2 = nn.MaxPool2d(kernel_size=2)
-        self._bottleneck_conv = nn.Conv2d(in_channels * 4, 64, kernel_size=1)
+        self._bottleneck_conv = nn.Conv2d(in_channels * 4, 64, kernel_size=1, stride=1)
 
         self._upblock1 = nn.ConvTranspose2d(64, 64, kernel_size=4, stride=2, padding=1)
         self._upblock2 = nn.ConvTranspose2d(64, 64, kernel_size=4, stride=2, padding=1)

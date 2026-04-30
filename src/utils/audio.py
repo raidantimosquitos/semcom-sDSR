@@ -35,7 +35,7 @@ def amplitude_to_db_power(*, top_db: float = 80.0) -> T.AmplitudeToDB:
 
 def mel_db_to_finite(log_mel_db: torch.Tensor, *, top_db: float = 80.0) -> torch.Tensor:
     """Replace NaN/Inf and clamp to [-top_db, top_db] dB."""
-    x = torch.nan_to_num(log_mel_db, nan=0.0, posinf=20.0, neginf=-top_db)
+    x = torch.nan_to_num(log_mel_db, nan=-top_db, posinf=20.0, neginf=-top_db)
     return x.clamp(min=-top_db)
 
 
