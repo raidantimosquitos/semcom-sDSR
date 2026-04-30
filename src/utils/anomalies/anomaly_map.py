@@ -220,10 +220,8 @@ class SpectromorphicMaskStrategy:
             max(1, int(min_band_frac * self.n_mels)),
             max(1, int(max_band_frac * self.n_mels)),
         )
-        # band_lo = random.randint(0, self.n_mels - band_h)
-        # band_hi = band_lo + band_h
-        band_lo = random.randint(0, self.n_mels - 1)
-        band_hi = band_lo + 1
+        band_lo = random.randint(0, self.n_mels - band_h)
+        band_hi = band_lo + band_h
 
         i0, i1 = band_lo, band_hi
 
