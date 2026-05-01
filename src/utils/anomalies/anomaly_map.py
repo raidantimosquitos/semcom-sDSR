@@ -213,35 +213,87 @@ class SpectromorphicMaskStrategy:
         #         self.n_mels, self.f_min_hz, self.f_max_hz,
         #     )
 
-        n_bands = random.randint(1, 4)
-        min_band_frac: float = 0.05
-        max_band_frac: float = 0.40
-        
-        for _ in range(n_bands):
-            # Step 1: frequency band (domain-constrained bounds stay fixed)
-            band_h = random.randint(
-                max(1, int(min_band_frac * self.n_mels)),
-                max(1, int(max_band_frac * self.n_mels)),
-            )
-            band_lo = random.randint(0, self.n_mels - band_h)
-            band_hi = band_lo + band_h
+        # ---------------------------------------------------------------------
+        # Old band_mask implementation (kept for reference)
+        # ---------------------------------------------------------------------
+        # n_bands = random.randint(1, 4)
+        # min_band_frac: float = 0.01
+        # max_band_frac: float = 0.2
+        #
+        # for _ in range(n_bands):
+        #     # Step 1: frequency band (domain-constrained bounds stay fixed)
+        #     band_h = random.randint(
+        #         max(1, int(min_band_frac * self.n_mels)),
+        #         max(1, int(max_band_frac * self.n_mels)),
+        #     )
+        #     band_lo = random.randint(0, self.n_mels - band_h)
+        #     band_hi = band_lo + band_h
+        #
+        #     i0, i1 = band_lo, band_hi
+        #
+        #     # ── Step 2: time segments in coarse cells ────────────────────────────
+        #     num_segs = int(random.randint(1, 6))
+        #     min_aug_frac = 0.2
+        #     max_aug_frac = 0.8
+        #
+        #     # Draw (num_segs - 1) unique interior cut points, then sort
+        #     cut_points = sorted(
+        #         random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
+        #     )
+        #     boundaries = [0] + cut_points + [self.T]
+        #     segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+        #
+        #     # ── Step 3: augment a random consecutive run within each segment ─────
+        #     for seg_start, seg_end in segments:
+        #         seg_len = seg_end - seg_start
+        #         if seg_len < 1:
+        #             continue
+        #
+        #         run_len = random.randint(
+        #             max(1, int(min_aug_frac * seg_len)),
+        #             max(1, int(max_aug_frac * seg_len)),
+        #         )
+        #         run_start = random.randint(0, seg_len - run_len)
+        #         mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
 
-            i0, i1 = band_lo, band_hi
+        # ---------------------------------------------------------------------
+        # New frequency masking:
+        # - split mel axis into 8 equal segments (intended: 16 mel bins each)
+        # - independently per segment, with probability 0.5 pick exactly one mel bin
+        # - apply the same time-segment augmentation as before to that single-bin band
+        # ---------------------------------------------------------------------
+        num_segments = 8
+        seg_size = self.n_mels // num_segments
+        if seg_size <= 0:
+            return mask
 
-            # ── Step 2: time segments in coarse cells ────────────────────────────────
+        # Time augmentation params (kept the same behavior as before)
+        min_aug_frac = 0.2
+        max_aug_frac = 0.8
+
+        for seg_idx in range(num_segments):
+            if random.random() >= 0.5:
+                continue
+
+            seg_lo = seg_idx * seg_size
+            seg_hi = (seg_idx + 1) * seg_size if seg_idx < (num_segments - 1) else self.n_mels
+            if seg_hi - seg_lo <= 0:
+                continue
+
+            mel_bin = random.randint(seg_lo, seg_hi - 1)
+            i0, i1 = mel_bin, mel_bin + 1
+
+            # ── Step 2: time segments in coarse cells ────────────────────────────
             num_segs = int(random.randint(1, 6))
-            min_aug_frac = 0.2
-            max_aug_frac = 0.8
-
 
             # Draw (num_segs - 1) unique interior cut points, then sort
-            cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
+            cut_points = sorted(
+                random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
+            )
             boundaries = [0] + cut_points + [self.T]
             segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
 
-
-            # ── Step 3: augment a random consecutive run within each segment ─────────
-                
+            # ── Step 3: augment a random consecutive run within each segment ─────
             for seg_start, seg_end in segments:
                 seg_len = seg_end - seg_start
                 if seg_len < 1:
