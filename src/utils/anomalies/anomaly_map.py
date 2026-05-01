@@ -181,7 +181,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.4,
+        perlin_prob: float = 0.2,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -212,7 +212,7 @@ class SpectromorphicMaskStrategy:
         #         self.f_min_hz, self._FALLBACK_BW_HZ,
         #         self.n_mels, self.f_min_hz, self.f_max_hz,
         #     )
-        min_band_frac: float = 0.25
+        min_band_frac: float = 0.05
         max_band_frac: float = 0.85
 
         # Step 1: frequency band (domain-constrained bounds stay fixed)
