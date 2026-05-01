@@ -35,8 +35,8 @@ class sDSRConfig:
     n_mels: int = 128
     T: int = 320
     anomaly_sampling: Literal["distant", "uniform"] = "distant"
-    anomaly_strength_fine: Tuple[float, float] = (0.1, 1.0)
-    anomaly_strength_coarse: Tuple[float, float] = (0.1, 1.0)
+    anomaly_strength_fine: Tuple[float, float] = (0.8, 1.0)
+    anomaly_strength_coarse: Tuple[float, float] = (0.8, 1.0)
     use_subspace_restriction: bool = False
     # Stage-2 latent injection: "uniform" = P(fine-only)=P(coarse-only)=P(both)=1/3;
     # "dsr" = P(both)=0.5, P(fine-only)=P(coarse-only)=0.25 (same tree as DSR use_both then use_hi/use_lo).
@@ -84,7 +84,7 @@ class sDSR(nn.Module):
         self._anomaly_detection = AnomalyDetectionModule(
             in_channels=2,
             out_channels=2,
-            base_width=32,
+            base_width=64,
         )
 
         self._anomaly_generation = AnomalyGeneration(
