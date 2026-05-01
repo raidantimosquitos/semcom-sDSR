@@ -271,14 +271,27 @@ class SpectromorphicMaskStrategy:
         min_aug_frac = 0.2
         max_aug_frac = 0.8
 
-        # One shared temporal partition for every activated frequency band (same coarse
-        # time cells; per-band runs inside each cell stay independent).
+        # Shared temporal partition and shared sub-runs inside each coarse cell for every
+        # activated frequency band (same [t0, t1) intervals vertically).
         num_segs = int(random.randint(1, 6))
         cut_points = sorted(
             random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
         )
         boundaries = [0] + cut_points + [self.T]
         segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+
+        time_runs: list[tuple[int, int]] = []
+        for seg_start, seg_end in segments:
+            seg_len = seg_end - seg_start
+            if seg_len < 1:
+                continue
+            run_len = random.randint(
+                max(1, int(min_aug_frac * seg_len)),
+                max(1, int(max_aug_frac * seg_len)),
+            )
+            run_start = random.randint(0, seg_len - run_len)
+            t0 = seg_start + run_start
+            time_runs.append((t0, t0 + run_len))
 
         for seg_idx in range(num_segments):
             if random.random() >= 0.5:
@@ -293,18 +306,8 @@ class SpectromorphicMaskStrategy:
             bw = random.randint(1, 10)
             i0, i1 = mel_bin, mel_bin + bw
 
-            # ── Step 3: augment a random consecutive run within each segment ─────
-            for seg_start, seg_end in segments:
-                seg_len = seg_end - seg_start
-                if seg_len < 1:
-                    continue
-
-                run_len = random.randint(
-                    max(1, int(min_aug_frac * seg_len)),
-                    max(1, int(max_aug_frac * seg_len)),
-                )
-                run_start = random.randint(0, seg_len - run_len)
-                mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
+            for t0, t1 in time_runs:
+                mask[i0:i1, t0:t1] = 1.0
 
         return mask
 
