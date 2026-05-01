@@ -212,7 +212,7 @@ class SpectromorphicMaskStrategy:
         #         self.f_min_hz, self._FALLBACK_BW_HZ,
         #         self.n_mels, self.f_min_hz, self.f_max_hz,
         #     )
-        min_band_frac: float = 0.05
+        min_band_frac: float = 0.25
         max_band_frac: float = 0.85
 
         # Step 1: frequency band (domain-constrained bounds stay fixed)
