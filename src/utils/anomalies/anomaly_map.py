@@ -181,7 +181,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.1,
+        perlin_prob: float = 0.2,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
