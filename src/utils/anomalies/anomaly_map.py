@@ -271,6 +271,15 @@ class SpectromorphicMaskStrategy:
         min_aug_frac = 0.2
         max_aug_frac = 0.8
 
+        # One shared temporal partition for every activated frequency band (same coarse
+        # time cells; per-band runs inside each cell stay independent).
+        num_segs = int(random.randint(1, 6))
+        cut_points = sorted(
+            random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
+        )
+        boundaries = [0] + cut_points + [self.T]
+        segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+
         for seg_idx in range(num_segments):
             if random.random() >= 0.5:
                 continue
@@ -283,16 +292,6 @@ class SpectromorphicMaskStrategy:
             mel_bin = random.randint(seg_lo, seg_hi - 1)
             bw = random.randint(1, 10)
             i0, i1 = mel_bin, mel_bin + bw
-
-            # ── Step 2: time segments in coarse cells ────────────────────────────
-            num_segs = int(random.randint(1, 6))
-
-            # Draw (num_segs - 1) unique interior cut points, then sort
-            cut_points = sorted(
-                random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
-            )
-            boundaries = [0] + cut_points + [self.T]
-            segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
 
             # ── Step 3: augment a random consecutive run within each segment ─────
             for seg_start, seg_end in segments:
