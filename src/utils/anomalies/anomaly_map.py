@@ -281,7 +281,8 @@ class SpectromorphicMaskStrategy:
                 continue
 
             mel_bin = random.randint(seg_lo, seg_hi - 1)
-            i0, i1 = mel_bin, mel_bin + 1
+            bw = random.randint(1, 10)
+            i0, i1 = mel_bin, mel_bin + bw
 
             # ── Step 2: time segments in coarse cells ────────────────────────────
             num_segs = int(random.randint(1, 6))
