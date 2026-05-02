@@ -225,8 +225,20 @@ class SpectromorphicMaskStrategy:
         )
         band_lo = random.randint(0, self.n_mels - band_h)
         band_hi = band_lo + band_h
-    
+        
         i0, i1 = band_lo, band_hi
+
+        events = random.randint(1, 3)
+
+        for _ in range(events):
+            duration = random.randint(
+                max(5, int(0.05 * self.T)),
+                max(10, int(0.6 * self.T)),
+            )
+            start = random.randint(0, self.T - duration)
+            mask[i0:i1, start:start + duration] = 1.0
+        
+        return mask 
     
         # ── Step 2: time segments in coarse cells ────────────────────────────
         num_segs = int(random.randint(1, 2))
