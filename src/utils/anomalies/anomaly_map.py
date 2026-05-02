@@ -148,58 +148,6 @@ def _sample_mel_band(
             return i0, i1
     return None
 
-def _smoothstep(t: np.ndarray) -> np.ndarray:
-    """Perlin fade: 6t^5 - 15t^4 + 10t^3"""
-    return t * t * t * (t * (t * 6 - 15) + 10)
-
-def perlin_1d(n: int, n_octaves: int = 3, persistence: float = 0.5,
-              lacunarity: float = 2.0, rng: np.random.Generator | None = None) -> np.ndarray:
-    """
-    Pure-numpy 1D Perlin noise of length n.
-    Produces smooth values in approximately [-1, 1].
-
-    n_octaves   : more octaves → finer detail on the freq axis
-    persistence : amplitude decay per octave (< 1 → coarser dominates)
-    lacunarity  : frequency multiplier per octave
-    """
-    if rng is None:
-        rng = np.random.default_rng()
-
-    result    = np.zeros(n, dtype=np.float64)
-    amplitude = 1.0
-    frequency = 1.0
-
-    for _ in range(n_octaves):
-        # Number of grid cells at this octave
-        n_cells = max(2, int(np.ceil(n * frequency / n)))
-        # Random gradient at each grid vertex: +1 or -1
-        n_verts = n_cells + 1
-        grads   = rng.choice([-1.0, 1.0], size=n_verts)
-
-        # Sample positions in [0, n_cells]
-        xs     = np.linspace(0, n_cells, n, endpoint=False)
-        x0     = np.floor(xs).astype(int)
-        x1     = x0 + 1
-        t      = xs - x0                         # local coordinate in [0, 1)
-        fade_t = _smoothstep(t)
-
-        # Clamp to valid gradient indices
-        x0 = np.clip(x0, 0, n_verts - 1)
-        x1 = np.clip(x1, 0, n_verts - 1)
-
-        # Dot products: gradient × distance to vertex
-        d0 = grads[x0] * t           # distance from left vertex
-        d1 = grads[x1] * (t - 1.0)  # distance from right vertex
-
-        # Interpolate
-        result += amplitude * (d0 + fade_t * (d1 - d0))
-
-        amplitude *= persistence
-        frequency *= lacunarity
-
-    return result
-
-
 # ---------------------------------------------------------------------------
 # Main strategy
 # ---------------------------------------------------------------------------
@@ -267,98 +215,43 @@ class SpectromorphicMaskStrategy:
         # ---------------------------------------------------------------------
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
-        # min_band_frac: float = 0.6
-        # max_band_frac: float = 1.0
+        min_band_frac: float = 0.05
+        max_band_frac: float = 0.3
         
-        # # Step 1: frequency band (domain-constrained bounds stay fixed)
-        # band_h = random.randint(
-        #     max(1, int(min_band_frac * self.n_mels)),
-        #     max(1, int(max_band_frac * self.n_mels)),
-        # )
-        # band_lo = random.randint(0, self.n_mels - band_h)
-        # band_hi = band_lo + band_h
+        # Step 1: frequency band (domain-constrained bounds stay fixed)
+        band_h = random.randint(
+            max(1, int(min_band_frac * self.n_mels)),
+            max(1, int(max_band_frac * self.n_mels)),
+        )
+        band_lo = random.randint(0, self.n_mels - band_h)
+        band_hi = band_lo + band_h
     
-        # i0, i1 = band_lo, band_hi
+        i0, i1 = band_lo, band_hi
     
-        # # ── Step 2: time segments in coarse cells ────────────────────────────
-        # num_segs = int(random.randint(1, 6))
-        # min_aug_frac = 0.01
-        # max_aug_frac = 0.05
+        # ── Step 2: time segments in coarse cells ────────────────────────────
+        num_segs = int(random.randint(1, 2))
+        min_aug_frac = 0.2
+        max_aug_frac = 0.8
     
-        # # Draw (num_segs - 1) unique interior cut points, then sort
-        # cut_points = sorted(
-        #     random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
-        # )
-        # boundaries = [0] + cut_points + [self.T]
-        # segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+        # Draw (num_segs - 1) unique interior cut points, then sort
+        cut_points = sorted(
+            random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
+        )
+        boundaries = [0] + cut_points + [self.T]
+        segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
     
-        # # ── Step 3: augment a random consecutive run within each segment ─────
-        # for seg_start, seg_end in segments:
-        #     seg_len = seg_end - seg_start
-        #     if seg_len < 1:
-        #         continue
+        # ── Step 3: augment a random consecutive run within each segment ─────
+        for seg_start, seg_end in segments:
+            seg_len = seg_end - seg_start
+            if seg_len < 1:
+                continue
     
-        #     run_len = random.randint(
-        #         max(1, int(min_aug_frac * seg_len)),
-        #         max(1, int(max_aug_frac * seg_len)),
-        #     )
-        #     run_start = random.randint(0, seg_len - run_len)
-        #     mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
-
-        rng = np.random.default_rng(None)
-        threshold    = 0.15   # fraction of freq rows to activate
-        n_octaves    = 3      # smoothness of freq-axis noise
-        persistence  = 0.5
-        lacunarity   = 2.0
-        # Time-axis structure
-        time_width   = random.uniform(0.5, 1.0)    # 1.0 = full width; < 1.0 = partial band
-        time_jitter  = random.uniform(0.0, 0.1)    # per-row random time offset (0 = aligned)
-        # Random list of 
-        n_harmonics = random.randint(1, 4)
-        harmonic_rows =  random.sample(range(self.n_mels), n_harmonics)
-        harmonic_boost = 0.4
-        harmonic_sigma = 2.0
-
-        # ── Step 1: smooth noise along frequency axis ──────────────────
-        noise = perlin_1d(self.n_mels, n_octaves=n_octaves, persistence=persistence,
-                        lacunarity=lacunarity, rng=rng)
-
-        # Normalize to [0, 1]
-        noise = (noise - noise.min()) / (noise.max() - noise.min() + 1e-8)
-
-        # ── Step 2: harmonic row bias ──────────────────────────────────
-        if harmonic_rows is not None:
-            freq_axis = np.arange(self.n_mels, dtype=np.float32)
-            bias      = np.zeros(self.n_mels, dtype=np.float32)
-            for r in harmonic_rows:
-                bias += harmonic_boost * np.exp(
-                    -0.5 * ((freq_axis - r) / harmonic_sigma) ** 2
-                )
-            noise = np.clip(noise + bias, 0, None)
-            noise = (noise - noise.min()) / (noise.max() - noise.min() + 1e-8)
-
-        # ── Step 3: threshold → active frequency rows ─────────────────
-        cutoff      = np.quantile(noise, 1.0 - threshold)
-        active_rows = (noise >= cutoff)   # (self.n_mels,) bool
-
-        # ── Step 4: expand rows to 2D with time structure ──────────────
-        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
-
-        for h in np.where(active_rows)[0]:
-            if time_width >= 1.0:
-                mask[h, :] = 1.0
-            else:
-                w      = max(1, int(self.T * time_width))
-                if time_jitter > 0:
-                    # Each row's band starts at a slightly different time offset
-                    jitter = int(rng.uniform(-time_jitter * self.T,
-                                            time_jitter * self.T))
-                    t_start = int(np.clip(
-                        rng.integers(0, self.T - w + 1) + jitter, 0, self.T - w
-                    ))
-                else:
-                    t_start = rng.integers(0, self.T - w + 1)
-                mask[h, t_start:t_start + w] = 1.0
+            run_len = random.randint(
+                max(1, int(min_aug_frac * seg_len)),
+                max(1, int(max_aug_frac * seg_len)),
+            )
+            run_start = random.randint(0, seg_len - run_len)
+            mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
 
         return mask
 
