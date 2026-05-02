@@ -216,7 +216,7 @@ class SpectromorphicMaskStrategy:
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
         min_band_frac: float = 0.05
-        max_band_frac: float = 0.3
+        max_band_frac: float = 1.0
         
         # Step 1: frequency band (domain-constrained bounds stay fixed)
         band_h = random.randint(
@@ -227,23 +227,11 @@ class SpectromorphicMaskStrategy:
         band_hi = band_lo + band_h
         
         i0, i1 = band_lo, band_hi
-
-        events = random.randint(1, 3)
-
-        for _ in range(events):
-            duration = random.randint(
-                max(5, int(0.05 * self.T)),
-                max(10, int(0.6 * self.T)),
-            )
-            start = random.randint(0, self.T - duration)
-            mask[i0:i1, start:start + duration] = 1.0
-        
-        return mask 
     
         # ── Step 2: time segments in coarse cells ────────────────────────────
-        num_segs = int(random.randint(1, 2))
-        min_aug_frac = 0.2
-        max_aug_frac = 0.8
+        num_segs = int(random.randint(1, 3))
+        min_aug_frac = 0.05
+        max_aug_frac = 1.0
     
         # Draw (num_segs - 1) unique interior cut points, then sort
         cut_points = sorted(
