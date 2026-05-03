@@ -140,7 +140,7 @@ class Stage2Trainer(BaseTrainer):
             # decoder learns to reconstruct original normal x from corrected codes.
             loss_recon = F.mse_loss(out["x"], x_specific)
             m_prob = torch.softmax(m_out, dim=1)
-            loss_focal = self.focal_loss(m_prob, M)
+            loss_focal = self.focal_loss(m_prob, M) + F.mse_loss(m_prob, M)
 
             total_loss = (
                 self.lambda_recon * loss_recon
