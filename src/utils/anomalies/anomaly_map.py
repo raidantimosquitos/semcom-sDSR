@@ -180,7 +180,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.1,
+        perlin_prob: float = 0.2,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -215,43 +215,84 @@ class SpectromorphicMaskStrategy:
         # ---------------------------------------------------------------------
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
-        min_band_frac: float = 0.05 # 0.05
-        max_band_frac: float = 1.0
+        # min_band_frac: float = 0.05 # 0.05
+        # max_band_frac: float = 1.0
         
-        # Step 1: frequency band (domain-constrained bounds stay fixed)
+        # # Step 1: frequency band (domain-constrained bounds stay fixed)
+        # band_h = random.randint(
+        #     max(1, int(min_band_frac * self.n_mels)),
+        #     max(1, int(max_band_frac * self.n_mels)),
+        # )
+        # band_lo = random.randint(0, self.n_mels - band_h)
+        # band_hi = band_lo + band_h
+        
+        # i0, i1 = band_lo, band_hi
+    
+        # # ── Step 2: time segments in coarse cells ────────────────────────────
+        # num_segs = int(random.randint(1, 3))
+        # min_aug_frac = 0.05
+        # max_aug_frac = 1.0 # 1.0
+    
+        # # Draw (num_segs - 1) unique interior cut points, then sort
+        # cut_points = sorted(
+        #     random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
+        # )
+        # boundaries = [0] + cut_points + [self.T]
+        # segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+    
+        # # ── Step 3: augment a random consecutive run within each segment ─────
+        # for seg_start, seg_end in segments:
+        #     seg_len = seg_end - seg_start
+        #     if seg_len < 1:
+        #         continue
+    
+        #     run_len = random.randint(
+        #         max(1, int(min_aug_frac * seg_len)),
+        #         max(1, int(max_aug_frac * seg_len)),
+        #     )
+        #     run_start = random.randint(0, seg_len - run_len)
+        #     mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
+
+        # return mask
+
+        # ── Step 1: frequency band ───────────────────────────────────────────────
+        min_band_frac = 0.05
+        max_band_frac = 1.0
+
         band_h = random.randint(
             max(1, int(min_band_frac * self.n_mels)),
             max(1, int(max_band_frac * self.n_mels)),
         )
         band_lo = random.randint(0, self.n_mels - band_h)
         band_hi = band_lo + band_h
-        
-        i0, i1 = band_lo, band_hi
-    
-        # ── Step 2: time segments in coarse cells ────────────────────────────
-        num_segs = int(random.randint(1, 3))
-        min_aug_frac = 0.05
-        max_aug_frac = 1.0 # 1.0
-    
-        # Draw (num_segs - 1) unique interior cut points, then sort
-        cut_points = sorted(
-            random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
-        )
-        boundaries = [0] + cut_points + [self.T]
-        segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
-    
-        # ── Step 3: augment a random consecutive run within each segment ─────
-        for seg_start, seg_end in segments:
-            seg_len = seg_end - seg_start
-            if seg_len < 1:
+
+        # ── Step 2: wiggle band edges with 1-D Perlin ────────────────────────────
+        # Controls how far (in mel bins) each edge can drift.
+        edge_wander_bins = max(1, int(band_h * 0.20))   # up to 20% of band height
+        perlin_scale_t = max(1, min(2 ** random.randint(1, 4), self.T))  # coarse→fine
+
+        # 1-D noise along time for lo and hi edges separately
+        lo_noise = rand_perlin_2d_np((1, self.T), (1, perlin_scale_t))[0]  # (T,)
+        hi_noise = rand_perlin_2d_np((1, self.T), (1, perlin_scale_t))[0]  # (T,)
+
+        # Map noise [-1,1] → [-edge_wander, +edge_wander] integer offsets
+        lo_offsets = (lo_noise * edge_wander_bins).astype(int)   # (T,)
+        hi_offsets = (hi_noise * edge_wander_bins).astype(int)   # (T,)
+
+        # ── Step 3: temporal fill via 1-D Perlin threshold ──────────────────────
+        time_scale = max(1, min(2 ** random.randint(0, 4), self.T))
+        time_noise = rand_perlin_2d_np((1, self.T), (1, time_scale))[0]   # (T,)
+        time_threshold = random.uniform(-0.3, 0.5)   # skew: negative → more fill
+        time_on = time_noise > time_threshold          # (T,) bool
+
+        # ── Step 4: fill mask column by column ──────────────────────────────────
+        mel_idx = np.arange(self.n_mels)
+        for t in range(self.T):
+            if not time_on[t]:
                 continue
-    
-            run_len = random.randint(
-                max(1, int(min_aug_frac * seg_len)),
-                max(1, int(max_aug_frac * seg_len)),
-            )
-            run_start = random.randint(0, seg_len - run_len)
-            mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
+            lo = np.clip(band_lo + lo_offsets[t], 0, self.n_mels - 1)
+            hi = np.clip(band_hi + hi_offsets[t], lo + 1, self.n_mels)
+            mask[lo:hi, t] = 1.0
 
         return mask
 
