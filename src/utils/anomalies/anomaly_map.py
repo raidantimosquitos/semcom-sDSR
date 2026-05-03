@@ -231,7 +231,7 @@ class SpectromorphicMaskStrategy:
         # ── Step 2: time segments in coarse cells ────────────────────────────
         num_segs = int(random.randint(1, 5))
         min_aug_frac = 0.05
-        max_aug_frac = 1.0 # 1.0
+        max_aug_frac = 0.3 # 1.0
     
         # Draw (num_segs - 1) unique interior cut points, then sort
         cut_points = sorted(
