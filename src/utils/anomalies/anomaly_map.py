@@ -254,45 +254,51 @@ class SpectromorphicMaskStrategy:
         #     mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
 
         # return mask
+        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
 
-        # ── Step 1: frequency band ───────────────────────────────────────────────
-        min_band_frac = 0.05
-        max_band_frac = 1.0
-
-        band_h = random.randint(
-            max(1, int(min_band_frac * self.n_mels)),
-            max(1, int(max_band_frac * self.n_mels)),
-        )
+        # ── Frequency band ───────────────────────────────────────────────────────
+        # Log-uniform band height: covers thin slivers to full spectrum equally
+        log_lo = math.log2(max(1, int(0.02 * self.n_mels)))
+        log_hi = math.log2(self.n_mels)
+        band_h = int(2 ** random.uniform(log_lo, log_hi))
+        band_h = max(1, min(band_h, self.n_mels))
         band_lo = random.randint(0, self.n_mels - band_h)
         band_hi = band_lo + band_h
 
-        # ── Step 2: wiggle band edges with 1-D Perlin ────────────────────────────
-        # Controls how far (in mel bins) each edge can drift.
-        edge_wander_bins = max(1, int(band_h * 0.20))   # up to 20% of band height
-        perlin_scale_t = max(1, min(2 ** random.randint(1, 4), self.T))  # coarse→fine
+        # ── Time: log-uniform segment granularity ────────────────────────────────
+        # Equivalent to Perlin's scale octaves: 1 segment up to T/2 segments
+        max_segs = max(1, self.T // 2)
+        log_seg_lo = 0                           # 2^0 = 1 segment
+        log_seg_hi = math.log2(max_segs)
+        num_segs = int(2 ** random.uniform(log_seg_lo, log_seg_hi))
+        num_segs = max(1, min(num_segs, self.T))
 
-        # 1-D noise along time for lo and hi edges separately
-        lo_noise = rand_perlin_2d_np((1, self.T), (1, perlin_scale_t))[0]  # (T,)
-        hi_noise = rand_perlin_2d_np((1, self.T), (1, perlin_scale_t))[0]  # (T,)
+        # ── Per-segment fill density: Beta distribution ──────────────────────────
+        # Beta(0.5, 0.5) is U-shaped → pushes toward 0 or 1, not stuck at 0.5
+        # This is what gives Perlin its "sometimes tiny, sometimes huge" coverage
+        alpha = random.uniform(0.3, 1.0)   # sample the Beta shape itself for
+        beta  = random.uniform(0.3, 1.0)   # extra meta-variety across masks
+        
+        def sample_fill_frac() -> float:
+            # Beta via two Gamma samples
+            a = np.random.gamma(alpha, 1.0)
+            b = np.random.gamma(beta, 1.0)
+            return float(a / (a + b)) if (a + b) > 0 else 0.5
 
-        # Map noise [-1,1] → [-edge_wander, +edge_wander] integer offsets
-        lo_offsets = (lo_noise * edge_wander_bins).astype(int)   # (T,)
-        hi_offsets = (hi_noise * edge_wander_bins).astype(int)   # (T,)
+        # ── Cut points ───────────────────────────────────────────────────────────
+        cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
+        boundaries = [0] + cut_points + [self.T]
+        segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
 
-        # ── Step 3: temporal fill via 1-D Perlin threshold ──────────────────────
-        time_scale = max(1, min(2 ** random.randint(0, 4), self.T))
-        time_noise = rand_perlin_2d_np((1, self.T), (1, time_scale))[0]   # (T,)
-        time_threshold = random.uniform(-0.3, 0.5)   # skew: negative → more fill
-        time_on = time_noise > time_threshold          # (T,) bool
-
-        # ── Step 4: fill mask column by column ──────────────────────────────────
-        mel_idx = np.arange(self.n_mels)
-        for t in range(self.T):
-            if not time_on[t]:
+        for seg_start, seg_end in segments:
+            seg_len = seg_end - seg_start
+            if seg_len < 1:
                 continue
-            lo = np.clip(band_lo + lo_offsets[t], 0, self.n_mels - 1)
-            hi = np.clip(band_hi + hi_offsets[t], lo + 1, self.n_mels)
-            mask[lo:hi, t] = 1.0
+
+            fill_frac = sample_fill_frac()
+            run_len = max(1, int(fill_frac * seg_len))
+            run_start = random.randint(0, seg_len - run_len)
+            mask[band_lo:band_hi, seg_start + run_start : seg_start + run_start + run_len] = 1.0
 
         return mask
 
