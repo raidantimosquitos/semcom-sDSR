@@ -180,7 +180,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.2,
+        perlin_prob: float = 0.4,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -215,7 +215,7 @@ class SpectromorphicMaskStrategy:
         # ---------------------------------------------------------------------
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
-        min_band_frac: float = 0.9 # 0.05
+        min_band_frac: float = 0.05 # 0.05
         max_band_frac: float = 1.0
         
         # Step 1: frequency band (domain-constrained bounds stay fixed)
@@ -231,7 +231,7 @@ class SpectromorphicMaskStrategy:
         # ── Step 2: time segments in coarse cells ────────────────────────────
         num_segs = int(random.randint(1, 3))
         min_aug_frac = 0.05
-        max_aug_frac = 0.3 # 1.0
+        max_aug_frac = 1.0 # 1.0
     
         # Draw (num_segs - 1) unique interior cut points, then sort
         cut_points = sorted(
