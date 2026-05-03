@@ -91,7 +91,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     """
     min_perlin_scale = 0
     perlin_scale = 6  # randint in [0, 5] -> scales in {1,2,4,8,16,32}
-    # angle_deg = random.uniform(-15.0, 15.0)
+    angle_deg = random.uniform(-5.0, 5.0)
     
     perlin_scaley = 2 ** int(random.randint(min_perlin_scale, perlin_scale - 1))
 
@@ -101,20 +101,8 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     perlin_scalex = max(1, min(perlin_scalex, T))
     perlin_scaley = max(1, min(perlin_scaley, n_mels))
 
-    anisotropy_list = ["vertical", "horizontal", "isotropic"]
-    anisotropy = random.choice(anisotropy_list)
-    anisotropy_strength = random.uniform(1.0, 3.5)
-
-     # Apply anisotropy by scaling res
-    if anisotropy == "vertical":
-        # Stretch horizontally (time axis) -> vertical blobs
-        perlin_scalex = int(perlin_scalex * anisotropy_strength)
-    elif anisotropy == "horizontal":
-        # Stretch vertically (frequency axis) -> horizontal blobs
-        perlin_scaley = int(perlin_scaley * anisotropy_strength)
-
     noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex))
-    # noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
+    noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
 
     threshold = 0.5
     perlin_thr = (noise > threshold).astype(np.float32)
@@ -192,7 +180,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 1.0,
+        perlin_prob: float = 0.1,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -241,7 +229,7 @@ class SpectromorphicMaskStrategy:
         i0, i1 = band_lo, band_hi
     
         # ── Step 2: time segments in coarse cells ────────────────────────────
-        num_segs = int(random.randint(2, 5))
+        num_segs = int(random.randint(1, 5))
         min_aug_frac = 0.05
         max_aug_frac = 1.0 # 1.0
     
