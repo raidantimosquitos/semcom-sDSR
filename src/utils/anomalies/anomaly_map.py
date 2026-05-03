@@ -215,92 +215,46 @@ class SpectromorphicMaskStrategy:
         # ---------------------------------------------------------------------
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
-        # min_band_frac: float = 0.05 # 0.05
-        # max_band_frac: float = 1.0
+        min_band_frac: float = 0.05 # 0.05
+        max_band_frac: float = 1.0
         
-        # # Step 1: frequency band (domain-constrained bounds stay fixed)
-        # band_h = random.randint(
-        #     max(1, int(min_band_frac * self.n_mels)),
-        #     max(1, int(max_band_frac * self.n_mels)),
-        # )
-        # band_lo = random.randint(0, self.n_mels - band_h)
-        # band_hi = band_lo + band_h
-        
-        # i0, i1 = band_lo, band_hi
-    
-        # # ── Step 2: time segments in coarse cells ────────────────────────────
-        # num_segs = int(random.randint(1, 3))
-        # min_aug_frac = 0.05
-        # max_aug_frac = 1.0 # 1.0
-    
-        # # Draw (num_segs - 1) unique interior cut points, then sort
-        # cut_points = sorted(
-        #     random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
-        # )
-        # boundaries = [0] + cut_points + [self.T]
-        # segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
-    
-        # # ── Step 3: augment a random consecutive run within each segment ─────
-        # for seg_start, seg_end in segments:
-        #     seg_len = seg_end - seg_start
-        #     if seg_len < 1:
-        #         continue
-    
-        #     run_len = random.randint(
-        #         max(1, int(min_aug_frac * seg_len)),
-        #         max(1, int(max_aug_frac * seg_len)),
-        #     )
-        #     run_start = random.randint(0, seg_len - run_len)
-        #     mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
-
-        # return mask
-        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
-
-        # ── Frequency band ───────────────────────────────────────────────────────
-        # Log-uniform band height: covers thin slivers to full spectrum equally
-        log_lo = math.log2(max(1, int(0.02 * self.n_mels)))
-        log_hi = math.log2(self.n_mels)
-        band_h = int(2 ** random.uniform(log_lo, log_hi))
-        band_h = max(1, min(band_h, self.n_mels))
+        # Step 1: frequency band (domain-constrained bounds stay fixed)
+        band_h = random.randint(
+            max(1, int(min_band_frac * self.n_mels)),
+            max(1, int(max_band_frac * self.n_mels)),
+        )
         band_lo = random.randint(0, self.n_mels - band_h)
         band_hi = band_lo + band_h
-
-        # ── Time: log-uniform segment granularity ────────────────────────────────
-        # Equivalent to Perlin's scale octaves: 1 segment up to T/2 segments
-        max_segs = max(1, self.T // 2)
-        log_seg_lo = 0                           # 2^0 = 1 segment
-        log_seg_hi = math.log2(max_segs)
-        num_segs = int(2 ** random.uniform(log_seg_lo, log_seg_hi))
-        num_segs = max(1, min(num_segs, self.T))
-
-        # ── Per-segment fill density: Beta distribution ──────────────────────────
-        # Beta(0.5, 0.5) is U-shaped → pushes toward 0 or 1, not stuck at 0.5
-        # This is what gives Perlin its "sometimes tiny, sometimes huge" coverage
-        alpha = random.uniform(0.3, 1.0)   # sample the Beta shape itself for
-        beta  = random.uniform(0.3, 1.0)   # extra meta-variety across masks
         
-        def sample_fill_frac() -> float:
-            # Beta via two Gamma samples
-            a = np.random.gamma(alpha, 1.0)
-            b = np.random.gamma(beta, 1.0)
-            return float(a / (a + b)) if (a + b) > 0 else 0.5
-
-        # ── Cut points ───────────────────────────────────────────────────────────
-        cut_points = sorted(random.sample(range(1, self.T), min(num_segs - 1, self.T - 1)))
+        i0, i1 = band_lo, band_hi
+    
+        # ── Step 2: time segments in coarse cells ────────────────────────────
+        num_segs = int(random.randint(2, 5))
+        min_aug_frac = 0.05
+        max_aug_frac = 1.0 # 1.0
+    
+        # Draw (num_segs - 1) unique interior cut points, then sort
+        cut_points = sorted(
+            random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
+        )
         boundaries = [0] + cut_points + [self.T]
         segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
-
+    
+        # ── Step 3: augment a random consecutive run within each segment ─────
         for seg_start, seg_end in segments:
             seg_len = seg_end - seg_start
             if seg_len < 1:
                 continue
-
-            fill_frac = sample_fill_frac()
-            run_len = max(1, int(fill_frac * seg_len))
+    
+            run_len = random.randint(
+                max(1, int(min_aug_frac * seg_len)),
+                max(1, int(max_aug_frac * seg_len)),
+            )
             run_start = random.randint(0, seg_len - run_len)
-            mask[band_lo:band_hi, seg_start + run_start : seg_start + run_start + run_len] = 1.0
-
+            mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
+        
         return mask
+
 
     def _perlin_mask(self) -> np.ndarray:
         return _perlin_mask(self.n_mels, self.T)
