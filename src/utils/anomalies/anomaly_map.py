@@ -231,14 +231,18 @@ class SpectromorphicMaskStrategy:
         # ── Step 2: time segments in coarse cells ────────────────────────────
         num_segs = int(random.randint(1, 5))
         min_aug_frac = 0.05
-        max_aug_frac = 0.3 # 1.0
+        max_aug_frac = 1.0 # 1.0
     
         # Draw (num_segs - 1) unique interior cut points, then sort
-        cut_points = sorted(
-            random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
-        )
-        boundaries = [0] + cut_points + [self.T]
-        segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+        # cut_points = sorted(
+        #    random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
+        #)
+        #boundaries = [0] + cut_points + [self.T]
+        #segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+
+        # Evenly split [0, T) into num_segs segments (integer division spreads remainder).
+        boundaries = [i * self.T // num_segs for i in range(num_segs + 1)]
+        segments = [(boundaries[i], boundaries[i + 1]) for i in range(num_segs)]
     
         # ── Step 3: augment a random consecutive run within each segment ─────
         for seg_start, seg_end in segments:
