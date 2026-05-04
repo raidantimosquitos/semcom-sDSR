@@ -6,7 +6,9 @@
 __pycache__/
 
 # Checkpoints
-checkpoints/
+checkpoints/stage1/
+checkpoints/stage2/
+checkpoints/tb_logs/
 
 # Jupyter Notebook checkpoints
 notebooks/.ipynb_checkpoints/
