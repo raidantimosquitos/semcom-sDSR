@@ -182,7 +182,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.3,
+        perlin_prob: float = 0.2,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -231,7 +231,7 @@ class SpectromorphicMaskStrategy:
     
         # ── Step 2: time segments in coarse cells ────────────────────────────
         num_segs = int(random.randint(1, 8))
-        min_aug_frac = 0.01
+        min_aug_frac = 0.1
         max_aug_frac = 1.0 # 1.0
     
         # Draw (num_segs - 1) unique interior cut points, then sort
