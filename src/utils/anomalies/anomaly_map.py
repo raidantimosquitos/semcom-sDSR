@@ -192,8 +192,6 @@ class SpectromorphicMaskStrategy:
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
         bw_max_hz: float = 2_000.0,
-        band_mask_max_bands: int = 4,
-        band_mask_max_coverage: float = 0.6,
         **_: object,
     ) -> None:
         self.n_mels = n_mels
@@ -204,95 +202,7 @@ class SpectromorphicMaskStrategy:
         self.f_max_hz = f_max_hz
         self.bw_min_hz = bw_min_hz
         self.bw_max_hz = bw_max_hz
-        self.band_mask_max_bands = max(1, int(band_mask_max_bands))
-        self.band_mask_max_coverage = float(np.clip(band_mask_max_coverage, 0.0, 1.0))
 
-    # -- mask builders -------------------------------------------------------
-
-    def _sample_disjoint_mel_bands(self) -> list[tuple[int, int]]:
-        """
-        Several non-overlapping mel intervals (legacy log-uniform width each),
-        placed without sharing rows. Frequency gaps between bands are allowed.
-        """
-        min_band = max(1, int(0.05 * self.n_mels))
-        max_k = min(self.band_mask_max_bands, max(1, self.n_mels // min_band))
-        k_target = random.randint(1, max_k)
-        used = np.zeros(self.n_mels, dtype=bool)
-        bands: list[tuple[int, int]] = []
-        max_band = self.n_mels
-
-        for _ in range(k_target):
-            placed = False
-            for _attempt in range(128):
-                u = random.random()
-                band_h = int(min_band * (max_band / min_band) ** u)
-                band_h = max(min_band, min(band_h, self.n_mels))
-                center = random.uniform(0, self.n_mels)
-                i0 = int(max(0, center - band_h / 2))
-                i1 = int(min(self.n_mels, center + band_h / 2))
-                if i1 <= i0:
-                    i1 = min(self.n_mels, i0 + min_band)
-                # After clipping, enforce minimum height where possible
-                h = i1 - i0
-                if h < min_band:
-                    need = min_band - h
-                    take_left = min(need, i0)
-                    i0 -= take_left
-                    need -= take_left
-                    i1 = min(self.n_mels, i1 + need)
-                    if i1 - i0 < min_band:
-                        i0, i1 = 0, min(min_band, self.n_mels)
-                if used[i0:i1].any():
-                    continue
-                used[i0:i1] = True
-                bands.append((i0, i1))
-                placed = True
-                break
-            if not placed:
-                break
-
-        if not bands:
-            bands.append((0, min(min_band, self.n_mels)))
-        return bands
-
-    def _band_time_runs(self, i0: int, i1: int, mask: np.ndarray) -> None:
-        """Fill ``mask[i0:i1, :]`` with segmented time runs (legacy single-band logic)."""
-        # --- Segments (Dirichlet)
-        num_segs = random.randint(1, 10)
-        weights = np.random.dirichlet([1.0] * num_segs)
-        lengths = (weights * self.T).astype(int)
-        lengths[-1] += self.T - int(lengths.sum())  # fix rounding to exact T
-
-        boundaries = np.cumsum([0] + lengths.tolist())
-        segments = [(boundaries[i], boundaries[i + 1]) for i in range(num_segs)]
-
-        for seg_start, seg_end in segments:
-            seg_len = seg_end - seg_start
-            if seg_len <= 1:
-                continue
-
-            frac = np.random.beta(0.5, 0.5)
-            run_len = max(1, int(frac * seg_len))
-
-            run_start = random.randint(0, seg_len - run_len)
-            mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
-
-    def _thin_mask_coverage(self, mask: np.ndarray) -> None:
-        """If ``(mask > 0).mean()`` exceeds ``band_mask_max_coverage``, clear random ones in-place."""
-        cap = self.band_mask_max_coverage
-        if cap >= 1.0:
-            return
-        flat = mask.ravel()
-        n = flat.size
-        if n == 0:
-            return
-        pos = np.flatnonzero(flat > 0)
-        max_ones = int(math.floor(cap * n))
-        excess = int(pos.size - max_ones)
-        if excess <= 0:
-            return
-        drop = np.random.choice(pos, size=excess, replace=False)
-        flat[drop] = 0.0
 
     def _band_mask(self) -> np.ndarray:
         """Mel band × renewal-modulated time vector."""
@@ -311,53 +221,48 @@ class SpectromorphicMaskStrategy:
         # ---------------------------------------------------------------------
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
-        # min_band_frac: float = 0.05
-        # max_band_frac: float = 0.5
+        min_band_frac: float = 0.05
+        max_band_frac: float = 0.5
         
-        # # Step 1: frequency band (domain-constrained bounds stay fixed)
-        # band_h = random.randint(
-        #     max(1, int(min_band_frac * self.n_mels)),
-        #     max(1, int(max_band_frac * self.n_mels)),
-        # )
-        # band_lo = random.randint(0, self.n_mels - band_h)
-        # band_hi = band_lo + band_h
+        # Step 1: frequency band (domain-constrained bounds stay fixed)
+        band_h = random.randint(
+            max(1, int(min_band_frac * self.n_mels)),
+            max(1, int(max_band_frac * self.n_mels)),
+        )
+        band_lo = random.randint(0, self.n_mels - band_h)
+        band_hi = band_lo + band_h
         
-        # i0, i1 = band_lo, band_hi
+        i0, i1 = band_lo, band_hi
     
-        # # ── Step 2: time segments in coarse cells ────────────────────────────
-        # num_segs = int(random.randint(1, 5))
-        # min_aug_frac = 0.05
-        # max_aug_frac = 1.0 # 1.0
+        # ── Step 2: time segments in coarse cells ────────────────────────────
+        num_segs = int(random.randint(1, 5))
+        min_aug_frac = 0.05
+        max_aug_frac = 1.0 # 1.0
     
-        # # Draw (num_segs - 1) unique interior cut points, then sort
-        # # cut_points = sorted(
-        # #    random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
-        # #)
-        # #boundaries = [0] + cut_points + [self.T]
-        # #segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+        # Draw (num_segs - 1) unique interior cut points, then sort
+        # cut_points = sorted(
+        #    random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
+        #)
+        #boundaries = [0] + cut_points + [self.T]
+        #segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
 
-        # # Evenly split [0, T) into num_segs segments (integer division spreads remainder).
-        # boundaries = [i * self.T // num_segs for i in range(num_segs + 1)]
-        # segments = [(boundaries[i], boundaries[i + 1]) for i in range(num_segs)]
+        # Evenly split [0, T) into num_segs segments (integer division spreads remainder).
+        boundaries = [i * self.T // num_segs for i in range(num_segs + 1)]
+        segments = [(boundaries[i], boundaries[i + 1]) for i in range(num_segs)]
     
-        # # ── Step 3: augment a random consecutive run within each segment ─────
-        # for seg_start, seg_end in segments:
-        #     seg_len = seg_end - seg_start
-        #     if seg_len < 1:
-        #         continue
+        # ── Step 3: augment a random consecutive run within each segment ─────
+        for seg_start, seg_end in segments:
+            seg_len = seg_end - seg_start
+            if seg_len < 1:
+                continue
     
-        #     run_len = random.randint(
-        #         max(1, int(min_aug_frac * seg_len)),
-        #         max(1, int(max_aug_frac * seg_len)),
-        #     )
-        #     run_start = random.randint(0, seg_len - run_len)
-        #     mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
+            run_len = random.randint(
+                max(1, int(min_aug_frac * seg_len)),
+                max(1, int(max_aug_frac * seg_len)),
+            )
+            run_start = random.randint(0, seg_len - run_len)
+            mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
 
-        # --- Multiple disjoint mel bands, each with its own time runs
-        for i0, i1 in self._sample_disjoint_mel_bands():
-            self._band_time_runs(i0, i1, mask)
-
-        self._thin_mask_coverage(mask)
         return mask
 
 
