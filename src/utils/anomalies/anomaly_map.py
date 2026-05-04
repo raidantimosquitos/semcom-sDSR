@@ -258,7 +258,7 @@ class SpectromorphicMaskStrategy:
         #     mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
         
         min_band = max(1, int(0.05 * self.n_mels))
-        max_band = self.n_mels
+        max_band = max(1, int(0.5 * self.n_mels))
 
         # --- Band width (log-uniform)
         u = random.random()
