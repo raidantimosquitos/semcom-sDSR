@@ -215,48 +215,81 @@ class SpectromorphicMaskStrategy:
         # ---------------------------------------------------------------------
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
-        min_band_frac: float = 0.05 # 0.05
-        max_band_frac: float = 1.0
+        # min_band_frac: float = 0.05
+        # max_band_frac: float = 0.5
         
-        # Step 1: frequency band (domain-constrained bounds stay fixed)
-        band_h = random.randint(
-            max(1, int(min_band_frac * self.n_mels)),
-            max(1, int(max_band_frac * self.n_mels)),
-        )
-        band_lo = random.randint(0, self.n_mels - band_h)
-        band_hi = band_lo + band_h
+        # # Step 1: frequency band (domain-constrained bounds stay fixed)
+        # band_h = random.randint(
+        #     max(1, int(min_band_frac * self.n_mels)),
+        #     max(1, int(max_band_frac * self.n_mels)),
+        # )
+        # band_lo = random.randint(0, self.n_mels - band_h)
+        # band_hi = band_lo + band_h
         
-        i0, i1 = band_lo, band_hi
+        # i0, i1 = band_lo, band_hi
     
-        # ── Step 2: time segments in coarse cells ────────────────────────────
-        num_segs = int(random.randint(1, 5))
-        min_aug_frac = 0.05
-        max_aug_frac = 1.0 # 1.0
+        # # ── Step 2: time segments in coarse cells ────────────────────────────
+        # num_segs = int(random.randint(1, 5))
+        # min_aug_frac = 0.05
+        # max_aug_frac = 1.0 # 1.0
     
-        # Draw (num_segs - 1) unique interior cut points, then sort
-        # cut_points = sorted(
-        #    random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
-        #)
-        #boundaries = [0] + cut_points + [self.T]
-        #segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
+        # # Draw (num_segs - 1) unique interior cut points, then sort
+        # # cut_points = sorted(
+        # #    random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
+        # #)
+        # #boundaries = [0] + cut_points + [self.T]
+        # #segments = [(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
 
-        # Evenly split [0, T) into num_segs segments (integer division spreads remainder).
-        boundaries = [i * self.T // num_segs for i in range(num_segs + 1)]
-        segments = [(boundaries[i], boundaries[i + 1]) for i in range(num_segs)]
+        # # Evenly split [0, T) into num_segs segments (integer division spreads remainder).
+        # boundaries = [i * self.T // num_segs for i in range(num_segs + 1)]
+        # segments = [(boundaries[i], boundaries[i + 1]) for i in range(num_segs)]
     
-        # ── Step 3: augment a random consecutive run within each segment ─────
+        # # ── Step 3: augment a random consecutive run within each segment ─────
+        # for seg_start, seg_end in segments:
+        #     seg_len = seg_end - seg_start
+        #     if seg_len < 1:
+        #         continue
+    
+        #     run_len = random.randint(
+        #         max(1, int(min_aug_frac * seg_len)),
+        #         max(1, int(max_aug_frac * seg_len)),
+        #     )
+        #     run_start = random.randint(0, seg_len - run_len)
+        #     mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
+        
+        min_band = max(1, int(0.05 * self.n_mels))
+        max_band = self.n_mels
+
+        # --- Band width (log-uniform)
+        u = random.random()
+        band_h = int(min_band * (max_band / min_band) ** u)
+
+        # --- Band position (center-based)
+        center = random.uniform(0, self.n_mels)
+        i0 = int(max(0, center - band_h / 2))
+        i1 = int(min(self.n_mels, center + band_h / 2))
+
+        # --- Segments (Dirichlet)
+        num_segs = random.randint(1, 5)
+        weights = np.random.dirichlet([1.0] * num_segs)
+        lengths = (weights * self.T).astype(int)
+        lengths[-1] += self.T - lengths.sum()
+
+        boundaries = np.cumsum([0] + lengths.tolist())
+        segments = [(boundaries[i], boundaries[i + 1]) for i in range(num_segs)]
+
         for seg_start, seg_end in segments:
             seg_len = seg_end - seg_start
-            if seg_len < 1:
+            if seg_len <= 1:
                 continue
-    
-            run_len = random.randint(
-                max(1, int(min_aug_frac * seg_len)),
-                max(1, int(max_aug_frac * seg_len)),
-            )
+
+            # --- Run length (Beta → extremes)
+            frac = np.random.beta(0.5, 0.5)
+            run_len = max(1, int(frac * seg_len))
+
             run_start = random.randint(0, seg_len - run_len)
-            mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
-        
+            mask[i0:i1, seg_start + run_start: seg_start + run_start + run_len] = 1.0
+
         return mask
 
 
