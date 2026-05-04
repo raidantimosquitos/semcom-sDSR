@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train stage2 for each machine type (spectromorphic masks follow machine_type in the dataset):
+# Train stage2 for each machine type and each DCASE dev machine_id (spectromorphic masks follow machine_type):
 # load best stage1 (all types), 10k iter, batch 16.
 # After each run, upload stage2 checkpoints to GCS.
 # Prerequisite: dataset and stage1 best checkpoint available (e.g. from experiment_grid.sh).
@@ -29,9 +29,27 @@ fi
 # All 6 DCASE2020 Task 2 machine types for stage2
 MACHINE_TYPES=(ToyCar ToyConveyor fan pump slider valve)
 
-# Optional: space-separated machine_ids (e.g. "id_00 id_01 id_02"). When set, train/eval per (machine_type, machine_id)
-# with other machine_ids of same type used as adversarial samples (mask all 1s). When unset, one run per machine_type (all IDs).
+# DCASE2020 Task 2 dev subset: machine_ids differ by machine_type.
+# Optional: space-separated list in MACHINE_IDS overrides the per-type defaults below for every type.
 MACHINE_IDS="${MACHINE_IDS:-}"
+
+machine_ids_for_type() {
+  case "$1" in
+    fan | slider | pump | valve)
+      echo "id_00 id_02 id_04 id_06"
+      ;;
+    ToyCar)
+      echo "id_01 id_02 id_03 id_04"
+      ;;
+    ToyConveyor)
+      echo "id_01 id_02 id_03"
+      ;;
+    *)
+      echo "train_stage2_all_machines.sh: unknown machine_type: $1" >&2
+      exit 1
+      ;;
+  esac
+}
 
 # Stamp for this stage2 run on GCS
 STAMP="stage2_10k_bs${BATCH_SIZE}"
@@ -47,27 +65,32 @@ if [[ ! -f "$STAGE1_BEST" ]]; then
   exit 1
 fi
 
-# One run per machine_type (all machine_ids)
+# --ckpt_dir is the checkpoint root; train.py Stage2Trainer appends stage2/<machine_type>/[<machine_id>/]
 for machine_type in "${MACHINE_TYPES[@]}"; do
-  echo "=============================================="
-  echo "Stage2: machine_type=$machine_type ($N_ITER iter, bs=$BATCH_SIZE)"
-  echo "=============================================="
+  if [[ -n "$MACHINE_IDS" ]]; then
+    read -r -a IDS <<< "$MACHINE_IDS"
+  else
+    read -r -a IDS <<< "$(machine_ids_for_type "$machine_type")"
+  fi
 
-  stage2_dir="${CKPT_DIR}/stage2/${machine_type}"
-  mkdir -p "$stage2_dir"
+  for machine_id in "${IDS[@]}"; do
+    echo "=============================================="
+    echo "Stage2: machine_type=$machine_type machine_id=$machine_id ($N_ITER iter, bs=$BATCH_SIZE)"
+    echo "=============================================="
 
-  python scripts/train.py stage2 \
-    --data_path "$DATA_PATH" \
-    --machine_type "$machine_type" \
-    --ckpt_dir "$stage2_dir" \
-    --stage1_ckpt "$STAGE1_BEST" \
-    --n_iter "$N_ITER" \
-    --batch_size "$BATCH_SIZE" \
-    --anomaly_sampling "distant" \
-    --val_every 500 \
-    --no_amp \
-    --num_workers 32
-
+    python scripts/train.py stage2 \
+      --data_path "$DATA_PATH" \
+      --machine_type "$machine_type" \
+      --machine_id "$machine_id" \
+      --ckpt_dir "$CKPT_DIR" \
+      --stage1_ckpt "$STAGE1_BEST" \
+      --n_iter "$N_ITER" \
+      --batch_size "$BATCH_SIZE" \
+      --anomaly_sampling "distant" \
+      --val_every 500 \
+      --no_amp \
+      --num_workers 32
+  done
 done
 
 echo "Stage2 finished. Checkpoints uploaded under ${GCS_CHECKPOINTS}/${STAMP}/"

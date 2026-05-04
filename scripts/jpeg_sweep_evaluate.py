@@ -49,7 +49,7 @@ class JPEGSpectrogramDataset(Dataset):
     x is expected shape: (1, n_mels, T) float32.
     """
 
-    def __init__(self, base: Any, quality: int, clip: float = 4.0) -> None:
+    def __init__(self, base: Any, quality: int, clip: float = 80.0) -> None:
         self.base = base
         self.quality = int(quality)
         self.clip = float(clip)
@@ -75,8 +75,8 @@ class JPEGSpectrogramDataset(Dataset):
         if x.dim() != 3 or x.shape[0] != 1:
             raise ValueError(f"Expected x shape (1, n_mels, T), got {tuple(x.shape)}")
 
-        # Map standardized float spectrogram to uint8 for grayscale JPEG.
-        # Using a fixed symmetric clamp keeps the mapping consistent across samples.
+        # Map float spectrogram to uint8 for grayscale JPEG (symmetric clamp).
+        # Default clip=80 matches ``top_db`` / clamped log-mel range in ``src/utils/audio.py``.
         c = self.clip
         x2 = x.detach().cpu().float().clamp(-c, c)
         x01 = (x2 + c) / (2.0 * c)  # [0,1]
@@ -176,7 +176,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--no_score_norm", action="store_true")
-    p.add_argument("--clip", type=float, default=4.0, help="Clamp range for mapping spectrogram -> uint8 and back ([-clip, clip]).")
+    p.add_argument(
+        "--clip",
+        type=float,
+        default=80.0,
+        help="Symmetric clamp [-clip, clip] for spectrogram <-> uint8 JPEG mapping (default 80: align with audio.py top_db).",
+    )
     p.add_argument("--qs", type=int, nargs="*", default=None, help="JPEG quality factors, e.g. --qs 10 20 30 ...")
     p.add_argument(
         "--output",
