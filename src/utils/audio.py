@@ -45,8 +45,10 @@ def load_mel_for_dir(
     mel_transform: T.MelSpectrogram,
     to_db: Callable[[torch.Tensor], torch.Tensor],
     filename_re: re.Pattern[str],
+    *,
+    wav_paths: list[Path] | None = None,
 ) -> tuple[list[torch.Tensor], list[str]]:
-    files = sorted(audio_dir.glob("*.wav"))
+    files = sorted(wav_paths) if wav_paths is not None else sorted(audio_dir.glob("*.wav"))
     assert files, f"No .wav files found in {audio_dir}"
     spectrograms: list[torch.Tensor] = []
     machine_id_strs: list[str] = []

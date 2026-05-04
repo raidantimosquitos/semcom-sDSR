@@ -51,7 +51,10 @@ class DCASE2020Task2LogMelDataset(Dataset):
 
     Expected layout:
         root/{machine_type}/train/  -> normal_id_01_00000000.wav, ...
-        root/{machine_type}/test/  -> normal_id_01_*.wav, anomaly_id_01_*.wav (only used when include_test=True in _init_multi)
+        root/{machine_type}/test/  -> normal_id_01_*.wav, anomaly_id_01_*.wav
+        Multi-type: when ``include_test=True``, test/ is merged into RAM; use ``test_subset='normal_only'``
+        to load only normal_* from test (recommended for eval score calibration; also enables eval-only
+        roots with no train/). Single-type: if train/ is empty, falls back to normal_* in test/.
     """
 
     _FILENAME_RE = re.compile(r"^normal_(id_\d+)_\d+\.wav$", re.IGNORECASE)
@@ -71,6 +74,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_max: float = 8_000.0,
         machine_id: str | None = None,
         include_test: bool = True,
+        test_subset: Literal["all", "normal_only"] = "all",
     ):
         if machine_types is not None:
             if machine_id is not None:
@@ -85,6 +89,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
                 f_min,
                 f_max,
                 include_test,
+                test_subset,
             )
         elif machine_type is not None:
             self._init_single(
@@ -124,14 +129,38 @@ class DCASE2020Task2LogMelDataset(Dataset):
         self.to_db = amplitude_to_db_power()
         self.machine_type = machine_type
 
-        audio_dir = Path(root) / machine_type / "train"
-        spectrograms, machine_id_strs = load_mel_for_dir(
-            audio_dir,
-            sample_rate,
-            self.mel_transform,
-            self.to_db,
-            self._FILENAME_RE,
-        )
+        train_dir = Path(root) / machine_type / "train"
+        spectrograms: list[torch.Tensor] = []
+        machine_id_strs: list[str] = []
+        if train_dir.is_dir() and any(train_dir.glob("*.wav")):
+            spectrograms, machine_id_strs = load_mel_for_dir(
+                train_dir,
+                sample_rate,
+                self.mel_transform,
+                self.to_db,
+                self._FILENAME_RE,
+            )
+        if not spectrograms:
+            test_dir = Path(root) / machine_type / "test"
+            normal_paths: list[Path] = []
+            if test_dir.is_dir():
+                normal_paths = [
+                    p for p in sorted(test_dir.glob("*.wav")) if self._FILENAME_RE.match(p.name)
+                ]
+            if normal_paths:
+                spectrograms, machine_id_strs = load_mel_for_dir(
+                    test_dir,
+                    sample_rate,
+                    self.mel_transform,
+                    self.to_db,
+                    self._FILENAME_RE,
+                    wav_paths=normal_paths,
+                )
+        if not spectrograms:
+            raise FileNotFoundError(
+                f"No calibration audio for {machine_type}: need {train_dir}/*.wav "
+                f"or normal_*.wav under {Path(root) / machine_type / 'test'}"
+            )
 
         # Truncate to MEL_TIME_CROP and keep clamped log-mel dB values.
         spectrograms = [s[..., :MEL_TIME_CROP] for s in spectrograms]
@@ -180,6 +209,7 @@ class DCASE2020Task2LogMelDataset(Dataset):
         f_min: float,
         f_max: float,
         include_test: bool = True,
+        test_subset: Literal["all", "normal_only"] = "all",
     ) -> None:
         self.mel_transform = make_mel_spectrogram(
             sample_rate=sample_rate,
@@ -223,7 +253,26 @@ class DCASE2020Task2LogMelDataset(Dataset):
                 )
             if include_test:
                 test_dir = root_path / mt / "test"
-                if _has_wavs(test_dir):
+                if test_subset == "normal_only":
+                    normal_paths: list[Path] = []
+                    if test_dir.is_dir():
+                        normal_paths = [
+                            p
+                            for p in sorted(test_dir.glob("*.wav"))
+                            if self._FILENAME_RE.match(p.name)
+                        ]
+                    if normal_paths:
+                        spec_test, mid_test = load_mel_for_dir(
+                            test_dir,
+                            sample_rate,
+                            self.mel_transform,
+                            self.to_db,
+                            self._FILENAME_RE,
+                            wav_paths=normal_paths,
+                        )
+                        spectrograms = spectrograms + spec_test
+                        machine_id_strs = machine_id_strs + mid_test
+                elif _has_wavs(test_dir):
                     spec_test, mid_test = load_mel_for_dir(
                         test_dir,
                         sample_rate,
@@ -235,9 +284,14 @@ class DCASE2020Task2LogMelDataset(Dataset):
                     machine_id_strs = machine_id_strs + mid_test
 
             if not spectrograms:
+                test_hint = (
+                    "no normal_*.wav in test/"
+                    if include_test and test_subset == "normal_only"
+                    else ("test/" if include_test else "test disabled")
+                )
                 logging.warning(
                     f"DCASE2020Task2LogMelDataset: skip {mt} under root={root_path} "
-                    f"(no wavs in train/ and {'test/' if include_test else 'test disabled'})"
+                    f"(no wavs in train/ and {test_hint})"
                 )
                 continue
 
@@ -250,7 +304,8 @@ class DCASE2020Task2LogMelDataset(Dataset):
         if not all_spectrograms:
             raise FileNotFoundError(
                 f"No usable audio found under root={root_path}. "
-                "Expected at least one of {machine}/train/*.wav, or {machine}/test/*.wav when include_test=True."
+                "Expected {machine}/train/*.wav and/or, when include_test=True, "
+                "{machine}/test/ (all wavs if test_subset='all', or only normal_*.wav if test_subset='normal_only')."
             )
 
         self.data = torch.cat(all_spectrograms, dim=0)

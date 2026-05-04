@@ -182,7 +182,8 @@ def _run_evaluation(args: argparse.Namespace, tee: Callable[[str], None]) -> Non
         train_ds = DCASE2020Task2LogMelDataset(
             root=args.data_path,
             machine_types=list(args.machine_types),
-            include_test=False,
+            include_test=True,
+            test_subset="normal_only",
         )
         test_ds = DCASE2020Task2TestDataset(
             root=args.data_path,
