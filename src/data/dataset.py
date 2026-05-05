@@ -414,8 +414,9 @@ class AudDSRAnomTrainDataset(Dataset):
     ``base.machine_type`` is the joined name when multi-type; ``machine_id`` in
     batches may be composite ``{type}__{id_XX}`` when multiple types are loaded.
 
-    Each __getitem__ returns a dict: image (spectrogram), anomaly_mask,
-    has_anomaly, label, machine_id, skip_codebook_augment (scalar float 0/1).
+    Each __getitem__ returns a dict: image (spectrogram), recon_target (same shape
+    as image for L_recon), anomaly_mask, has_anomaly, label, machine_id,
+    skip_codebook_augment (scalar float 0/1).
     With probability zero_mask_prob the mask is zero (normal); otherwise a mask is
     generated. The model uses the mask for codebook replacement in feature space,
     except when skip_codebook_augment is 1 (adversarial other-ID samples): full
@@ -426,6 +427,10 @@ class AudDSRAnomTrainDataset(Dataset):
     50% adversarial samples with mask of all 1s. This path is intended for
     single-type bases only; joint multi-type training should use
     ``adversarial_dataset=None`` unless extended separately.
+
+    For adversarial rows, ``image`` is the other-ID mel (forward / encode input) but
+    ``recon_target`` is a random normal clip from ``base`` (training machine_id) so
+    Stage-2 reconstruction loss matches the specialized ID, not the adversarial mel.
 
     Overall: zero_mask_prob normal,
     (1-zero_mask_prob)*0.5 synthetic, (1-zero_mask_prob)*0.5 adversarial.
@@ -462,6 +467,7 @@ class AudDSRAnomTrainDataset(Dataset):
         n_mels, T = self.n_mels, self.T
         if random.random() < self.zero_mask_prob:
             spectrogram, label, machine_id = self.base[idx]
+            recon_target = spectrogram
             mask = torch.zeros(1, 1, n_mels, T, dtype=torch.float32)
             has_anomaly = 0.0
             skip_codebook_augment = torch.tensor(0.0, dtype=torch.float32)
@@ -475,11 +481,14 @@ class AudDSRAnomTrainDataset(Dataset):
             if use_adversarial and adv_ds is not None:
                 j = random.randint(0, len(cast(Any, adv_ds)) - 1)
                 spectrogram, label, machine_id = adv_ds[j]
+                k = random.randint(0, len(self.base) - 1)
+                recon_target, _, _ = self.base[k]
                 mask = torch.ones(1, 1, n_mels, T, dtype=torch.float32)
                 has_anomaly = 1.0
                 skip_codebook_augment = torch.tensor(1.0, dtype=torch.float32)
             else:
                 spectrogram, label, machine_id = self.base[idx]
+                recon_target = spectrogram
                 mask = self._mask_generator.generate_for_training_sample(
                     device="cpu",
                 )
@@ -487,6 +496,7 @@ class AudDSRAnomTrainDataset(Dataset):
                 skip_codebook_augment = torch.tensor(0.0, dtype=torch.float32)
         return {
             "image": spectrogram,
+            "recon_target": recon_target,
             "anomaly_mask": mask.squeeze(0),
             "has_anomaly": torch.tensor(has_anomaly, dtype=torch.float32),
             "label": 1 if has_anomaly else 0,

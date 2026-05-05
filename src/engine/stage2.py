@@ -125,6 +125,11 @@ class Stage2Trainer(BaseTrainer):
         on normal codes and correction on anomalous codes.
         """
         x = batch["image"].to(self.device, non_blocking=True)
+        x_recon = batch.get("recon_target")
+        if x_recon is not None:
+            x_recon = x_recon.to(self.device, non_blocking=True)
+        else:
+            x_recon = x
         M_gt = batch["anomaly_mask"].to(self.device, non_blocking=True)
         skip_aug = batch.get("skip_codebook_augment")
         if skip_aug is not None:
@@ -138,10 +143,10 @@ class Stage2Trainer(BaseTrainer):
             x_specific = out["x_specific"]
             M = out["M"]                
 
-            # Reconstruction: L2(x, x_specific) on full batch (normal + anomalous).
-            # For normal samples: object decoder learns x_specific ≈ x. For anomalous:
-            # decoder learns to reconstruct original normal x from corrected codes.
-            loss_recon = F.mse_loss(out["x"], x_specific)
+            # Reconstruction: L2(recon_target, x_specific). ``image`` drives the forward
+            # (encode / masks); ``recon_target`` matches ``image`` except adversarial rows,
+            # where it is a random normal clip from the training machine_id (base).
+            loss_recon = F.mse_loss(x_recon, x_specific)
             m_prob = torch.softmax(m_out, dim=1)
             loss_focal = self.focal_loss(m_prob, M)
 
