@@ -415,9 +415,11 @@ class AudDSRAnomTrainDataset(Dataset):
     batches may be composite ``{type}__{id_XX}`` when multiple types are loaded.
 
     Each __getitem__ returns a dict: image (spectrogram), anomaly_mask,
-    has_anomaly, label, machine_id. With probability zero_mask_prob the mask
-    is zero (normal); otherwise a mask is generated. The model uses the mask for codebook
-    replacement in feature space.
+    has_anomaly, label, machine_id, skip_codebook_augment (scalar float 0/1).
+    With probability zero_mask_prob the mask is zero (normal); otherwise a mask is
+    generated. The model uses the mask for codebook replacement in feature space,
+    except when skip_codebook_augment is 1 (adversarial other-ID samples): full
+    ``M_gt`` still supervises focal loss, but substitution uses a zero mask.
 
     When adversarial_dataset is provided (e.g. other machine_ids of the same
     single machine type), the anomaly half is split 50-50: 50% synthetic masks,
@@ -462,6 +464,7 @@ class AudDSRAnomTrainDataset(Dataset):
             spectrogram, label, machine_id = self.base[idx]
             mask = torch.zeros(1, 1, n_mels, T, dtype=torch.float32)
             has_anomaly = 0.0
+            skip_codebook_augment = torch.tensor(0.0, dtype=torch.float32)
         else:
             # Anomaly branch: 50% synthetic mask, 50% adversarial (if available)
             adv_ds = self.adversarial_dataset
@@ -474,18 +477,21 @@ class AudDSRAnomTrainDataset(Dataset):
                 spectrogram, label, machine_id = adv_ds[j]
                 mask = torch.ones(1, 1, n_mels, T, dtype=torch.float32)
                 has_anomaly = 1.0
+                skip_codebook_augment = torch.tensor(1.0, dtype=torch.float32)
             else:
                 spectrogram, label, machine_id = self.base[idx]
                 mask = self._mask_generator.generate_for_training_sample(
                     device="cpu",
                 )
                 has_anomaly = 1.0
+                skip_codebook_augment = torch.tensor(0.0, dtype=torch.float32)
         return {
             "image": spectrogram,
             "anomaly_mask": mask.squeeze(0),
             "has_anomaly": torch.tensor(has_anomaly, dtype=torch.float32),
             "label": 1 if has_anomaly else 0,
             "machine_id": machine_id,
+            "skip_codebook_augment": skip_codebook_augment,
         }
 
 

@@ -213,6 +213,7 @@ class sDSR(nn.Module):
         self,
         x: torch.Tensor,
         M_gt: torch.Tensor,
+        skip_codebook_augment: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Training forward pass (stage 2).
@@ -228,6 +229,10 @@ class sDSR(nn.Module):
         Args:
             x: (B, 3, n_mels, T) Mel spectrogram (normal)
             M_gt: (B, 1, n_mels, T) ground-truth anomaly map from dataset
+            skip_codebook_augment: optional per-batch flag (B,) or (B, 1, 1, 1),
+                1 for adversarial other-ID samples: full ``M_gt`` still drives focal
+                targets, but ``M_gt * (1 - skip)`` is passed into anomaly generation
+                so no codeword substitution occurs. Omitted or None => all zeros.
 
         Returns:
             dict with:
@@ -245,6 +250,11 @@ class sDSR(nn.Module):
         batch_size = x.shape[0]
         device = x.device
 
+        if skip_codebook_augment is None:
+            skip = torch.zeros(batch_size, device=device, dtype=M_gt.dtype)
+        else:
+            skip = skip_codebook_augment.to(device=device, dtype=M_gt.dtype).reshape(-1)[:batch_size]
+
         f_fine, _, q_fine, q_coarse, z_fine, z_coarse = self._vq_vae.encode_with_prequant(x)
         vq_fine = self._vq_vae._vq_fine
         vq_coarse = self._vq_vae._vq_coarse
@@ -257,9 +267,11 @@ class sDSR(nn.Module):
             torch.rand(batch_size, device=device) * (self.config.anomaly_strength_coarse[1] - self.config.anomaly_strength_coarse[0])
             + self.config.anomaly_strength_coarse[0]
         )
-        # Single spectrogram mask M_gt → projected to fine and coarse in AnomalyGeneration (spatially coherent)
+        # Mask for codebook substitution only (adversarial samples: skip=1 → M_aug=0, no substitution).
+        # Focal supervision below still uses full M_gt.
+        M_aug = M_gt * (1.0 - skip.view(batch_size, 1, 1, 1))
         q_fine_a, q_coarse_a = self._anomaly_generation(
-            q_fine, q_coarse, M_gt, vq_fine, vq_coarse,
+            q_fine, q_coarse, M_aug, vq_fine, vq_coarse,
             z_fine=z_fine, z_coarse=z_coarse,
             strength_fine=strength_fine, strength_coarse=strength_coarse,
         )
@@ -284,7 +296,7 @@ class sDSR(nn.Module):
             q_fine_a2, _ = self._anomaly_generation(
                 q_fine_recomp,
                 q_coarse_used,
-                M_gt,
+                M_aug,
                 vq_fine,
                 vq_coarse,
                 z_fine=z_fine_recomp,
@@ -415,4 +427,22 @@ if __name__ == "__main__":
     assert bool((_torch.isin(uniq, _torch.tensor([0.0, 1.0], device=device))).all()), (
         "M focal target should be binary for binary M_gt"
     )
+
+    # Adversarial-style: full M_gt for focal, skip=1 → M_aug=0, no codeword substitution
+    M_all = _torch.ones(2, 1, 128, 320, device=device)
+    skip_both = _torch.ones(2, device=device)
+    out_skip = model.forward_train(x, M_gt=M_all, skip_codebook_augment=skip_both)
+    assert out_skip["M"].shape == (2, 1, 128, 320)
+    assert (out_skip["M"] > 0).any(), "focal target should still use full M_gt when skip=1"
+    _, _, q_fine_s, q_coarse_s, z_fine_s, z_coarse_s = model._vq_vae.encode_with_prequant(x)
+    M_zero = _torch.zeros(2, 1, 128, 320, device=device)
+    strength_f = _torch.ones(2, device=device) * 0.5
+    strength_c = _torch.ones(2, device=device) * 0.5
+    q_fine_a0, q_ca0 = model._anomaly_generation(
+        q_fine_s, q_coarse_s, M_zero, model._vq_vae._vq_fine, model._vq_vae._vq_coarse,
+        z_fine=z_fine_s, z_coarse=z_coarse_s,
+        strength_fine=strength_f, strength_coarse=strength_c,
+    )
+    assert _torch.allclose(q_fine_a0, q_fine_s) and _torch.allclose(q_ca0, q_coarse_s)
+
     print("sDSR smoke test passed.")

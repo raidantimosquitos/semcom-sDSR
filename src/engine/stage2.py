@@ -29,7 +29,7 @@ class Stage2Trainer(BaseTrainer):
     """
     Trainer for Stage 2 (sDSR anomaly detection).
 
-    Model must implement forward_train(x, M_gt) returning dict with:
+    Model must implement forward_train(x, M_gt[, skip_codebook_augment]) returning dict with:
         m_out, x_s, M (focal target; latent-snapped), x
     Only trainable params (object_decoder, anomaly_detection) are optimized.
     """
@@ -126,11 +126,14 @@ class Stage2Trainer(BaseTrainer):
         """
         x = batch["image"].to(self.device, non_blocking=True)
         M_gt = batch["anomaly_mask"].to(self.device, non_blocking=True)
+        skip_aug = batch.get("skip_codebook_augment")
+        if skip_aug is not None:
+            skip_aug = skip_aug.to(self.device, non_blocking=True)
 
         self.optimizer.zero_grad(set_to_none=True)
 
         with autocast(device_type=self.device.type, enabled=self.use_amp):
-            out = self.model.forward_train(x, M_gt=M_gt)
+            out = self.model.forward_train(x, M_gt=M_gt, skip_codebook_augment=skip_aug)
             m_out = out["m_out"]
             x_specific = out["x_specific"]
             M = out["M"]                
