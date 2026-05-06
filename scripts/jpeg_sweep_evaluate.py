@@ -49,10 +49,11 @@ class JPEGSpectrogramDataset(Dataset):
     x is expected shape: (1, n_mels, T) float32.
     """
 
-    def __init__(self, base: Any, quality: int, clip: float = 80.0) -> None:
+    def __init__(self, base: Any, quality: int, *, db_min: float = -80.0, db_max: float = 20.0) -> None:
         self.base = base
         self.quality = int(quality)
-        self.clip = float(clip)
+        self.db_min = float(db_min)
+        self.db_max = float(db_max)
         # pass-through attrs used by evaluator / logging
         self.machine_type = getattr(base, "machine_type", "unknown")
         self.machine_ids = getattr(base, "machine_ids", None)
@@ -75,11 +76,14 @@ class JPEGSpectrogramDataset(Dataset):
         if x.dim() != 3 or x.shape[0] != 1:
             raise ValueError(f"Expected x shape (1, n_mels, T), got {tuple(x.shape)}")
 
-        # Map float spectrogram to uint8 for grayscale JPEG (symmetric clamp).
-        # Default clip=80 matches ``top_db`` / clamped log-mel range in ``src/utils/audio.py``.
-        c = self.clip
-        x2 = x.detach().cpu().float().clamp(-c, c)
-        x01 = (x2 + c) / (2.0 * c)  # [0,1]
+        # Map float spectrogram (log-mel dB) to uint8 for grayscale JPEG using a fixed dB window.
+        # Default [-80, 20] matches the fixed window used by scripts/evaluate_awgn_jpeg.py.
+        lo = self.db_min
+        hi = self.db_max
+        if not (hi > lo):
+            raise ValueError(f"Invalid dB window: db_max must be > db_min, got [{lo}, {hi}]")
+        x2 = x.detach().cpu().float().clamp(lo, hi)
+        x01 = (x2 - lo) / (hi - lo)  # [0,1]
         img_u8 = (x01.squeeze(0).numpy() * 255.0).round().astype(np.uint8)  # (n_mels, T)
 
         img = Image.fromarray(img_u8, mode="L")
@@ -95,7 +99,7 @@ class JPEGSpectrogramDataset(Dataset):
         buf.seek(0)
         img_dec = Image.open(buf).convert("L")
         arr = np.asarray(img_dec).astype(np.float32) / 255.0  # (n_mels, T) in [0,1]
-        x_rec = (arr * (2.0 * c) - c).astype(np.float32)  # [-c, c]
+        x_rec = (arr * (hi - lo) + lo).astype(np.float32)  # [lo, hi]
         out = torch.from_numpy(x_rec).unsqueeze(0)  # (1, n_mels, T)
         return out
 
@@ -176,11 +180,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--no_score_norm", action="store_true")
+    # JPEG mapping window (log-mel dB)
+    p.add_argument("--db_min", type=float, default=-80.0, help="Lower clamp (dB) before JPEG (default -80).")
+    p.add_argument("--db_max", type=float, default=20.0, help="Upper clamp (dB) before JPEG (default 20).")
+    # Backward-compat: older versions used symmetric [-clip, clip]. If provided explicitly, we use it
+    # unless the user also overrides db_min/db_max.
     p.add_argument(
         "--clip",
         type=float,
-        default=80.0,
-        help="Symmetric clamp [-clip, clip] for spectrogram <-> uint8 JPEG mapping (default 80: align with audio.py top_db).",
+        default=None,
+        help="(Legacy) symmetric clamp [-clip, clip] for spectrogram<->JPEG mapping. Ignored if --db_min/--db_max are set.",
     )
     p.add_argument("--qs", type=int, nargs="*", default=None, help="JPEG quality factors, e.g. --qs 10 20 30 ...")
     p.add_argument(
@@ -253,11 +262,18 @@ def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
 
     qs = _parse_q_list(args.qs)
     tee(f"JPEG Q sweep: {qs}")
-    tee(f"Mapping clamp: [-{args.clip:g}, {args.clip:g}] -> uint8 -> back")
+    db_min = float(args.db_min)
+    db_max = float(args.db_max)
+    if args.clip is not None and args.db_min == -80.0 and args.db_max == 20.0:
+        c = float(args.clip)
+        db_min, db_max = -c, c
+        tee(f"Mapping clamp (legacy --clip): [{db_min:g}, {db_max:g}] -> uint8 -> back")
+    else:
+        tee(f"Mapping clamp: [{db_min:g}, {db_max:g}] -> uint8 -> back")
 
     rows: list[tuple[int, str, float, float]] = []
     for q in qs:
-        jpeg_test = JPEGSpectrogramDataset(test_ds, quality=q, clip=args.clip)
+        jpeg_test = JPEGSpectrogramDataset(test_ds, quality=q, db_min=db_min, db_max=db_max)
         evaluator = AnomalyEvaluator(
             model=model,
             test_dataset=jpeg_test,

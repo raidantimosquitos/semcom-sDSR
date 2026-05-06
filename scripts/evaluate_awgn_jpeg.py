@@ -67,16 +67,20 @@ def _jpeg_encode(spec: torch.Tensor, quality: int) -> bytes:
         raise ImportError("Pillow required: pip install pillow") from e
 
     x = spec.squeeze(0).detach().cpu().float().numpy()  # (H,W)
-    # map to 0..255 using min/max per-clip (simple baseline)
-    mn = float(x.min())
-    mx = float(x.max())
-    denom = (mx - mn) if (mx - mn) > 1e-8 else 1.0
+    # Fixed dB window for consistent invertible decoding.
+    # Dataset values are log-mel in dB (after AmplitudeToDB); we clamp to a fixed range
+    # before JPEG so we don't need per-clip min/max at decode time.
+    mn = -80.0
+    mx = 20.0
+    x = np.clip(x, mn, mx)
+    denom = mx - mn  # 100.0
     u8 = ((x - mn) / denom * 255.0).clip(0, 255).astype(np.uint8)
     img = Image.fromarray(u8, mode="L")
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=int(quality), optimize=True)
     payload = buf.getvalue()
-    # store mn/mx as 2 float32 (8 bytes) header so we can invert scaling
+    # Store mn/mx as 2 float32 (8 bytes) header so we can invert scaling.
+    # Keeping a header preserves the blob format used by channel corruption utilities.
     header = np.array([mn, mx], dtype=np.float32).tobytes()
     return header + payload
 

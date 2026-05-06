@@ -213,6 +213,32 @@ class SpectromorphicMaskStrategy:
         #         self.n_mels, self.f_min_hz, self.f_max_hz,
         #     )
 
+        # Log-uniform band width — one draw, mirrors 2^randint(min_scale, max_scale)
+        rng = np.random.default_rng()
+        bw_scale_range = (0, 6)
+        sl_scale_range = (0, 8)
+        n_segs_lam = 5.0
+        n_layers = 2
+
+        bw = int(2 ** rng.integers(bw_scale_range[0], bw_scale_range[1] + 1))
+        bw = min(bw, self.n_mels)
+        y0 = rng.integers(0, max(1, self.n_mels - bw))
+
+        for layer in range(n_layers):
+            s = 2 ** layer
+            # Log-uniform segment length, halved per layer for multiscale
+            sl_min_exp = max(sl_scale_range[0], sl_scale_range[0])
+            sl_max_exp = max(sl_min_exp, sl_scale_range[1] - s + 1)
+            sl = int(2 ** rng.integers(sl_min_exp, sl_max_exp + 1))
+            sl = min(sl, self.T)
+
+            n_segs = rng.poisson(n_segs_lam)
+            for _ in range(n_segs):
+                x0 = rng.integers(0, max(1, self.T - sl))
+                mask[y0:y0 + bw, x0:x0 + sl] = 1.0
+        
+        return mask
+
         # ---------------------------------------------------------------------
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
