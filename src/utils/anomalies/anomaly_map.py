@@ -216,27 +216,35 @@ class SpectromorphicMaskStrategy:
         # Log-uniform band width — one draw, mirrors 2^randint(min_scale, max_scale)
         rng = np.random.default_rng()
         bw_scale_range = (0, 6)
-        sl_scale_range = (0, 8)
-        n_segs_lam = 5.0
+        num_segs_range = (1, 5)
+        max_aug_frac = 1.0
+        min_aug_frac = 0.4
         n_layers = 2
 
         bw = int(2 ** rng.integers(bw_scale_range[0], bw_scale_range[1] + 1))
         bw = min(bw, self.n_mels)
         y0 = rng.integers(0, max(1, self.n_mels - bw))
+        i0, i1 = y0, y0 + bw
 
-        for layer in range(n_layers):
-            s = 2 ** layer
-            # Log-uniform segment length, halved per layer for multiscale
-            sl_min_exp = max(sl_scale_range[0], sl_scale_range[0])
-            sl_max_exp = max(sl_min_exp, sl_scale_range[1] - s + 1)
-            sl = int(2 ** rng.integers(sl_min_exp, sl_max_exp + 1))
-            sl = min(sl, self.T)
+        # Step 2: divide time axis into num_segs equal partitions
+        num_segs = int(rng.integers(num_segs_range[0], num_segs_range[1] + 1))
+        boundaries = [i * self.T // num_segs for i in range(num_segs + 1)]
 
-            n_segs = rng.poisson(n_segs_lam)
-            for _ in range(n_segs):
-                x0 = rng.integers(0, max(1, self.T - sl))
-                mask[y0:y0 + bw, x0:x0 + sl] = 1.0
-        
+        # Step 3: within each partition, mark one contiguous run
+        for s in range(num_segs):
+            seg_start = boundaries[s]
+            seg_end   = boundaries[s + 1]
+            seg_len   = seg_end - seg_start
+            if seg_len < 1:
+                continue
+
+            run_len = int(rng.integers(
+                max(1, int(min_aug_frac * seg_len)),
+                max(1, int(max_aug_frac * seg_len)) + 1,
+            ))
+            run_start = int(rng.integers(0, max(1, seg_len - run_len + 1)))
+            mask[y0:y0 + bw, seg_start + run_start:seg_start + run_start + run_len] = 1.0
+            
         return mask
 
         # ---------------------------------------------------------------------
