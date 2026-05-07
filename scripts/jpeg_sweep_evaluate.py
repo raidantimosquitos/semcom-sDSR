@@ -109,6 +109,56 @@ class JPEGSpectrogramDataset(Dataset):
         return x_jpeg, int(label), str(machine_id)
 
 
+def _jpeg_encoded_size_stats_bits(
+    dataset: Any,
+    *,
+    quality: int,
+    db_min: float,
+    db_max: float,
+) -> tuple[float, float, float, float]:
+    """
+    Measure JPEG payload size for the given dataset and mapping window.
+
+    Returns (mean_bytes, median_bytes, mean_bits, median_bits).
+    """
+    import numpy as np
+    from PIL import Image
+
+    if not (db_max > db_min):
+        raise ValueError(f"Invalid dB window: [{db_min}, {db_max}]")
+
+    sizes: list[int] = []
+    buf = io.BytesIO()
+    for i in range(len(dataset)):
+        x, _label, _mid = dataset[i]
+        if x.dim() != 3 or x.shape[0] != 1:
+            raise ValueError(f"Expected x shape (1, n_mels, T), got {tuple(x.shape)} at idx={i}")
+
+        x2 = x.detach().cpu().float().clamp(db_min, db_max)
+        x01 = (x2 - db_min) / (db_max - db_min)  # [0,1]
+        img_u8 = (x01.squeeze(0).numpy() * 255.0).round().astype(np.uint8)
+
+        img = Image.fromarray(img_u8, mode="L")
+        buf.seek(0)
+        buf.truncate(0)
+        img.save(
+            buf,
+            format="JPEG",
+            quality=int(quality),
+            optimize=True,
+            progressive=False,
+            subsampling=0,
+        )
+        sizes.append(buf.tell())
+
+    if not sizes:
+        return 0.0, 0.0, 0.0, 0.0
+    sizes_np = np.asarray(sizes, dtype=np.float64)
+    mean_b = float(sizes_np.mean())
+    med_b = float(np.median(sizes_np))
+    return mean_b, med_b, mean_b * 8.0, med_b * 8.0
+
+
 def build_s_dsr(
     n_mels: int,
     T: int,
@@ -271,8 +321,16 @@ def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     else:
         tee(f"Mapping clamp: [{db_min:g}, {db_max:g}] -> uint8 -> back")
 
-    rows: list[tuple[int, str, float, float]] = []
+    rows: list[tuple[int, str, float, float, float, float]] = []
     for q in qs:
+        mean_B, med_B, mean_b, med_b = _jpeg_encoded_size_stats_bits(
+            test_ds,
+            quality=q,
+            db_min=db_min,
+            db_max=db_max,
+        )
+        tee(f"Q={q:02d}: JPEG size mean={mean_B:.1f} B ({mean_b:.0f} b) median={med_B:.1f} B ({med_b:.0f} b)")
+
         jpeg_test = JPEGSpectrogramDataset(test_ds, quality=q, db_min=db_min, db_max=db_max)
         evaluator = AnomalyEvaluator(
             model=model,
@@ -289,7 +347,7 @@ def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
         auc = float(avg.get("auc", float("nan")))
         pauc = float(avg.get("pauc", float("nan")))
         tee(f"Q={q:02d}: average AUC={auc:.4f} pAUC={pauc:.4f}")
-        rows.append((q, jpeg_test.machine_type, auc, pauc))
+        rows.append((q, jpeg_test.machine_type, auc, pauc, mean_b, med_b))
 
     if args.output:
         out_path = Path(args.output)
@@ -298,9 +356,9 @@ def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["Q", "machine_type", "avg_AUC", "avg_pAUC"])
+        w.writerow(["Q", "machine_type", "avg_AUC", "avg_pAUC", "jpeg_mean_bits", "jpeg_median_bits"])
         for r in rows:
-            w.writerow([r[0], r[1], f"{r[2]:.6f}", f"{r[3]:.6f}"])
+            w.writerow([r[0], r[1], f"{r[2]:.6f}", f"{r[3]:.6f}", f"{r[4]:.1f}", f"{r[5]:.1f}"])
     tee(f"Saved sweep CSV to {out_path}")
 
 
