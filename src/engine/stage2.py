@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 from torch.optim.lr_scheduler import MultiStepLR
+from torch.utils.data import DataLoader
 
 from .base import BaseTrainer
 
@@ -70,6 +71,7 @@ class Stage2Trainer(BaseTrainer):
         ckpt_path = Path(ckpt_dir) / "stage2" / machine_type
         if machine_id is not None:
             ckpt_path = ckpt_path / machine_id
+        self._stage2_train_dataset = dataset
         super().__init__(
             model=model,
             dataset=dataset,
@@ -280,10 +282,57 @@ class Stage2Trainer(BaseTrainer):
             return
         self._run_validation()
 
+    def _global_recon_mse_on_logmel_base(self) -> tuple[float, float, int] | None:
+        """
+        Global MSE sum((ŷ-x)²)/numel on the Stage-2 LogMel RAM dataset (``AudDSRAnomTrainDataset.base``):
+        the same normal spectrograms fed as ``image`` during training. Matches Stage-1
+        ``_compute_trainset_metrics_frozen`` recon definition for the VQ branch; also
+        reports object-specific MSE for the same ``x`` in one pass.
+        """
+        base = getattr(self._stage2_train_dataset, "base", None)
+        if base is None or not hasattr(base, "data"):
+            return None
+        n_samples = int(len(base))
+        if n_samples <= 0:
+            return None
+        loader = DataLoader(
+            base,
+            batch_size=self._val_batch_size,
+            shuffle=False,
+            num_workers=0,
+        )
+        sse_vq = 0.0
+        sse_sp = 0.0
+        n_el = 0
+        with torch.no_grad():
+            for batch in loader:
+                x = batch[0].to(self.device, non_blocking=True)
+                _, x_general, x_specific = self.model(
+                    x, return_intermediates=True
+                )
+                d_vq = (x_general.float() - x.float())
+                d_sp = (x_specific.float() - x.float())
+                sse_vq += float((d_vq * d_vq).sum().item())
+                sse_sp += float((d_sp * d_sp).sum().item())
+                n_el += int(x.numel())
+        if n_el <= 0:
+            return None
+        return sse_vq / n_el, sse_sp / n_el, n_samples
+
     def _run_validation(self) -> None:
         from .evaluator import AnomalyEvaluator
 
         self.model.eval()
+        ram_mse = self._global_recon_mse_on_logmel_base()
+        if ram_mse is not None:
+            vq_ram, sp_ram, ram_n = ram_mse
+            self._tee(
+                f"  [val@{self.global_step}] recon MSE on stage2 LogMel train RAM "
+                f"(normal clips, same x as training; global sum/n as stage1 end): "
+                f"VQ={vq_ram:.6f}  object-specific={sp_ram:.6f}  (n_clips={ram_n}). "
+                "Stage1 `recon_mse` is on the **stage1** dataset (often all types pooled); "
+                "this line matches **only** your stage2 `q_vae_dataset` (e.g. ToyCar ± id filter)."
+            )
         val_id = self.machine_id
         evaluator = AnomalyEvaluator(
             model=self.model,
