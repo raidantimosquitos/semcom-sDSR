@@ -90,13 +90,13 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     """
     min_perlin_scale = 0
     perlin_scale = 6  # randint in [0, 5] -> scales in {1,2,4,8,16,32}
-    angle_deg = random.uniform(-90.0, 90.0)
+    # angle_deg = random.uniform(-90.0, 90.0)
     
     perlin_scaley = 2 ** int(random.randint(min_perlin_scale, perlin_scale))
     perlin_scalex = 2 ** int(random.randint(min_perlin_scale, perlin_scale))
 
     noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex))
-    noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
+    # noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
 
     threshold = 0.5
     perlin_thr = (noise > threshold).astype(np.float32)
@@ -216,7 +216,7 @@ class SpectromorphicMaskStrategy:
         # Log-uniform band width — one draw, mirrors 2^randint(min_scale, max_scale)
         rng = np.random.default_rng()
         bw_scale_range = (0, 7)
-        num_segs_range = (1, 3)
+        num_segs_range = (1, 5)
         max_aug_frac = 1.0
         min_aug_frac = 0.05
 
