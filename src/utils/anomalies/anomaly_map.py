@@ -182,7 +182,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.3,
+        perlin_prob: float = 0.1,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -215,7 +215,7 @@ class SpectromorphicMaskStrategy:
 
         # Log-uniform band width — one draw, mirrors 2^randint(min_scale, max_scale)
         rng = np.random.default_rng()
-        bw_scale_range = (0, 7)
+        bw_scale_range = (2, 7)
         num_segs_range = (1, 8)
         max_aug_frac = 1.0
         min_aug_frac = 0.05
