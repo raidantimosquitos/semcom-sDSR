@@ -217,7 +217,7 @@ class SpectromorphicMaskStrategy:
         rng = np.random.default_rng()
         bw_scale_range = (3, 7)
         num_segs_range = (1, 5)
-        max_aug_frac = 10.2
+        max_aug_frac = 0.2
         min_aug_frac = 0.05
 
         bw = int(2 ** rng.integers(bw_scale_range[0], bw_scale_range[1] + 1))
