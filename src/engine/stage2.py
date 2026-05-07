@@ -292,8 +292,10 @@ class Stage2Trainer(BaseTrainer):
             batch_size=self._val_batch_size,
             train_score_stats=None,
             subset_machine_id=val_id,
+            report_recon_mse=True,
         )
         results = evaluator.evaluate()
+        recon = results.pop("_recon_mse", None)
 
         for run_name, ids in results.items():
             tag = f" (machine_id={val_id})" if val_id else ""
@@ -325,6 +327,25 @@ class Stage2Trainer(BaseTrainer):
                 )
             elif math.isfinite(mean_auc):
                 self._save_val_best(mean_auc, "best_val_auc", "best_auc", "AUC")
+
+        if recon is not None:
+            if recon.get("skipped_due_to_model"):
+                self._tee(
+                    f"  [val@{self.global_step}] recon MSE: skipped "
+                    "(model has no forward(x, return_intermediates=True))"
+                )
+            else:
+                vq = recon["vqvae_decode_general"]
+                sp = recon["object_specific_decoder"]
+                ct = recon.get("counts", {})
+                self._tee(
+                    f"  [val@{self.global_step}] recon MSE | "
+                    f"VQ-VAE decode_general: normal={vq['normal']:.6f} "
+                    f"anomalous={vq['anomalous']:.6f} all={vq['all']:.6f} || "
+                    f"object-specific: normal={sp['normal']:.6f} "
+                    f"anomalous={sp['anomalous']:.6f} all={sp['all']:.6f} "
+                    f"(n_norm={ct.get('normal', 0)} n_anom={ct.get('anomalous', 0)})"
+                )
 
         self.model.train()
 
