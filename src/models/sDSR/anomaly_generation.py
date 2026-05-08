@@ -79,7 +79,7 @@ def generate_fake_anomalies_distant(
     codebook: torch.Tensor,
     mask: torch.Tensor,
     strength: torch.Tensor | float,
-    closest_skip_frac: float = 0.1,
+    closest_skip_frac: float = 0.05,
     use_shuffle: bool = True,
 ) -> torch.Tensor:
     """
@@ -232,8 +232,8 @@ class AnomalyGeneration(nn.Module):
         vq_coarse: nn.Module,
         z_fine: torch.Tensor | None = None,
         z_coarse: torch.Tensor | None = None,
-        strength_fine: torch.Tensor | float = 0.5,
-        strength_coarse: torch.Tensor | float = 0.5,
+        strength_fine: torch.Tensor | float = 1.0,
+        strength_coarse: torch.Tensor | float = 1.0,
         *,
         augment_coarse: bool = True,
         augment_fine: bool = True,

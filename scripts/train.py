@@ -129,7 +129,7 @@ def parse_args() -> argparse.Namespace:
     full.add_argument(
         "--anomaly_inj_distribution",
         type=str,
-        default="uniform",
+        default="dsr",
         choices=["uniform", "dsr"],
         help="Stage 2 latent injection mix (see stage2 --anomaly_inj_distribution)",
     )
@@ -164,7 +164,7 @@ def build_s_dsr(
     hidden_channels: Tuple[int, int],
     embedding_dim: Tuple[int, int],
     anomaly_sampling: Literal["distant", "uniform"] = "distant",
-    anomaly_inj_distribution: Literal["uniform", "dsr"] = "uniform",
+    anomaly_inj_distribution: Literal["uniform", "dsr"] = "dsr",
     machine_type: str | None = None,
 ) -> sDSR:
     cfg = sDSRConfig(

@@ -215,9 +215,9 @@ class SpectromorphicMaskStrategy:
 
         # Log-uniform band width — one draw, mirrors 2^randint(min_scale, max_scale)
         rng = np.random.default_rng()
-        bw_scale_range = (3, 7)
+        bw_scale_range = (1, 7)
         num_segs_range = (1, 5)
-        max_aug_frac = 0.2
+        max_aug_frac = 1.0
         min_aug_frac = 0.05
 
         bw = int(2 ** rng.integers(bw_scale_range[0], bw_scale_range[1] + 1))
