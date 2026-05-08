@@ -25,7 +25,6 @@ def make_mel_spectrogram(
         n_mels=n_mels,
         f_min=f_min,
         f_max=f_max,
-        norm="slaney",
         mel_scale="htk",
     )
 
