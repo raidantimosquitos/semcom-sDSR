@@ -106,7 +106,7 @@ def parse_args() -> argparse.Namespace:
     s2.add_argument(
         "--anomaly_inj_distribution",
         type=str,
-        default="uniform",
+        default="dsr",
         choices=["uniform", "dsr"],
         help="Latent injection mix: uniform P=1/3 each mode; dsr P(both)=0.5 P(fine-only)=P(coarse-only)=0.25 (DSR-style)",
     )
