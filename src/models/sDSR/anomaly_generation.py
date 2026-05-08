@@ -79,7 +79,7 @@ def generate_fake_anomalies_distant(
     codebook: torch.Tensor,
     mask: torch.Tensor,
     strength: torch.Tensor | float,
-    closest_skip_frac: float = 0.05,
+    closest_skip_frac: float = 0.1,
     use_shuffle: bool = True,
 ) -> torch.Tensor:
     """

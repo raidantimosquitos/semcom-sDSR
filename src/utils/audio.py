@@ -25,6 +25,8 @@ def make_mel_spectrogram(
         n_mels=n_mels,
         f_min=f_min,
         f_max=f_max,
+        norm="slaney",
+        mel_scale="htk",
     )
 
 
@@ -62,8 +64,12 @@ def load_mel_for_dir(
         if wav.shape[0] > 1:
             wav = wav.mean(0, keepdim=True)
         mel = mel_transform(wav)
-        log_mel_db = to_db(mel).float()  # (1, n_mels, T)
-        log_mel_db = mel_db_to_finite(log_mel_db)
+
+        log_mel_db = torch.log10(mel.clamp(min=1e-10)).float()
+        log_mel_db = log_mel_db.clamp(min=-80.0, max=30.0)
+        
+        # log_mel_db = to_db(mel).float()  # (1, n_mels, T)
+        # log_mel_db = mel_db_to_finite(log_mel_db)
         spectrograms.append(log_mel_db)
 
     return spectrograms, machine_id_strs
