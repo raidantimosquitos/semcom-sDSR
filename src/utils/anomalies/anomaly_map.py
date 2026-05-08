@@ -213,52 +213,52 @@ class SpectromorphicMaskStrategy:
         #         self.n_mels, self.f_min_hz, self.f_max_hz,
         #     )
 
-        # Log-uniform band width — one draw, mirrors 2^randint(min_scale, max_scale)
-        rng = np.random.default_rng()
-        num_bands_range = (1, 4)
-        bw_scale_range = (0, 6)
-        num_segs_range = (1, 5)
-        max_aug_frac = 1.0
-        min_aug_frac = 0.05
+        # # Log-uniform band width — one draw, mirrors 2^randint(min_scale, max_scale)
+        # rng = np.random.default_rng()
+        # num_bands_range = (1, 4)
+        # bw_scale_range = (0, 6)
+        # num_segs_range = (1, 5)
+        # max_aug_frac = 1.0
+        # min_aug_frac = 0.05
 
-        # Step 1: partition Y-axis into num_bands non-overlapping cells
-        num_bands = int(rng.integers(num_bands_range[0], num_bands_range[1] + 1))
-        y_boundaries = [i * self.n_mels // num_bands for i in range(num_bands + 1)]
+        # # Step 1: partition Y-axis into num_bands non-overlapping cells
+        # num_bands = int(rng.integers(num_bands_range[0], num_bands_range[1] + 1))
+        # y_boundaries = [i * self.n_mels // num_bands for i in range(num_bands + 1)]
 
-        for b in range(num_bands):
-            cell_y0  = y_boundaries[b]
-            cell_y1  = y_boundaries[b + 1]
-            cell_h   = cell_y1 - cell_y0
-            if cell_h < 1:
-                continue
+        # for b in range(num_bands):
+            # cell_y0  = y_boundaries[b]
+            # cell_y1  = y_boundaries[b + 1]
+            # cell_h   = cell_y1 - cell_y0
+            # if cell_h < 1:
+                # continue
 
-            # Step 2: within each Y-cell, sample an independent band
-            max_exp  = max(bw_scale_range[0], min(bw_scale_range[1],
-                        int(np.floor(np.log2(cell_h)))))
-            bw       = int(2 ** rng.integers(bw_scale_range[0], max_exp + 1))
-            bw       = min(bw, cell_h)
-            y0       = int(rng.integers(cell_y0, cell_y1 - bw + 1))
+            # # Step 2: within each Y-cell, sample an independent band
+            # max_exp  = max(bw_scale_range[0], min(bw_scale_range[1],
+                        # int(np.floor(np.log2(cell_h)))))
+            # bw       = int(2 ** rng.integers(bw_scale_range[0], max_exp + 1))
+            # bw       = min(bw, cell_h)
+            # y0       = int(rng.integers(cell_y0, cell_y1 - bw + 1))
 
-            # Step 3: partition time axis into num_segs cells, independently per band
-            num_segs    = int(rng.integers(num_segs_range[0], num_segs_range[1] + 1))
-            x_boundaries = [i * self.T // num_segs for i in range(num_segs + 1)]
+            # # Step 3: partition time axis into num_segs cells, independently per band
+            # num_segs    = int(rng.integers(num_segs_range[0], num_segs_range[1] + 1))
+            # x_boundaries = [i * self.T // num_segs for i in range(num_segs + 1)]
 
-            # Step 4: within each time cell, sample one contiguous run
-            for s in range(num_segs):
-                seg_start = x_boundaries[s]
-                seg_end   = x_boundaries[s + 1]
-                seg_len   = seg_end - seg_start
-                if seg_len < 1:
-                    continue
+            # # Step 4: within each time cell, sample one contiguous run
+            # for s in range(num_segs):
+                # seg_start = x_boundaries[s]
+                # seg_end   = x_boundaries[s + 1]
+                # seg_len   = seg_end - seg_start
+                # if seg_len < 1:
+                    # continue
 
-                run_len   = int(rng.integers(
-                    max(1, int(min_aug_frac * seg_len)),
-                    max(1, int(max_aug_frac * seg_len)) + 1,
-                ))
-                run_start = int(rng.integers(0, max(1, seg_len - run_len + 1)))
-                mask[y0:y0 + bw, seg_start + run_start:seg_start + run_start + run_len] = 1.0
+                # run_len   = int(rng.integers(
+                    # max(1, int(min_aug_frac * seg_len)),
+                    # max(1, int(max_aug_frac * seg_len)) + 1,
+                # ))
+                # run_start = int(rng.integers(0, max(1, seg_len - run_len + 1)))
+                # mask[y0:y0 + bw, seg_start + run_start:seg_start + run_start + run_len] = 1.0
         
-        return mask
+        # return mask
 
         # ---------------------------------------------------------------------
         # Old band_mask implementation (kept for reference)
