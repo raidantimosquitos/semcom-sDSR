@@ -139,7 +139,7 @@ def generate_fake_anomalies_distant(
     # Optional patch-shuffle mode (as in reference DSR code)
     if use_shuffle:
         use_shuffle_draw = torch.rand((), device=device).item()
-        if use_shuffle_draw > 0.5:
+        if use_shuffle_draw > 0.0:
             psize_factor = int(torch.randint(0, 4, (1,), device=device).item())  # 0..3 => 1,2,4,8
             random_embeddings = shuffle_patches(embeddings, 2**psize_factor)
 
