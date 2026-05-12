@@ -288,6 +288,9 @@ class SpectromorphicMaskStrategy:
             min_aug_frac = 0.4
             max_aug_frac = 1.0
 
+        min_aug_frac = 0.05
+        max_aug_frac = 1.0
+
         
     
         # Draw (num_segs - 1) unique interior cut points, then sort
