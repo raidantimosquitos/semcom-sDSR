@@ -280,8 +280,13 @@ class SpectromorphicMaskStrategy:
 
         # ── Step 2: time segments in coarse cells ────────────────────────────
         num_segs = int(random.randint(1, 5))
-        min_aug_frac = 0.05 # 0.1
-        max_aug_frac = 1.0 # 1.0
+
+        if band_h > 64:
+            min_aug_frac = 0.05 # 0.1
+            max_aug_frac = 0.4 # 1.0
+        else:
+            min_aug_frac = 0.4
+            max_aug_frac = 1.0
 
         
     
