@@ -174,7 +174,7 @@ class sDSR(nn.Module):
             return_aux=False,
         )
         # Inference: detach reconstructions so seg gradients don't flow upstream.
-        m_out = self._anomaly_detection(x_specific.detach(), x_general.detach())
+        m_out = self._anomaly_detection(x_specific, x_general.detach())
         if return_intermediates:
             return m_out, x_general, x_specific
         return m_out

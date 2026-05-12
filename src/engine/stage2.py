@@ -152,6 +152,9 @@ class Stage2Trainer(BaseTrainer):
             m_prob = torch.softmax(m_out, dim=1)
             loss_focal = self.focal_loss(m_prob, M)
 
+            mask_recon_loss = F.l1_loss(m_prob, M)
+            loss_focal = loss_focal + mask_recon_loss
+
             total_loss = (
                 self.lambda_recon * loss_recon
                 + loss_focal
