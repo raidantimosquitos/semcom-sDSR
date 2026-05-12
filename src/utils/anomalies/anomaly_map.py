@@ -90,7 +90,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     """
     min_perlin_scale = 0
     max_perlin_scale = 6  # randint in [0, 6] -> scales in {1,2,4,8,16,32,64}
-    angle_deg = random.uniform(-90.0, 90.0)
+    # angle_deg = random.uniform(-90.0, 90.0)
     
     perlin_scaley = 2 ** int(random.randint(min_perlin_scale, max_perlin_scale))
     perlin_scalex = 2 ** int(random.randint(min_perlin_scale, max_perlin_scale))
@@ -98,7 +98,7 @@ def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
     # perlin_scalex = 2 ** int(random.randint(4, 6))
 
     noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex))
-    noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
+    #noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
 
     threshold = 0.5
     perlin_thr = (noise > threshold).astype(np.float32)
@@ -184,7 +184,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.1,
+        perlin_prob: float = 0.5,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -266,7 +266,7 @@ class SpectromorphicMaskStrategy:
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
         min_band_frac: float = 0.05
-        max_band_frac: float = 0.4 # 1.0
+        max_band_frac: float = 1.0 # 1.0
         
         # Step 1: frequency band (domain-constrained bounds stay fixed)
         band_h = random.randint(
@@ -277,12 +277,11 @@ class SpectromorphicMaskStrategy:
         band_hi = band_lo + band_h
         
         i0, i1 = band_lo, band_hi
-        mask[i0 : i1, :] = 1.0
 
         # ── Step 2: time segments in coarse cells ────────────────────────────
-        num_segs = int(random.randint(1, 3))
+        num_segs = int(random.randint(1, 5))
         min_aug_frac = 0.05 # 0.1
-        max_aug_frac = 0.3 # 1.0
+        max_aug_frac = 1.0 # 1.0
 
         
     
@@ -308,7 +307,7 @@ class SpectromorphicMaskStrategy:
                 max(1, int(max_aug_frac * seg_len)),
             )
             run_start = random.randint(0, seg_len - run_len)
-            mask[:, seg_start + run_start : seg_start + run_start + run_len] = 1.0
+            mask[i0:i1, seg_start + run_start : seg_start + run_start + run_len] = 1.0
 
         return mask
 
