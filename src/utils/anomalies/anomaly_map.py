@@ -288,8 +288,8 @@ class SpectromorphicMaskStrategy:
         # ---------------------------------------------------------------------
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
-        min_band_frac: float = 0.05
-        max_band_frac: float = 1.0 # 1.0
+        min_band_frac: float = 0.01
+        max_band_frac: float = 0.2 # 1.0
         
         # Step 1: frequency band (domain-constrained bounds stay fixed)
         band_h = random.randint(
@@ -314,8 +314,6 @@ class SpectromorphicMaskStrategy:
         # min_aug_frac = 0.05
         # max_aug_frac = 1.0
 
-        
-    
         # Draw (num_segs - 1) unique interior cut points, then sort
         # cut_points = sorted(
         #    random.sample(range(1, self.T), min(num_segs - 1, self.T - 1))
