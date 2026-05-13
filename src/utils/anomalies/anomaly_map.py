@@ -289,7 +289,7 @@ class SpectromorphicMaskStrategy:
         # Old band_mask implementation (kept for reference)
         # ---------------------------------------------------------------------
         min_band_frac: float = 0.01
-        max_band_frac: float = 0.4 # 1.0
+        max_band_frac: float = 1.0 # 1.0
         
         # Step 1: frequency band (domain-constrained bounds stay fixed)
         band_h = random.randint(
