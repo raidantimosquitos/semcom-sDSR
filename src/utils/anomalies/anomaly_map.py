@@ -203,7 +203,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 1.0,
+        perlin_prob: float = 0.1,
         perlin_threshold_beta: float = 0.4,
         perlin_rotate_deg_range: tuple[float, float] | None = (-90.0, 90.0),
         f_min_hz: float = 0.0,
@@ -311,8 +311,8 @@ class SpectromorphicMaskStrategy:
             min_aug_frac = 0.4
             max_aug_frac = 1.0
 
-        min_aug_frac = 0.05
-        max_aug_frac = 1.0
+        # min_aug_frac = 0.05
+        # max_aug_frac = 1.0
 
         
     
