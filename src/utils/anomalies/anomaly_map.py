@@ -14,7 +14,6 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy.ndimage import rotate as nd_rotate
 
 from .perlin import rand_perlin_2d_np
 
@@ -49,60 +48,75 @@ def _hz_band_to_mel_bins(
 
 
 # ---------------------------------------------------------------------------
-# Time modulation
-# ---------------------------------------------------------------------------
-
-def _alternating_renewal(T: int, p_on: float, p_off: float, start_on: bool) -> np.ndarray:
-    """
-    Binary (T,) vector from alternating geometric on/off runs.
-    Guaranteed to have both 0s and 1s for typical p values.
-    """
-    out = np.zeros(T, dtype=np.float32)
-    t, state = 0, start_on
-    while t < T:
-        p = p_on if state else p_off
-        run = min(max(1, int(np.random.geometric(p))), T - t)
-        if state:
-            out[t : t + run] = 1.0
-        t += run
-        state = not state
-    return out
-
-
-def _renewal_params(T: int) -> tuple[float, float]:
-    """Log-uniform mean run lengths in [10, T-1], returned as geometric p values."""
-    lo, hi = math.log(10.0), math.log(max(11.0, T - 1.0))
-    mu_on  = math.exp(random.uniform(lo, hi))
-    mu_off = math.exp(random.uniform(lo, hi))
-    eps = 1e-6
-    p_on  = float(np.clip(1.0 / mu_on,  eps, 1 - eps))
-    p_off = float(np.clip(1.0 / mu_off, eps, 1 - eps))
-    return p_on, p_off
-
-
-# ---------------------------------------------------------------------------
 # Perlin regularizer
 # ---------------------------------------------------------------------------
 
-def _perlin_mask(n_mels: int, T: int) -> np.ndarray:
+def _rotate_perlin_reflect_torch(noise: np.ndarray, angle_deg: float) -> np.ndarray:
     """
-    Thresholded 2-D Perlin noise mask (binary float32), aligned with the common
+    Rotate 2-D Perlin field about the center using bilinear sampling with
+    ``padding_mode='reflection'``.
+
+    Compared to SciPy ``ndimage.rotate(..., reshape=False, cval=0)``, reflection
+    padding avoids collapsing energy toward the center from zero-filled corners on
+    non-square maps (e.g. 128×320). Does not depend on torchvision.
     """
-    min_perlin_scale = 0
-    max_perlin_scale = 6  # randint in [0, 6] -> scales in {1,2,4,8,16,32,64}
-    # angle_deg = random.uniform(-90.0, 90.0)
-    
-    perlin_scaley = 2 ** int(random.randint(min_perlin_scale, max_perlin_scale))
-    perlin_scalex = 2 ** int(random.randint(min_perlin_scale, max_perlin_scale))
-    # perlin_scaley = 2 ** int(random.randint(0, 2))
-    # perlin_scalex = 2 ** int(random.randint(4, 6))
+    if abs(angle_deg) < 1e-6:
+        return noise.astype(np.float32, copy=False)
 
-    noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex))
-    #noise = nd_rotate(noise, angle_deg, axes=(0, 1), reshape=False)
+    h, w = int(noise.shape[0]), int(noise.shape[1])
+    t = torch.from_numpy(noise.astype(np.float32)).view(1, 1, h, w)
+    rad = math.radians(angle_deg)
+    cos_t, sin_t = math.cos(rad), math.sin(rad)
 
-    threshold = 0.5
-    perlin_thr = (noise > threshold).astype(np.float32)
-    return perlin_thr
+    ys = torch.linspace(-1.0, 1.0, h, dtype=t.dtype, device=t.device)
+    xs = torch.linspace(-1.0, 1.0, w, dtype=t.dtype, device=t.device)
+    gy, gx = torch.meshgrid(ys, xs, indexing="ij")
+
+    # Inverse warp: rotate sampling coordinates by +angle so the image rotates CCW.
+    sx = gx * cos_t + gy * sin_t
+    sy = -gx * sin_t + gy * cos_t
+    grid = torch.stack((sx, sy), dim=-1).unsqueeze(0)
+
+    out = F.grid_sample(
+        t,
+        grid,
+        mode="bilinear",
+        padding_mode="reflection",
+        align_corners=True,
+    )
+    return out[0, 0].detach().numpy().astype(np.float32)
+
+
+def _perlin_mask(
+    n_mels: int,
+    T: int,
+    *,
+    min_scale_exp: int = 0,
+    max_scale_exp: int = 6,
+    threshold_beta: float = 0.4,
+    rotate_deg_range: tuple[float, float] | None = (-90.0, 90.0),
+) -> np.ndarray:
+    """
+    Thresholded 2-D Perlin mask (binary float32).
+
+    Matches 3DSR ``generate_perlin_noise`` (``_tmp_3dsr/data_loader.py``):
+    randomized threshold ``τ ∈ [β, 2β)`` with default ``β=0.4``, and
+    binarization ``|noise| > τ``. Optionally rotates the noise (uniform angle
+    in ``rotate_deg_range``) via :func:`_rotate_perlin_reflect_torch`.
+    """
+    perlin_scaley = 2 ** int(random.randint(min_scale_exp, max_scale_exp))
+    perlin_scalex = 2 ** int(random.randint(min_scale_exp, max_scale_exp))
+
+    noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex)).astype(np.float32)
+
+    if rotate_deg_range is not None:
+        lo, hi = rotate_deg_range
+        angle_deg = random.uniform(lo, hi)
+        noise = _rotate_perlin_reflect_torch(noise, angle_deg)
+
+    beta = float(threshold_beta)
+    threshold = random.random() * beta + beta
+    return (np.abs(noise) > threshold).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +180,11 @@ class SpectromorphicMaskStrategy:
         T: time frames in the spectrogram.
         q_shape: output spatial shape; masks are interpolated if it differs from (n_mels, T).
         perlin_prob: probability of the Perlin branch per mask.
+        perlin_threshold_beta: threshold scale ``β``; each mask draws ``τ ∈ [β, 2β)`` and sets
+            ones where ``|noise| > τ`` (same rule as 3DSR ``generate_perlin_noise``).
+        perlin_rotate_deg_range: if not ``None``, rotate the noise by a uniform angle in this
+            range (degrees) via ``grid_sample(..., padding_mode='reflection')`` before
+            thresholding; set to ``None`` to disable rotation.
         f_min_hz, f_max_hz: mel filterbank frequency range (Hz).
         bw_min_hz, bw_max_hz: uniform range for band width (Hz).
         band_mask_max_bands: upper bound on how many disjoint mel bands to attempt (actual count is
@@ -184,7 +203,9 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.2,
+        perlin_prob: float = 1.0,
+        perlin_threshold_beta: float = 0.4,
+        perlin_rotate_deg_range: tuple[float, float] | None = (-90.0, 90.0),
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -195,6 +216,8 @@ class SpectromorphicMaskStrategy:
         self.T = T
         self.q_shape = q_shape or (n_mels, T)
         self.perlin_prob = float(np.clip(perlin_prob, 0.0, 1.0))
+        self.perlin_threshold_beta = float(perlin_threshold_beta)
+        self.perlin_rotate_deg_range = perlin_rotate_deg_range
         self.f_min_hz = f_min_hz
         self.f_max_hz = f_max_hz
         self.bw_min_hz = bw_min_hz
@@ -322,7 +345,12 @@ class SpectromorphicMaskStrategy:
 
 
     def _perlin_mask(self) -> np.ndarray:
-        return _perlin_mask(self.n_mels, self.T)
+        return _perlin_mask(
+            self.n_mels,
+            self.T,
+            threshold_beta=self.perlin_threshold_beta,
+            rotate_deg_range=self.perlin_rotate_deg_range,
+        )
 
     # -- public interface ----------------------------------------------------
 
