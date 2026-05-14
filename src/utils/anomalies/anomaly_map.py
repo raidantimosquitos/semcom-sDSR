@@ -75,7 +75,6 @@ def _perlin_mask(
     shear_range: tuple[float, float] | None = (-0.08, 0.08),
     q_range: tuple[float, float] = (0.80, 0.95),
     active_mel_top: int | None = None,
-    max_coverage: float = 0.20,
 ) -> np.ndarray:
     """
     Thresholded 2-D Perlin mask (binary float32) adapted for DCASE2020 Task 2.
@@ -85,16 +84,14 @@ def _perlin_mask(
 
     Threshold: quantile-based (``q ∈ q_range``) on the signed noise field —
     keeps the top ``1 - q`` fraction (≈5–20%) as one connected horizontal
-    stripe rather than scattered blobs.
+    stripe rather than scattered blobs.  Coverage is bounded implicitly by the
+    quantile: no pixel-level thinning is applied (it would fragment the blob
+    without reducing latent-space coverage due to max-pool projection).
 
     Shear: optional mild shear along the frequency axis (default ±0.08,
     ≈25 mel-bin drift) models gradual harmonic drift.
 
     ``active_mel_top``: restrict mask to ``[0, active_mel_top)`` mel bins.
-
-    ``max_coverage``: explicit pixel-count cap (fraction of ``n_mels × T``);
-    excess active pixels are randomly cleared after thresholding, keeping
-    coverage consistent with the band mask's ``band_max_coverage``.
     """
     perlin_scaley = 2 ** int(random.randint(1, 3))   # {2, 4, 8}
     perlin_scalex = 2 ** int(random.randint(3, 6))   # {8, 16, 32, 64}
@@ -114,15 +111,6 @@ def _perlin_mask(
     top = active_mel_top if active_mel_top is not None else n_mels
     if top < n_mels:
         perlin_bin[top:, :] = 0.0
-
-    # Explicit coverage cap — mirrors band_mask's band_max_coverage.
-    total = n_mels * T
-    active = int(perlin_bin.sum())
-    max_active = int(max_coverage * total)
-    if active > max_active:
-        flat_idx = np.flatnonzero(perlin_bin)
-        to_clear = np.random.choice(flat_idx, active - max_active, replace=False)
-        perlin_bin.flat[to_clear] = 0.0
 
     if perlin_bin.sum() == 0:
         bw = random.randint(2, max(3, n_mels // 8))
@@ -205,20 +193,15 @@ class SpectromorphicMaskStrategy:
         perlin_active_mel_top: zero out Perlin mask rows ≥ this bin index.
             ``None`` = all bins.  Recommended: ``int(n_mels * 0.875)`` to
             exclude the near-silent top bins.
-        perlin_max_coverage: active-pixel cap for Perlin masks (fraction of
-            ``n_mels × T``); mirrors ``band_max_coverage`` for consistency.
-
-        band_max_bands: max independent band groups per mask (uniform in
-            ``[1, band_max_bands]``).
         band_n_segs_range: ``(min, max)`` number of time segments (random
             cut-points, not evenly spaced).
         band_aug_frac_range: ``(min, max)`` fill fraction for consecutive runs
             within each segment; independent of bandwidth.
-        band_max_coverage: active-pixel cap as a fraction of ``n_mels × T``;
-            excess pixels are randomly cleared.
         band_harmonic_prob: probability of generating a harmonic series instead
             of a single band.  Harmonics share bandwidth and temporal pattern.
-        band_max_harmonics: maximum number of harmonics in the series.
+            ``n_harmonics`` is automatically capped so total frequency footprint
+            stays ≤ ``active_top // 3``, bounding coverage at design time.
+        band_max_harmonics: upper bound on harmonics in the series.
         band_active_mel_top: zero out band mask rows ≥ this bin index.
             ``None`` = all bins.
     """
@@ -234,12 +217,9 @@ class SpectromorphicMaskStrategy:
         perlin_q_range: tuple[float, float] = (0.80, 0.95),
         perlin_shear_range: tuple[float, float] | None = (-0.08, 0.08),
         perlin_active_mel_top: int | None = None,
-        perlin_max_coverage: float = 0.20,
         # --- Band parameters ---
-        band_max_bands: int = 3,
         band_n_segs_range: tuple[int, int] = (1, 5),
         band_aug_frac_range: tuple[float, float] = (0.3, 1.0),
-        band_max_coverage: float = 0.35,
         band_harmonic_prob: float = 0.3,
         band_max_harmonics: int = 4,
         band_active_mel_top: int | None = None,
@@ -252,42 +232,48 @@ class SpectromorphicMaskStrategy:
         self.perlin_q_range = perlin_q_range
         self.perlin_shear_range = perlin_shear_range
         self.perlin_active_mel_top = perlin_active_mel_top
-        self.perlin_max_coverage = float(np.clip(perlin_max_coverage, 0.0, 1.0))
-        self.band_max_bands = max(1, band_max_bands)
         self.band_n_segs_range = band_n_segs_range
         self.band_aug_frac_range = band_aug_frac_range
-        self.band_max_coverage = float(np.clip(band_max_coverage, 0.0, 1.0))
         self.band_harmonic_prob = float(np.clip(band_harmonic_prob, 0.0, 1.0))
         self.band_max_harmonics = max(2, band_max_harmonics)
         self.band_active_mel_top = band_active_mel_top
 
 
-    def _band_mask(self, n_bands: int | None = None) -> np.ndarray:
+    def _band_mask(self) -> np.ndarray:
         """
-        Three-step band mask adapted for DCASE2020 Task 2 anomaly signatures.
+        Three-step band mask for one anomaly event adapted for DCASE2020 Task 2.
 
-        Step 1 — frequency band selection (log-uniform bandwidth):
-          Bandwidth is drawn log-uniformly from ``[2, active_top // 3]`` mel
-          bins, giving equal probability to narrow tonal lines and moderate
-          broadband bands.  With probability ``band_harmonic_prob``, a harmonic
-          series is generated instead: ``n_harmonics`` bands of equal width
-          placed at uniform mel-bin spacing, all sharing the same temporal
-          pattern from Steps 2–3 (physically: the same fault modulates multiple
-          harmonics simultaneously).
+        Each call generates exactly **one anomaly event** — one frequency
+        selection (single band or harmonic series) with one shared temporal
+        pattern.  This maps cleanly to one anomaly in the latent space because
+        the mask projects via max-pool: any pixel active in a latent cell's
+        receptive field marks the whole cell.  Generating multiple independent
+        events per call would create unrelated substituted regions that do not
+        correspond to a single physical fault.
+
+        Step 1 — frequency row selection (log-uniform bandwidth):
+          ``band_h`` drawn log-uniformly from ``[2, active_top // 3]``, giving
+          equal probability of narrow tonal lines and moderate broadband bands.
+          Single band or harmonic series (prob ``band_harmonic_prob``).  In
+          harmonic mode, ``n_harmonics`` is further capped so total frequency
+          footprint stays ≤ ``active_top // 3`` (same as a single max-width
+          band): ``n_harmonics ≤ (active_top // 3) // band_h``.  This bounds
+          coverage at design time without any pixel-level thinning.
 
         Step 2 — time segmentation (random cut-points):
-          ``n_segs`` unique random interior cut-points divide ``[0, T)`` into
-          variable-length segments, avoiding the regular periodicity of
-          evenly-spaced boundaries.
+          ``n_segs`` unique random interior cut-points partition ``[0, T)``
+          into variable-length segments (no regular grid).
 
-        Step 3 — consecutive run per segment (fill fraction decoupled from BW):
-          For each segment a fill fraction ``f ∈ band_aug_frac_range`` is drawn
-          independently; a single consecutive run of length
-          ``round(f × seg_len)`` is placed at a random offset.  All bands in a
-          harmonic series receive the same ``(t0, t1)`` run (shared activation).
+        Step 3 — consecutive run per segment:
+          Fill fraction ``f ∈ band_aug_frac_range`` drawn per segment.  All
+          bands in the harmonic series receive the same run ``(t0, t1)``
+          (shared temporal activation matches the physical coupling of
+          harmonics in a bearing/gear fault).
 
-        A coverage cap thins active pixels to at most ``band_max_coverage``
-        of the spectrogram area.
+        No post-hoc pixel thinning is applied: coverage is bounded solely by
+        the parametric design (log-uniform bandwidth, frequency footprint cap,
+        fill fraction range), ensuring the latent-space mask remains a set of
+        clean, unperforated rectangles.
         """
         mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
         active_top = (
@@ -295,77 +281,64 @@ class SpectromorphicMaskStrategy:
             if self.band_active_mel_top is not None
             else self.n_mels
         )
-        nb = n_bands if n_bands is not None else random.randint(1, self.band_max_bands)
 
-        for _ in range(nb):
-            # ── Step 1: frequency rows ────────────────────────────────────────
-            bw_max_bins = max(3, active_top // 3)
-            log_bw = random.uniform(math.log2(2), math.log2(bw_max_bins))
-            band_h = max(2, round(2 ** log_bw))
+        # ── Step 1: frequency rows ─────────────────────────────────────────────
+        bw_max_bins = max(3, active_top // 3)
+        log_bw = random.uniform(math.log2(2), math.log2(bw_max_bins))
+        band_h = max(2, round(2 ** log_bw))
 
-            if random.random() < self.band_harmonic_prob:
-                # Harmonic series: N copies of the same band at equal mel-bin gap.
-                n_harmonics = random.randint(2, self.band_max_harmonics)
-                gap_min = band_h + 1          # at least 1 silent bin between bands
-                max_span = active_top - band_h
-                gap_max = max(gap_min, max_span // max(1, n_harmonics - 1))
-                gap = random.randint(gap_min, gap_max)
-                # Fundamental center: ensure all harmonics fit below active_top.
-                max_c0 = active_top - band_h // 2 - (n_harmonics - 1) * gap
-                if max_c0 < band_h // 2:
-                    n_harmonics, gap, max_c0 = 1, 0, max(band_h // 2, active_top - band_h)
-                c0 = random.randint(band_h // 2, max(band_h // 2, max_c0))
-                row_ranges: list[tuple[int, int]] = []
-                for k in range(n_harmonics):
-                    center = c0 + k * gap
-                    r0 = max(0, center - band_h // 2)
-                    r1 = min(active_top, r0 + band_h)
-                    if r0 < r1:
-                        row_ranges.append((r0, r1))
-            else:
-                # Single contiguous band.
-                r0 = random.randint(0, max(0, active_top - band_h))
-                r1 = min(r0 + band_h, active_top)
-                row_ranges = [(r0, r1)]
+        max_n_from_footprint = max(1, (active_top // 3) // band_h)
+        if random.random() < self.band_harmonic_prob and max_n_from_footprint >= 2:
+            # Harmonic series: N copies of the same band at equal mel-bin gap.
+            # n_harmonics capped so total frequency footprint ≤ active_top // 3.
+            n_harmonics = random.randint(2, min(self.band_max_harmonics, max_n_from_footprint))
+            gap_min = band_h + 1          # at least 1 silent bin between bands
+            max_span = active_top - band_h
+            gap_max = max(gap_min, max_span // max(1, n_harmonics - 1))
+            gap = random.randint(gap_min, gap_max)
+            # Fundamental center: ensure all harmonics fit below active_top.
+            max_c0 = active_top - band_h // 2 - (n_harmonics - 1) * gap
+            if max_c0 < band_h // 2:
+                n_harmonics, gap, max_c0 = 1, 0, max(band_h // 2, active_top - band_h)
+            c0 = random.randint(band_h // 2, max(band_h // 2, max_c0))
+            row_ranges: list[tuple[int, int]] = []
+            for k in range(n_harmonics):
+                center = c0 + k * gap
+                r0 = max(0, center - band_h // 2)
+                r1 = min(active_top, r0 + band_h)
+                if r0 < r1:
+                    row_ranges.append((r0, r1))
+        else:
+            # Single contiguous band.
+            r0 = random.randint(0, max(0, active_top - band_h))
+            r1 = min(r0 + band_h, active_top)
+            row_ranges = [(r0, r1)]
 
-            if not row_ranges:
+        if not row_ranges:
+            row_ranges = [(0, min(band_h, active_top))]
+
+        # ── Step 2: random time segmentation ──────────────────────────────────
+        n_segs = random.randint(self.band_n_segs_range[0], self.band_n_segs_range[1])
+        if n_segs <= 1 or self.T < 2:
+            segments = [(0, self.T)]
+        else:
+            n_cuts = min(n_segs - 1, self.T - 1)
+            cut_pts = sorted(random.sample(range(1, self.T), n_cuts))
+            bounds = [0] + cut_pts + [self.T]
+            segments = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+        # ── Step 3: consecutive run per segment ───────────────────────────────
+        for seg_start, seg_end in segments:
+            seg_len = seg_end - seg_start
+            if seg_len < 1:
                 continue
-
-            # ── Step 2: random time segmentation ─────────────────────────────
-            n_segs = random.randint(
-                self.band_n_segs_range[0], self.band_n_segs_range[1]
-            )
-            if n_segs <= 1 or self.T < 2:
-                segments = [(0, self.T)]
-            else:
-                n_cuts = min(n_segs - 1, self.T - 1)
-                cut_pts = sorted(random.sample(range(1, self.T), n_cuts))
-                bounds = [0] + cut_pts + [self.T]
-                segments = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
-
-            # ── Step 3: consecutive run per segment ───────────────────────────
-            for seg_start, seg_end in segments:
-                seg_len = seg_end - seg_start
-                if seg_len < 1:
-                    continue
-                fill = random.uniform(
-                    self.band_aug_frac_range[0], self.band_aug_frac_range[1]
-                )
-                run_len = max(1, min(seg_len, round(fill * seg_len)))
-                run_start = random.randint(0, seg_len - run_len)
-                t0 = seg_start + run_start
-                t1 = t0 + run_len
-                for r0, r1 in row_ranges:
-                    mask[r0:r1, t0:t1] = 1.0
-
-        # Coverage cap: randomly thin active pixels to at most band_max_coverage.
-        total = self.n_mels * self.T
-        active = int(mask.sum())
-        max_active = int(self.band_max_coverage * total)
-        if active > max_active:
-            flat_idx = np.flatnonzero(mask)
-            to_clear = np.random.choice(flat_idx, active - max_active, replace=False)
-            mask.flat[to_clear] = 0.0
+            fill = random.uniform(self.band_aug_frac_range[0], self.band_aug_frac_range[1])
+            run_len = max(1, min(seg_len, round(fill * seg_len)))
+            run_start = random.randint(0, seg_len - run_len)
+            t0 = seg_start + run_start
+            t1 = t0 + run_len
+            for r0, r1 in row_ranges:
+                mask[r0:r1, t0:t1] = 1.0
 
         return mask
 
@@ -376,7 +349,6 @@ class SpectromorphicMaskStrategy:
             q_range=self.perlin_q_range,
             shear_range=self.perlin_shear_range,
             active_mel_top=self.perlin_active_mel_top,
-            max_coverage=self.perlin_max_coverage,
         )
 
     # -- public interface ----------------------------------------------------
