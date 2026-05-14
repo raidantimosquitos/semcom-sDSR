@@ -94,7 +94,7 @@ def _perlin_mask(
     min_scale_exp: int = 0,
     max_scale_exp: int = 6,
     threshold_beta: float = 0.4,
-    rotate_deg_range: tuple[float, float] | None = (-90.0, 90.0),
+    rotate_deg_range: tuple[float, float] | None = (-15.0, 15.0),
 ) -> np.ndarray:
     """
     Thresholded 2-D Perlin mask (binary float32).
@@ -104,19 +104,24 @@ def _perlin_mask(
     binarization ``|noise| > τ``. Optionally rotates the noise (uniform angle
     in ``rotate_deg_range``) via :func:`_rotate_perlin_reflect_torch`.
     """
-    perlin_scaley = 2 ** int(random.randint(min_scale_exp, max_scale_exp))
-    perlin_scalex = 2 ** int(random.randint(min_scale_exp, max_scale_exp))
+    # perlin_scaley = 2 ** int(random.randint(min_scale_exp, max_scale_exp))
+    # perlin_scalex = 2 ** int(random.randint(min_scale_exp, max_scale_exp))
+    perlin_scaley = 2 ** int(random.randint(0, 2))
+    perlin_scalex = 2 ** int(random.randint(3, 6))
 
     noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex)).astype(np.float32)
 
+    rotate_deg_range = None
     if rotate_deg_range is not None:
         lo, hi = rotate_deg_range
         angle_deg = random.uniform(lo, hi)
         noise = _rotate_perlin_reflect_torch(noise, angle_deg)
 
-    beta = float(threshold_beta)
-    threshold = random.random() * beta + beta
-    return (np.abs(noise) > threshold).astype(np.float32)
+    # beta = float(threshold_beta)
+    # threshold = random.random() * beta + beta
+    threshold = np.quantile(noise, 0.9)
+    return (noise > threshold).astype(np.float32)
+    # return (np.abs(noise) > threshold).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +208,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.1,
+        perlin_prob: float = 0.3,
         perlin_threshold_beta: float = 0.4,
         perlin_rotate_deg_range: tuple[float, float] | None = (-90.0, 90.0),
         f_min_hz: float = 0.0,
