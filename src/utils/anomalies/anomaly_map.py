@@ -51,40 +51,21 @@ def _hz_band_to_mel_bins(
 # Perlin regularizer
 # ---------------------------------------------------------------------------
 
-def _rotate_perlin_reflect_torch(noise: np.ndarray, angle_deg: float) -> np.ndarray:
+def _shear_perlin_freq_axis(noise: np.ndarray, shear: float) -> np.ndarray:
     """
-    Rotate 2-D Perlin field about the center using bilinear sampling with
-    ``padding_mode='reflection'``.
-
-    Compared to SciPy ``ndimage.rotate(..., reshape=False, cval=0)``, reflection
-    padding avoids collapsing energy toward the center from zero-filled corners on
-    non-square maps (e.g. 128×320). Does not depend on torchvision.
+    Shear the Perlin field along the frequency (mel) axis as a function of time.
+    shear ∈ [-0.3, 0.3] shifts each time column by shear * col_index rows.
+    Implemented as a remap; out-of-bounds filled by reflection.
     """
-    if abs(angle_deg) < 1e-6:
-        return noise.astype(np.float32, copy=False)
-
-    h, w = int(noise.shape[0]), int(noise.shape[1])
-    t = torch.from_numpy(noise.astype(np.float32)).view(1, 1, h, w)
-    rad = math.radians(angle_deg)
-    cos_t, sin_t = math.cos(rad), math.sin(rad)
-
-    ys = torch.linspace(-1.0, 1.0, h, dtype=t.dtype, device=t.device)
-    xs = torch.linspace(-1.0, 1.0, w, dtype=t.dtype, device=t.device)
-    gy, gx = torch.meshgrid(ys, xs, indexing="ij")
-
-    # Inverse warp: rotate sampling coordinates by +angle so the image rotates CCW.
-    sx = gx * cos_t + gy * sin_t
-    sy = -gx * sin_t + gy * cos_t
-    grid = torch.stack((sx, sy), dim=-1).unsqueeze(0)
-
-    out = F.grid_sample(
-        t,
-        grid,
-        mode="bilinear",
-        padding_mode="reflection",
-        align_corners=True,
-    )
-    return out[0, 0].detach().numpy().astype(np.float32)
+    h, w = noise.shape
+    col_idx = np.arange(w, dtype=np.float32)
+    row_shift = shear * col_idx  # (W,) pixel shift per column
+    # Build sampling grid
+    rows = np.arange(h, dtype=np.float32)[:, None] - row_shift[None, :]  # (H, W)
+    rows = rows % h  # reflection via modulo (periodic)
+    cols = np.tile(np.arange(w, dtype=np.float32)[None, :], (h, 1))
+    from scipy.ndimage import map_coordinates
+    return map_coordinates(noise, [rows, cols], order=1, mode='wrap').astype(np.float32)
 
 
 def _perlin_mask(
@@ -94,7 +75,7 @@ def _perlin_mask(
     min_scale_exp: int = 0,
     max_scale_exp: int = 6,
     threshold_beta: float = 0.4,
-    rotate_deg_range: tuple[float, float] | None = (-15.0, 15.0),
+    shear_range: tuple[float, float] | None = (-0.25, 0.25),
 ) -> np.ndarray:
     """
     Thresholded 2-D Perlin mask (binary float32).
@@ -111,17 +92,23 @@ def _perlin_mask(
 
     noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex)).astype(np.float32)
 
-    rotate_deg_range = None
-    if rotate_deg_range is not None:
-        lo, hi = rotate_deg_range
-        angle_deg = random.uniform(lo, hi)
-        noise = _rotate_perlin_reflect_torch(noise, angle_deg)
+    if random.random() < 0.5 and shear_range is not None:
+        shear = random.uniform(*shear_range)
+        noise = _shear_perlin_freq_axis(noise, shear)
 
-    # beta = float(threshold_beta)
-    # threshold = random.random() * beta + beta
-    threshold = np.quantile(noise, 0.9)
-    return (noise > threshold).astype(np.float32)
-    # return (np.abs(noise) > threshold).astype(np.float32)
+    tau   = random.uniform(threshold_beta, 2 * threshold_beta)
+    sign  = random.choice([1, -1])
+    perlin_bin = (sign * noise > tau).astype(np.float32)
+
+    if perlin_bin.sum() == 0:
+        perlin_bin = np.zeros((n_mels, T), dtype=np.float32)
+        bw_start = random.randint(0, n_mels - 1)
+        bw_end = max(bw_start + random.randint(1, 64), n_mels - 1)
+        t_start = random.randint(0, T - 1)
+        t_end = max(t_start + random.randint(1, 160), T - 1)
+        perlin_bin[bw_start:bw_end, t_start:t_end] = 1.0
+
+    return perlin_bin
 
 
 # ---------------------------------------------------------------------------
@@ -208,9 +195,11 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.3,
+        perlin_prob: float = 0.4,
+        mixed_prob: float = 0.25,
         perlin_threshold_beta: float = 0.4,
-        perlin_rotate_deg_range: tuple[float, float] | None = (-90.0, 90.0),
+        perlin_shear_range: tuple[float, float] | None = (-0.25, 0.25),
+        n_bands: int | None = None,
         f_min_hz: float = 0.0,
         f_max_hz: float = 8_000.0,
         bw_min_hz: float = 40.0,
@@ -221,74 +210,33 @@ class SpectromorphicMaskStrategy:
         self.T = T
         self.q_shape = q_shape or (n_mels, T)
         self.perlin_prob = float(np.clip(perlin_prob, 0.0, 1.0))
+        self.mixed_prob = float(np.clip(mixed_prob, 0.0, 1.0))
         self.perlin_threshold_beta = float(perlin_threshold_beta)
-        self.perlin_rotate_deg_range = perlin_rotate_deg_range
+        self.perlin_shear_range = perlin_shear_range
         self.f_min_hz = f_min_hz
+        self.n_bands = n_bands
         self.f_max_hz = f_max_hz
         self.bw_min_hz = bw_min_hz
         self.bw_max_hz = bw_max_hz
 
 
-    def _band_mask(self) -> np.ndarray:
+    def _band_mask(self, n_bands: int | None = None) -> np.ndarray:
         """Mel band × renewal-modulated time vector."""
         mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
+        nb = n_bands if n_bands is not None else random.randint(1, 3)
+        for _ in range(nb):
+            band_h = random.randint(2, max(3, self.n_mels // 8))   # 2..16 mel rows
+            center  = random.randint(band_h // 2, self.n_mels - band_h // 2)
+            r0, r1  = max(0, center - band_h // 2), min(self.n_mels, center + band_h // 2)
+            if random.random() < 0.5:                          # time crop
+                t0 = random.randint(0, self.T // 2)
+                t1 = random.randint(self.T // 2, self.T)
+            else:
+                t0, t1 = 0, self.T
+            mask[r0:r1, t0:t1] = 1.0
+        return mask
 
-        # band = _sample_mel_band(
-        #     self.n_mels, self.f_min_hz, self.f_max_hz, self.bw_min_hz, self.bw_max_hz
-        # )
-        # if band is None:
-        #     # Hard fallback: tiny band, partial time via a single renewal
-        #     band = _hz_band_to_mel_bins(
-        #         self.f_min_hz, self._FALLBACK_BW_HZ,
-        #         self.n_mels, self.f_min_hz, self.f_max_hz,
-        #     )
 
-        # # Log-uniform band width — one draw, mirrors 2^randint(min_scale, max_scale)
-        # rng = np.random.default_rng()
-        # num_bands_range = (1, 4)
-        # bw_scale_range = (0, 6)
-        # num_segs_range = (1, 5)
-        # max_aug_frac = 1.0
-        # min_aug_frac = 0.05
-
-        # # Step 1: partition Y-axis into num_bands non-overlapping cells
-        # num_bands = int(rng.integers(num_bands_range[0], num_bands_range[1] + 1))
-        # y_boundaries = [i * self.n_mels // num_bands for i in range(num_bands + 1)]
-
-        # for b in range(num_bands):
-            # cell_y0  = y_boundaries[b]
-            # cell_y1  = y_boundaries[b + 1]
-            # cell_h   = cell_y1 - cell_y0
-            # if cell_h < 1:
-                # continue
-
-            # # Step 2: within each Y-cell, sample an independent band
-            # max_exp  = max(bw_scale_range[0], min(bw_scale_range[1],
-                        # int(np.floor(np.log2(cell_h)))))
-            # bw       = int(2 ** rng.integers(bw_scale_range[0], max_exp + 1))
-            # bw       = min(bw, cell_h)
-            # y0       = int(rng.integers(cell_y0, cell_y1 - bw + 1))
-
-            # # Step 3: partition time axis into num_segs cells, independently per band
-            # num_segs    = int(rng.integers(num_segs_range[0], num_segs_range[1] + 1))
-            # x_boundaries = [i * self.T // num_segs for i in range(num_segs + 1)]
-
-            # # Step 4: within each time cell, sample one contiguous run
-            # for s in range(num_segs):
-                # seg_start = x_boundaries[s]
-                # seg_end   = x_boundaries[s + 1]
-                # seg_len   = seg_end - seg_start
-                # if seg_len < 1:
-                    # continue
-
-                # run_len   = int(rng.integers(
-                    # max(1, int(min_aug_frac * seg_len)),
-                    # max(1, int(max_aug_frac * seg_len)) + 1,
-                # ))
-                # run_start = int(rng.integers(0, max(1, seg_len - run_len + 1)))
-                # mask[y0:y0 + bw, seg_start + run_start:seg_start + run_start + run_len] = 1.0
-        
-        # return mask
 
         # ---------------------------------------------------------------------
         # Old band_mask implementation (kept for reference)
@@ -345,6 +293,13 @@ class SpectromorphicMaskStrategy:
 
         return mask
 
+    def _mixed_mask(self) -> np.ndarray:
+        band = self._band_mask(n_bands=1)
+        perlin = self._perlin_mask()
+        mixed = (perlin * band).astype(np.float32)
+        if mixed.sum() == 0:
+            mixed = (perlin + band).astype(np.float32)
+        return mixed
 
 
     def _perlin_mask(self) -> np.ndarray:
@@ -352,7 +307,7 @@ class SpectromorphicMaskStrategy:
             self.n_mels,
             self.T,
             threshold_beta=self.perlin_threshold_beta,
-            rotate_deg_range=self.perlin_rotate_deg_range,
+            shear_range=self.perlin_shear_range,
         )
 
     # -- public interface ----------------------------------------------------
@@ -361,7 +316,7 @@ class SpectromorphicMaskStrategy:
         """Return ``(B, 1, *q_shape)`` binary float32 mask tensor."""
         masks = [
             torch.from_numpy(
-                self._perlin_mask() if random.random() < self.perlin_prob else self._band_mask()
+                self._mixed_mask() if random.random() < self.mixed_prob else self._perlin_mask() if random.random() < self.perlin_prob else self._band_mask()
             ).unsqueeze(0).unsqueeze(0)
             for _ in range(batch_size)
         ]
