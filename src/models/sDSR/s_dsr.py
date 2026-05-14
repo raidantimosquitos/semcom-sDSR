@@ -281,8 +281,6 @@ class sDSR(nn.Module):
         inj_mode = self._sample_inj_mode(
             batch_size, device, self.config.anomaly_inj_distribution
         )
-        # test: use both mode for all samples
-        inj_mode =torch.full((batch_size,), 2, device=device, dtype=torch.long)
 
         is_fine_only = has_anomaly * (inj_mode == 0).float().view(batch_size, 1, 1, 1)
         is_coarse_only = has_anomaly * (inj_mode == 1).float().view(batch_size, 1, 1, 1)
