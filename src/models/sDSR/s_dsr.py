@@ -84,7 +84,7 @@ class sDSR(nn.Module):
         self._anomaly_detection = AnomalyDetectionModule(
             in_channels=2,
             out_channels=2,
-            base_width=64,
+            base_width=32,
         )
 
         self._anomaly_generation = AnomalyGeneration(
@@ -322,7 +322,7 @@ class sDSR(nn.Module):
         x_specific, aux = out_dec
         # Training: match original behavior — let seg loss backprop into stage-2 modules.
         # (Stage-1 is frozen and x_general is computed under no_grad.)
-        m_out = self._anomaly_detection(x_specific.detach(), x_general)
+        m_out = self._anomaly_detection(x_specific, x_general)
 
         # DSR-style focal target: same max_pool projection as feature injection,
         # then nearest-upsample to spectrogram resolution, mix by inj_mode.

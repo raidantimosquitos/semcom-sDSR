@@ -17,78 +17,98 @@ import torch.nn.functional as F
 from .perlin import rand_perlin_2d_np
 
 
+def _random_band_fallback_mask(
+    n_mels: int,
+    T: int,
+    *,
+    active_mel_top: int | None = None,
+    mel_frac_range: tuple[float, float] = (0.03, 0.45),
+    time_frac_range: tuple[float, float] = (0.04, 0.55),
+) -> np.ndarray:
+    """
+    Single solid rectangle on ``(n_mels, T)``: random mel height and vertical
+    offset within ``[0, active_mel_top)`` (or full height when ``None``), random
+    time length and start.  Fraction ranges control typical coverage on e.g.
+    ``128×320`` inputs; always returns a non-empty mask when ``n_mels, T >= 1``.
+    """
+    mask = np.zeros((n_mels, T), dtype=np.float32)
+    if n_mels < 1 or T < 1:
+        return mask
+
+    top = int(np.clip(active_mel_top if active_mel_top is not None else n_mels, 1, n_mels))
+
+    lo_m, hi_m = mel_frac_range
+    lo_m, hi_m = float(np.clip(min(lo_m, hi_m), 1e-6, 1.0)), float(
+        np.clip(max(lo_m, hi_m), 1e-6, 1.0)
+    )
+    lo_t, hi_t = time_frac_range
+    lo_t, hi_t = float(np.clip(min(lo_t, hi_t), 1e-6, 1.0)), float(
+        np.clip(max(lo_t, hi_t), 1e-6, 1.0)
+    )
+
+    if top == 1:
+        band_h, r0 = 1, 0
+    else:
+        raw_h = max(1, round(top * random.uniform(lo_m, hi_m)))
+        band_h = min(top, max(2, raw_h))
+        r0 = random.randint(0, top - band_h)
+    r1 = r0 + band_h
+
+    run_len = max(1, min(T, round(T * random.uniform(lo_t, hi_t))))
+    t0 = random.randint(0, max(0, T - run_len))
+    mask[r0:r1, t0 : t0 + run_len] = 1.0
+    return mask
+
+
 # ---------------------------------------------------------------------------
 # Perlin regularizer
 # ---------------------------------------------------------------------------
-
-def _shear_perlin_freq_axis(noise: np.ndarray, shear: float) -> np.ndarray:
-    """
-    Shear the Perlin field along the frequency (mel) axis as a function of time.
-    shear ∈ [-0.3, 0.3] shifts each time column by shear * col_index rows.
-    Implemented as a remap; out-of-bounds filled by reflection.
-    """
-    h, w = noise.shape
-    col_idx = np.arange(w, dtype=np.float32)
-    row_shift = shear * col_idx  # (W,) pixel shift per column
-    # Build sampling grid
-    rows = np.arange(h, dtype=np.float32)[:, None] - row_shift[None, :]  # (H, W)
-    rows = rows % h  # reflection via modulo (periodic)
-    cols = np.tile(np.arange(w, dtype=np.float32)[None, :], (h, 1))
-    from scipy.ndimage import map_coordinates
-    return map_coordinates(noise, [rows, cols], order=1, mode='wrap').astype(np.float32)
-
 
 def _perlin_mask(
     n_mels: int,
     T: int,
     *,
-    shear_range: tuple[float, float] | None = (-0.08, 0.08),
-    q_range: tuple[float, float] = (0.80, 0.95),
+    perlin_scale_freq: int = 4,
+    perlin_scale_time: int = 6,
+    min_perlin_scale_freq: int = 1,
+    min_perlin_scale_time: int = 2,
+    beta: float = 0.5,
     active_mel_top: int | None = None,
+    fallback_mel_frac_range: tuple[float, float] = (0.03, 0.45),
+    fallback_time_frac_range: tuple[float, float] = (0.04, 0.55),
 ) -> np.ndarray:
-    """
-    Thresholded 2-D Perlin mask (binary float32) adapted for DCASE2020 Task 2.
+    """Thresholded Perlin binary mask; empty threshold → random band fallback."""
+    # Anisotropic scale: freq axis coarser, time axis finer
+    exp_x = int(torch.randint(min_perlin_scale_freq, perlin_scale_freq, (1,)).item())
+    exp_y = int(torch.randint(min_perlin_scale_time, perlin_scale_time, (1,)).item())
+    perlin_scalex = int(2**exp_x)
+    perlin_scaley = int(2**exp_y)
 
-    Scale: ``perlin_scaley`` ∈ {2, 4, 8} (≥2 frequency cells; scaley=1 is
-    degenerate) × ``perlin_scalex`` ∈ {8, 16, 32, 64} (wide time extent).
+    perlin_noise = rand_perlin_2d_np(
+        (n_mels, T),
+        (perlin_scalex, perlin_scaley),
+    )
+    if random.random() < 0.5:
+        perlin_noise = np.ascontiguousarray(np.fliplr(perlin_noise))
+    if random.random() < 0.5:
+        perlin_noise = np.ascontiguousarray(np.flipud(perlin_noise))
 
-    Threshold: quantile-based (``q ∈ q_range``) on the signed noise field —
-    keeps the top ``1 - q`` fraction (≈5–20%) as one connected horizontal
-    stripe rather than scattered blobs.  Coverage is bounded implicitly by the
-    quantile: no pixel-level thinning is applied (it would fragment the blob
-    without reducing latent-space coverage due to max-pool projection).
+    threshold = torch.rand(1).item() * beta + beta  # [beta, 2*beta]
 
-    Shear: optional mild shear along the frequency axis (default ±0.08,
-    ≈25 mel-bin drift) models gradual harmonic drift.
-
-    ``active_mel_top``: restrict mask to ``[0, active_mel_top)`` mel bins.
-    """
-    perlin_scaley = 2 ** int(random.randint(1, 3))   # {2, 4, 8}
-    perlin_scalex = 2 ** int(random.randint(3, 6))   # {8, 16, 32, 64}
-
-    noise = rand_perlin_2d_np((n_mels, T), (perlin_scaley, perlin_scalex)).astype(np.float32)
-
-    if random.random() < 0.5 and shear_range is not None:
-        shear = random.uniform(*shear_range)
-        noise = _shear_perlin_freq_axis(noise, shear)
-
-    sign = random.choice([1, -1])
-    signed_noise = sign * noise
-    q = random.uniform(q_range[0], q_range[1])
-    tau = float(np.quantile(signed_noise, q))
-    perlin_bin = (signed_noise > tau).astype(np.float32)
-
-    top = active_mel_top if active_mel_top is not None else n_mels
-    if top < n_mels:
-        perlin_bin[top:, :] = 0.0
-
-    if perlin_bin.sum() == 0:
-        bw = random.randint(2, max(3, n_mels // 8))
-        bw_start = random.randint(0, max(0, top - bw))
-        bw_end = min(bw_start + bw, top)
-        perlin_bin[bw_start:bw_end, :] = 1.0
-
-    return perlin_bin
+    perlin_thr = np.where(
+        np.abs(perlin_noise) > threshold,
+        np.ones_like(perlin_noise, dtype=np.float32),
+        np.zeros_like(perlin_noise, dtype=np.float32),
+    )
+    if float(perlin_thr.sum()) == 0.0:
+        return _random_band_fallback_mask(
+            n_mels,
+            T,
+            active_mel_top=active_mel_top,
+            mel_frac_range=fallback_mel_frac_range,
+            time_frac_range=fallback_time_frac_range,
+        )
+    return perlin_thr
 
 
 # ---------------------------------------------------------------------------
@@ -128,9 +148,7 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        perlin_prob: float = 0.25,
-        perlin_q_range: tuple[float, float] = (0.80, 0.95),
-        perlin_shear_range: tuple[float, float] | None = (-0.08, 0.08),
+        perlin_prob: float = 0.5,
         perlin_active_mel_top: int | None = None,
         band_n_segs_range: tuple[int, int] = (1, 5),
         band_aug_frac_range: tuple[float, float] = (0.1, 1.0),
@@ -141,8 +159,6 @@ class SpectromorphicMaskStrategy:
         self.T = T
         self.q_shape = q_shape or (n_mels, T)
         self.perlin_prob = float(np.clip(perlin_prob, 0.0, 1.0))
-        self.perlin_q_range = perlin_q_range
-        self.perlin_shear_range = perlin_shear_range
         self.perlin_active_mel_top = perlin_active_mel_top
         self.band_n_segs_range = band_n_segs_range
         self.band_aug_frac_range = band_aug_frac_range
@@ -190,13 +206,16 @@ class SpectromorphicMaskStrategy:
         return mask
 
     def _perlin_mask(self) -> np.ndarray:
-        return _perlin_mask(
+        m = _perlin_mask(
             self.n_mels,
             self.T,
-            q_range=self.perlin_q_range,
-            shear_range=self.perlin_shear_range,
             active_mel_top=self.perlin_active_mel_top,
         )
+        top = self.perlin_active_mel_top
+        if top is not None and int(top) < self.n_mels:
+            m = m.copy()
+            m[int(top):, :] = 0.0
+        return m
 
     def _sample_mask_numpy(self) -> np.ndarray:
         return (
