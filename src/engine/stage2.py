@@ -152,11 +152,12 @@ class Stage2Trainer(BaseTrainer):
             m_prob = torch.softmax(m_out, dim=1)
             loss_focal = self.focal_loss(m_prob, M)
 
-            t_normal = 1.0 - M.float()
-            t_anomaly = M.float()
-            target_2ch = torch.cat([t_normal, t_anomaly], dim=1)
-            mask_recon_loss = F.l1_loss(m_prob, target_2ch)
-            loss_focal = loss_focal + mask_recon_loss
+            # t_normal = 1.0 - M.float()
+            # t_anomaly = M.float()
+            # target_2ch = torch.cat([t_normal, t_anomaly], dim=1)
+            # mask_recon_loss = F.l1_loss(m_prob, target_2ch)
+            # loss_focal = loss_focal + mask_recon_loss
+
 
             total_loss = (
                 self.lambda_recon * loss_recon
