@@ -227,8 +227,8 @@ class SpectromorphicMaskStrategy:
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
         # --- branch probabilities ---
-        perlin_prob: float = 0.25,
-        wide_burst_prob: float = 0.12,
+        perlin_prob: float = 0.2,
+        wide_burst_prob: float = 0.4,
         # --- wide-band multi-burst ---
         wide_burst_n_range: tuple[int, int] = (1, 5),
         wide_burst_max_bursts: int = 5,
