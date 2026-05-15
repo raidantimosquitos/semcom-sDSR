@@ -145,7 +145,7 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         perlin_prob: float = 0.2,
         perlin_active_mel_top: int | None = None,
-        band_n_segs_range: tuple[int, int] = (1, 10),
+        band_n_segs_range: tuple[int, int] = (1, 16),
         band_aug_frac_range: tuple[float, float] = (0.1, 1.0),
         band_active_mel_top: int | None = None,
         **_: object,
