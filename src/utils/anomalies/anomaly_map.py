@@ -68,17 +68,16 @@ def _perlin_mask(
     n_mels: int,
     T: int,
     *,
-    perlin_scale_freq: int = 4,
+    perlin_scale_freq: int = 6,
     perlin_scale_time: int = 6,
-    min_perlin_scale_freq: int = 1,
-    min_perlin_scale_time: int = 2,
+    min_perlin_scale_freq: int = 0,
+    min_perlin_scale_time: int = 0,
     beta: float = 0.5,
     active_mel_top: int | None = None,
     fallback_mel_frac_range: tuple[float, float] = (0.03, 0.45),
     fallback_time_frac_range: tuple[float, float] = (0.04, 0.55),
 ) -> np.ndarray:
     """Thresholded Perlin binary mask; empty threshold → random band fallback."""
-    # Anisotropic scale: freq axis coarser, time axis finer
     exp_x = int(torch.randint(min_perlin_scale_freq, perlin_scale_freq, (1,)).item())
     exp_y = int(torch.randint(min_perlin_scale_time, perlin_scale_time, (1,)).item())
     perlin_scalex = int(2**exp_x)
@@ -88,10 +87,6 @@ def _perlin_mask(
         (n_mels, T),
         (perlin_scalex, perlin_scaley),
     )
-    if random.random() < 0.5:
-        perlin_noise = np.ascontiguousarray(np.fliplr(perlin_noise))
-    if random.random() < 0.5:
-        perlin_noise = np.ascontiguousarray(np.flipud(perlin_noise))
 
     threshold = torch.rand(1).item() * beta + beta  # [beta, 2*beta]
 
@@ -150,7 +145,7 @@ class SpectromorphicMaskStrategy:
         q_shape: tuple[int, int] | None = None,
         perlin_prob: float = 0.2,
         perlin_active_mel_top: int | None = None,
-        band_n_segs_range: tuple[int, int] = (1, 5),
+        band_n_segs_range: tuple[int, int] = (1, 10),
         band_aug_frac_range: tuple[float, float] = (0.1, 1.0),
         band_active_mel_top: int | None = None,
         **_: object,
