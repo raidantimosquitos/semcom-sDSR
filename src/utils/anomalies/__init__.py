@@ -2,7 +2,7 @@
 Anomaly simulation utilities for AudDSR training.
 
 - AnomalyMapGenerator: spectromorphic masks.
-- SpectromorphicMaskStrategy: valve, slider-style linear-Hz band × renewal, optional Perlin
+- SpectromorphicMaskStrategy: band / full-width multi-burst / Perlin masks
 """
 
 from .anomaly_map import (

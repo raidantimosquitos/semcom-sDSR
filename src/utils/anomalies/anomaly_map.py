@@ -1,9 +1,9 @@
 """
 Spectromorphic anomaly mask generation for sDSR training.
 
-One strategy: pick a mel band (uniform Hz → mel), modulate over time
-with alternating geometric renewal runs. Perlin noise as an optional
-regularizer. Never produces a fully-filled time strip.
+Band masks (narrow / harmonic), optional full-band short-time bursts, and
+Perlin noise as a low-frequency regularizer.  Masks are solid rectangles
+(no pixel thinning) so max-pool projection to latent space stays coherent.
 """
 
 from __future__ import annotations
@@ -168,14 +168,22 @@ class SpectromorphicMaskStrategy:
     """
     Spectromorphic anomaly masks for sDSR training on DCASE2020 Task 2.
 
-    Each call draws one mask type per sample:
+    Each call draws one mask type per sample (mutually exclusive branches):
 
-    * **Band** (prob ``1 - perlin_prob``): three-step rectangular band process
-      → frequency-selective, temporally segmented strips with optional
-      harmonic series.  Primary DCASE-motivated strategy.
+    * **Band** (remaining mass after Perlin and wide-burst): three-step
+      rectangular band process → frequency-selective, temporally segmented
+      strips with optional harmonic series.  Primary DCASE-motivated strategy.
+    * **Wide-band bursts** (prob ``wide_burst_prob``): all mel rows in
+      ``[0, wide_burst_active_mel_top)`` (or full ``n_mels`` when that is
+      ``None``) active only on **several** short, non-overlapping time runs
+      (impulsive / repeated transient broadband).  No multi-band harmonics.
     * **Perlin** (prob ``perlin_prob``): thresholded anisotropic Perlin noise
       → smooth, blob-shaped patches used as a low-probability regularizer
       to prevent the model from over-fitting to rectangular mask boundaries.
+
+    Branch probabilities are ``perlin_prob``, ``wide_burst_prob``, and
+    ``1 - perlin_prob - wide_burst_prob`` for Band.  ``wide_burst_prob`` is
+    clipped so the three sum to 1.
 
     Args:
         n_mels: mel bins in the spectrogram.
@@ -185,6 +193,13 @@ class SpectromorphicMaskStrategy:
 
         perlin_prob: probability of choosing the Perlin branch (recommended:
             0.2–0.3 so band masks remain the primary strategy).
+        wide_burst_prob: probability of the full-row multi-burst template.
+        wide_burst_n_range: inclusive range for how many time bursts to **attempt**
+            to place (non-overlapping; fewer may fit if ``T`` is small).
+        wide_burst_max_bursts: hard cap on burst count (default 5).
+        wide_burst_time_frames_range: min/max length (frames) of each burst.
+        wide_burst_active_mel_top: row ``r1`` for the wide band (rows
+            ``[0, r1)``).  ``None`` uses all ``n_mels`` (full spectrum).
         perlin_q_range: quantile ``(q_min, q_max)`` for the signed threshold;
             keeps the top ``1 - q`` fraction of the signed noise field, giving
             ≈5–20% active pixels independent of scale.
@@ -211,8 +226,14 @@ class SpectromorphicMaskStrategy:
         n_mels: int = 128,
         T: int = 320,
         q_shape: tuple[int, int] | None = None,
-        # --- branch probability ---
+        # --- branch probabilities ---
         perlin_prob: float = 0.25,
+        wide_burst_prob: float = 0.12,
+        # --- wide-band multi-burst ---
+        wide_burst_n_range: tuple[int, int] = (1, 5),
+        wide_burst_max_bursts: int = 5,
+        wide_burst_time_frames_range: tuple[int, int] = (3, 28),
+        wide_burst_active_mel_top: int | None = None,
         # --- Perlin parameters ---
         perlin_q_range: tuple[float, float] = (0.80, 0.95),
         perlin_shear_range: tuple[float, float] | None = (-0.08, 0.08),
@@ -229,6 +250,18 @@ class SpectromorphicMaskStrategy:
         self.T = T
         self.q_shape = q_shape or (n_mels, T)
         self.perlin_prob = float(np.clip(perlin_prob, 0.0, 1.0))
+        p_w = float(np.clip(wide_burst_prob, 0.0, 1.0))
+        self.wide_burst_prob = min(p_w, max(0.0, 1.0 - self.perlin_prob))
+        self.wide_burst_n_range = (
+            int(wide_burst_n_range[0]),
+            int(wide_burst_n_range[1]),
+        )
+        self.wide_burst_time_frames_range = (
+            int(wide_burst_time_frames_range[0]),
+            int(wide_burst_time_frames_range[1]),
+        )
+        self.wide_burst_active_mel_top = wide_burst_active_mel_top
+        self.wide_burst_max_bursts = max(1, int(wide_burst_max_bursts))
         self.perlin_q_range = perlin_q_range
         self.perlin_shear_range = perlin_shear_range
         self.perlin_active_mel_top = perlin_active_mel_top
@@ -238,6 +271,53 @@ class SpectromorphicMaskStrategy:
         self.band_max_harmonics = max(2, band_max_harmonics)
         self.band_active_mel_top = band_active_mel_top
 
+    def _wideband_burst_mask(self) -> np.ndarray:
+        """
+        Full (or configured) mel span with several short, non-overlapping
+        temporal bursts.  One mask type for broadband impulsive / repeated
+        transient signatures; no harmonic multi-bands.
+        """
+        mask = np.zeros((self.n_mels, self.T), dtype=np.float32)
+        top = (
+            self.wide_burst_active_mel_top
+            if self.wide_burst_active_mel_top is not None
+            else self.n_mels
+        )
+        r0, r1 = 0, int(np.clip(top, 1, self.n_mels))
+
+        lo_n, hi_n = self.wide_burst_n_range
+        lo_n, hi_n = max(1, lo_n), max(lo_n, hi_n)
+        n_max = min(hi_n, self.T, self.wide_burst_max_bursts)
+        n_min = min(max(1, lo_n), n_max)
+        n_bursts = random.randint(n_min, n_max)
+
+        lo_f, hi_f = self.wide_burst_time_frames_range
+        lo_f, hi_f = max(1, lo_f), max(lo_f, hi_f)
+        lo_f = min(lo_f, self.T)
+        hi_f = min(hi_f, self.T)
+
+        free = np.ones(self.T, dtype=bool)
+        for _ in range(n_bursts):
+            L = random.randint(lo_f, hi_f)
+            if L > self.T or int(free.sum()) < L:
+                break
+            candidates: list[int] = []
+            limit = self.T - L + 1
+            for s in range(limit):
+                if bool(free[s : s + L].all()):
+                    candidates.append(s)
+            if not candidates:
+                break
+            s = random.choice(candidates)
+            mask[r0:r1, s : s + L] = 1.0
+            free[s : s + L] = False
+
+        if mask.sum() == 0:
+            L = min(self.T, max(1, lo_f))
+            s = random.randint(0, max(0, self.T - L))
+            mask[r0:r1, s : s + L] = 1.0
+
+        return mask
 
     def _band_mask(self) -> np.ndarray:
         """
@@ -353,17 +433,23 @@ class SpectromorphicMaskStrategy:
 
     # -- public interface ----------------------------------------------------
 
+    def _sample_mask_numpy(self) -> np.ndarray:
+        u = random.random()
+        if u < self.perlin_prob:
+            return self._perlin_mask()
+        if u < self.perlin_prob + self.wide_burst_prob:
+            return self._wideband_burst_mask()
+        return self._band_mask()
+
     def __call__(self, batch_size: int, device: torch.device | str) -> torch.Tensor:
         """Return ``(B, 1, *q_shape)`` binary float32 mask tensor.
 
-        Each sample independently draws Perlin (prob ``perlin_prob``) or
-        Band (prob ``1 - perlin_prob``).
+        Each sample independently draws Perlin, wide-band multi-burst, or
+        Band with probabilities ``perlin_prob``, ``wide_burst_prob``, and
+        ``1 - perlin_prob - wide_burst_prob``.
         """
         masks = [
-            torch.from_numpy(
-                self._perlin_mask() if random.random() < self.perlin_prob
-                else self._band_mask()
-            ).unsqueeze(0).unsqueeze(0)
+            torch.from_numpy(self._sample_mask_numpy()).unsqueeze(0).unsqueeze(0)
             for _ in range(batch_size)
         ]
         M = torch.cat(masks, dim=0).to(device)
