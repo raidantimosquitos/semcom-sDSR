@@ -80,7 +80,7 @@ def generate_fake_anomalies_distant(
     mask: torch.Tensor,
     strength: torch.Tensor | float,
     closest_skip_frac: float = 0.05,
-    use_shuffle: bool = True,
+    use_shuffle: bool = False,
 ) -> torch.Tensor:
     """
     Replace feature vectors in mask regions with codebook samples.
@@ -151,6 +151,7 @@ def generate_fake_anomalies_uniform(
     embeddings: torch.Tensor,
     codebook: torch.Tensor,
     mask: torch.Tensor,
+    use_shuffle: bool = True,
 ) -> torch.Tensor:
     """
     Replace feature vectors in mask regions with codebook samples drawn uniformly.
@@ -179,6 +180,12 @@ def generate_fake_anomalies_uniform(
     cb = codebook.to(device)
     random_vecs = cb[random_indices]
     random_vecs = random_vecs.permute(0, 3, 1, 2)
+
+    if use_shuffle:
+        use_shuffle_draw = torch.rand((), device=device).item()
+        if use_shuffle_draw > 0.5:
+            psize_factor = int(torch.randint(0, 4, (1,), device=device).item())  # 0..3 => 1,2,4,8
+            random_vecs = shuffle_patches(embeddings, 2**psize_factor)
 
     mask_exp = mask.expand_as(embeddings)
     return mask_exp * random_vecs + (1 - mask_exp) * embeddings
