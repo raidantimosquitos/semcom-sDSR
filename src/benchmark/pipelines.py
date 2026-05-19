@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import torchaudio
 
 from src.benchmark.timing import PipelineResult, StageTimer, sync_device
-from src.comm.bitflip_ber import BerCurve, bitflip_bytes, load_ber_curve_csv
+from src.comm.bitflip_ber import BERCycle, bitflip_bytes, load_ber_curve_csv
 from src.comm.jpeg_payload import bitflip_jpeg_entropy_payload
 from src.comm.ogg_payload import bitflip_ogg_payload_pages
 from src.data.dataset import MEL_TIME_CROP
@@ -67,7 +67,7 @@ class PipelineConfig:
     seed: int = 0
     use_channel: bool = False
     snr_db: float = 20.0
-    ber_curve: BerCurve | None = None
+    ber_curve: BERCycle | None = None
     jpeg_quality: int = 50
     jpeg_channel_mode: str = "jpeg_entropy"
     jpeg_protect_bytes: int = 8
