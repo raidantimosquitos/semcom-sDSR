@@ -44,6 +44,70 @@ class Footprint:
     flops: float | None
 
 
+class VQVAE_TX_Encoder(torch.nn.Module):
+    """
+    TX-side subset of VQ_VAE_2Layer used by encode_to_indices().
+
+    Includes:
+      - _encoder_fine, _encoder_coarse
+      - _pre_vq_conv_coarse, _vq_coarse
+      - _upscale_coarse (used to condition fine)
+      - _pre_vq_conv_fine, _vq_fine
+
+    Excludes:
+      - _decoder_fine (RX-side)
+    """
+
+    def __init__(self, vq: VQ_VAE_2Layer) -> None:
+        super().__init__()
+        self._encoder_fine = vq._encoder_fine
+        self._encoder_coarse = vq._encoder_coarse
+        self._pre_vq_conv_coarse = vq._pre_vq_conv_coarse
+        self._vq_coarse = vq._vq_coarse
+        self._upscale_coarse = vq._upscale_coarse
+        self._pre_vq_conv_fine = vq._pre_vq_conv_fine
+        self._vq_fine = vq._vq_fine
+
+    def encode_to_indices(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Same computation as VQ_VAE_2Layer.encode_to_indices, but using subset modules.
+        f_fine = self._encoder_fine(x)
+        f_coarse = self._encoder_coarse(f_fine)
+        z_coarse = self._pre_vq_conv_coarse(f_coarse)
+        idx_coarse_flat = self._vq_coarse.get_indices(z_coarse)
+        _, quantized_coarse, _, _ = self._vq_coarse(z_coarse)
+        quantized_coarse_up = self._upscale_coarse(quantized_coarse)
+        feat_fine = torch.cat([f_fine, quantized_coarse_up], dim=1)
+        z_fine = self._pre_vq_conv_fine(feat_fine)
+        idx_fine_flat = self._vq_fine.get_indices(z_fine)
+        B, _, H_coarse, W_coarse = z_coarse.shape
+        _, _, H_fine, W_fine = z_fine.shape
+        indices_coarse = idx_coarse_flat.view(B, H_coarse, W_coarse)
+        indices_fine = idx_fine_flat.view(B, H_fine, W_fine)
+        return indices_coarse, indices_fine
+
+
+class VQVAE_RX_GeneralDecoder(torch.nn.Module):
+    """
+    RX-side subset of VQ_VAE_2Layer used by decode_general().
+
+    Includes:
+      - _upscale_coarse, _decoder_fine
+
+    Excludes:
+      - encoders, quantizers
+    """
+
+    def __init__(self, vq: VQ_VAE_2Layer) -> None:
+        super().__init__()
+        self._upscale_coarse = vq._upscale_coarse
+        self._decoder_fine = vq._decoder_fine
+
+    def decode_general(self, q_fine: torch.Tensor, q_coarse: torch.Tensor) -> torch.Tensor:
+        quantized_coarse_up = self._upscale_coarse(q_coarse)
+        quant_joined = torch.cat([quantized_coarse_up, q_fine], dim=1)
+        return self._decoder_fine(quant_joined)
+
+
 def _num_params(m: torch.nn.Module) -> tuple[int, int]:
     total = sum(p.numel() for p in m.parameters())
     trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
@@ -219,15 +283,17 @@ def main() -> None:
     B = int(args.batch)
     x = torch.randn(B, 1, n_mels, target_T, device=device)
 
-    # -------- TX: encode_to_indices (includes quantization + index extraction)
+    # -------- TX: encoder-only (encode_to_indices)
+    vq_tx = VQVAE_TX_Encoder(vq_vae).to(device).eval()
+
     def tx_fn():
         with torch.inference_mode():
-            _ = vq_vae.encode_to_indices(x)
+            _ = vq_tx.encode_to_indices(x)
 
     profile_module(
-        "TX encoder (VQ_VAE_2Layer.encode_to_indices)",
-        vq_vae,
-        vq_vae.state_dict(),
+        "TX encoder-only (VQ encoders + quantizers -> indices)",
+        vq_tx,
+        vq_tx.state_dict(),
         tx_fn,
         device=device,
         warmup=args.warmup,
@@ -239,15 +305,17 @@ def main() -> None:
         idx_c, idx_f = vq_vae.encode_to_indices(x)
         q_fine, q_coarse = vq_vae.indices_to_quantized(idx_c, idx_f)
 
-    # -------- RX: general decoder
+    # -------- RX: general decoder-only
+    vq_rx_gen = VQVAE_RX_GeneralDecoder(vq_vae).to(device).eval()
+
     def rx_general_fn():
         with torch.inference_mode():
-            _ = vq_vae.decode_general(q_fine, q_coarse)
+            _ = vq_rx_gen.decode_general(q_fine, q_coarse)
 
     profile_module(
-        "RX general decoder (VQ_VAE_2Layer.decode_general)",
-        vq_vae,
-        vq_vae.state_dict(),
+        "RX general decoder-only (upscale + DecoderFine)",
+        vq_rx_gen,
+        vq_rx_gen.state_dict(),
         rx_general_fn,
         device=device,
         warmup=args.warmup,
