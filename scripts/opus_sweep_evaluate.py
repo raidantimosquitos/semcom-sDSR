@@ -3,11 +3,11 @@
 OPUS sweep evaluation on DCASE2020 Task 2 (single machine_type).
 
 For each bitrate in kbps (default: 8,12,16,24,32), this script:
-  1) takes each test .wav clip
-  2) OPUS-encodes it at the target bitrate (via ffmpeg + libopus)
-  3) decodes back to PCM wav
-  4) computes the standardized log-mel spectrogram (same shape as training)
-  5) runs the normal sDSR evaluation pipeline (AUC / pAUC)
+  1) measures Ogg Opus payload size (mean/median bits) over the test set
+  2) OPUS-encodes each clip at the target bitrate (ffmpeg libopus, CBR: -vbr off)
+  3) decodes back to PCM wav, computes log-mel, runs sDSR evaluation (AUC / pAUC)
+
+CSV columns: bitrate_kbps, machine_type, avg_AUC, avg_pAUC, opus_mean_bits, opus_median_bits
 
 Usage:
   python3 scripts/opus_sweep_evaluate.py --stage1_ckpt ... --stage2_ckpt ... \\
@@ -22,20 +22,22 @@ from __future__ import annotations
 
 import argparse
 import csv
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any, Callable, Tuple
 
+import numpy as np
 import torch
-import torchaudio
 import torchaudio.functional as AF
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from src.data.dataset import DCASE2020Task2LogMelDataset, DCASE2020Task2TestDataset, MEL_TIME_CROP
 from src.utils.audio import mel_db_to_finite
+from src.utils.opus_ffmpeg import (
+    opus_decode_bytes_to_wav,
+    opus_encode_wav_path_to_bytes,
+    resolve_ffmpeg_bin,
+)
 from src.engine.evaluator import AnomalyEvaluator
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
@@ -53,74 +55,39 @@ def _parse_bitrates(brs: list[int] | None) -> list[int]:
     return out
 
 
-def _ensure_ffmpeg() -> str:
-    ff = shutil.which("ffmpeg")
-    if not ff:
-        raise RuntimeError("ffmpeg not found on PATH. Install ffmpeg (with libopus) to use this script.")
-    return ff
-
-
 def opus_roundtrip_wav(
     wav_path: str,
     bitrate_kbps: int,
     ffmpeg: str,
 ) -> tuple[torch.Tensor, int]:
+    """OPUS encode/decode a wav file (CBR via -vbr off when supported), returning (waveform, sr)."""
+    opus_blob = opus_encode_wav_path_to_bytes(wav_path, bitrate_kbps, ffmpeg=ffmpeg)
+    return opus_decode_bytes_to_wav(opus_blob, ffmpeg=ffmpeg)
+
+
+def _opus_encoded_size_stats_bits(
+    test_ds: DCASE2020Task2TestDataset,
+    *,
+    bitrate_kbps: int,
+    ffmpeg: str,
+) -> tuple[float, float, float, float]:
     """
-    OPUS encode/decode a wav file using ffmpeg, returning (waveform, sample_rate).
+    Measure Ogg Opus payload size over the test set (encode only, same settings as evaluation).
+
+    Returns (mean_bytes, median_bytes, mean_bits, median_bits).
     """
-    with tempfile.TemporaryDirectory() as td:
-        td_path = Path(td)
-        opus_path = td_path / "clip.ogg"
-        dec_path = td_path / "clip_dec.wav"
+    sizes: list[int] = []
+    for idx in range(len(test_ds)):
+        wav_path, _label, _mid = test_ds.samples[idx]
+        blob = opus_encode_wav_path_to_bytes(str(wav_path), bitrate_kbps, ffmpeg=ffmpeg)
+        sizes.append(len(blob))
 
-        # Encode: PCM wav -> Ogg Opus
-        enc_cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(wav_path),
-            "-c:a",
-            "libopus",
-            "-b:a",
-            f"{int(bitrate_kbps)}k",
-            "-vbr",
-            "off",
-            "-application",
-            "audio",
-            str(opus_path),
-        ]
-        try:
-            subprocess.run(enc_cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            stderr = (e.stderr or "").strip()
-            # Some ffmpeg builds do not support `-vbr` as an option at all (even for libopus).
-            # In that case, fall back to bitrate-only encoding (often VBR) rather than failing.
-            if "Unrecognized option 'vbr'" in stderr or "Option not found" in stderr:
-                enc_cmd_fallback = [x for x in enc_cmd if x not in ("-vbr", "off")]
-                subprocess.run(enc_cmd_fallback, check=True, capture_output=True, text=True)
-            else:
-                raise
-
-        # Decode: Ogg Opus -> PCM wav
-        dec_cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(opus_path),
-            "-acodec",
-            "pcm_s16le",
-            str(dec_path),
-        ]
-        subprocess.run(dec_cmd, check=True, capture_output=True, text=True)
-
-        wav, sr = torchaudio.load(str(dec_path))
-        return wav, int(sr)
+    if not sizes:
+        return 0.0, 0.0, 0.0, 0.0
+    sizes_np = np.asarray(sizes, dtype=np.float64)
+    mean_b = float(sizes_np.mean())
+    med_b = float(np.median(sizes_np))
+    return mean_b, med_b, mean_b * 8.0, med_b * 8.0
 
 
 class OpusTestSpectrogramDataset(Dataset):
@@ -255,7 +222,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
-    ffmpeg = _ensure_ffmpeg()
+    ffmpeg = resolve_ffmpeg_bin()
 
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
     train_ds = DCASE2020Task2LogMelDataset(
@@ -317,8 +284,18 @@ def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     brs = _parse_bitrates(args.bitrates)
     tee(f"OPUS bitrate sweep (kbps): {brs}")
 
-    rows: list[tuple[int, str, float, float]] = []
+    rows: list[tuple[int, str, float, float, float, float]] = []
     for br in brs:
+        mean_B, med_B, mean_b, med_b = _opus_encoded_size_stats_bits(
+            test_ds,
+            bitrate_kbps=br,
+            ffmpeg=ffmpeg,
+        )
+        tee(
+            f"{br:>2d} kbps: OPUS size mean={mean_B:.1f} B ({mean_b:.0f} b) "
+            f"median={med_B:.1f} B ({med_b:.0f} b)"
+        )
+
         opus_test = OpusTestSpectrogramDataset(
             test_ds,
             bitrate_kbps=br,
@@ -339,7 +316,7 @@ def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
         auc = float(avg.get("auc", float("nan")))
         pauc = float(avg.get("pauc", float("nan")))
         tee(f"{br:>2d} kbps: average AUC={auc:.4f} pAUC={pauc:.4f}")
-        rows.append((br, opus_test.machine_type, auc, pauc))
+        rows.append((br, opus_test.machine_type, auc, pauc, mean_b, med_b))
 
     if args.output:
         out_path = Path(args.output)
@@ -348,9 +325,18 @@ def _run(args: argparse.Namespace, tee: Callable[[str], None]) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["bitrate_kbps", "machine_type", "avg_AUC", "avg_pAUC"])
+        w.writerow(
+            [
+                "bitrate_kbps",
+                "machine_type",
+                "avg_AUC",
+                "avg_pAUC",
+                "opus_mean_bits",
+                "opus_median_bits",
+            ]
+        )
         for r in rows:
-            w.writerow([r[0], r[1], f"{r[2]:.6f}", f"{r[3]:.6f}"])
+            w.writerow([r[0], r[1], f"{r[2]:.6f}", f"{r[3]:.6f}", f"{r[4]:.1f}", f"{r[5]:.1f}"])
     tee(f"Saved sweep CSV to {out_path}")
 
 

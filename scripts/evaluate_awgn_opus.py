@@ -19,10 +19,6 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
-import os
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +39,11 @@ from src.models.sDSR.s_dsr import sDSR, sDSRConfig
 
 from src.comm.bitflip_ber import load_ber_curve_csv, bitflip_bytes
 from src.comm.ogg_payload import bitflip_ogg_payload_pages
+from src.utils.opus_ffmpeg import (
+    opus_decode_bytes_to_wav,
+    opus_encode_tensor_to_bytes,
+    resolve_ffmpeg_bin as _resolve_ffmpeg_bin,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,69 +82,17 @@ def build_s_dsr(n_mels: int, T: int, vq_vae: VQ_VAE_2Layer, embedding_dim: tuple
 
 
 def resolve_ffmpeg_bin(ffmpeg_bin_arg: str | None) -> str:
-    if ffmpeg_bin_arg:
-        return str(ffmpeg_bin_arg)
-    env_bin = os.environ.get("FFMPEG_BIN")
-    if env_bin:
-        return env_bin
-    if Path("/usr/bin/ffmpeg").exists():
-        return "/usr/bin/ffmpeg"
-    path_bin = shutil.which("ffmpeg")
-    if path_bin:
-        return path_bin
-    raise FileNotFoundError("ffmpeg not found. Set --ffmpeg_bin or FFMPEG_BIN.")
+    return _resolve_ffmpeg_bin(ffmpeg_bin_arg)
 
 
 def opus_encode_bytes_ffmpeg(wav: torch.Tensor, sr: int, kbps: int, *, ffmpeg_bin: str) -> bytes:
-    """Encode wav -> Ogg Opus bytes using ffmpeg."""
-    if wav.dim() == 1:
-        wav = wav.unsqueeze(0)
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        in_wav = td / "in.wav"
-        out_opus = td / "out.ogg"
-        torchaudio.save(str(in_wav), wav.cpu(), sample_rate=sr)
-        enc = subprocess.run(
-            [
-                ffmpeg_bin,
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                str(in_wav),
-                "-c:a",
-                "libopus",
-                "-b:a",
-                f"{int(kbps)}k",
-                str(out_opus),
-            ],
-            capture_output=True,
-        )
-        if enc.returncode != 0:
-            raise RuntimeError(
-                f"ffmpeg opus encode failed: {enc.stderr.decode(errors='ignore')}"
-            )
-        return out_opus.read_bytes()
+    """Encode wav -> Ogg Opus bytes (CBR via -vbr off when ffmpeg supports it)."""
+    return opus_encode_tensor_to_bytes(wav, sr, kbps, ffmpeg=ffmpeg_bin)
 
 
 def opus_decode_bytes_ffmpeg(opus_bytes: bytes, *, ffmpeg_bin: str) -> tuple[torch.Tensor, int]:
     """Decode Ogg Opus bytes -> wav, sr using ffmpeg."""
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        in_opus = td / "in.ogg"
-        out_wav = td / "out.wav"
-        in_opus.write_bytes(opus_bytes)
-        dec = subprocess.run(
-            [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", str(in_opus), str(out_wav)],
-            capture_output=True,
-        )
-        if dec.returncode != 0:
-            raise RuntimeError(
-                f"ffmpeg opus decode failed: {dec.stderr.decode(errors='ignore')}"
-            )
-        wav_d, sr_d = torchaudio.load(str(out_wav))
-        return wav_d, int(sr_d)
+    return opus_decode_bytes_to_wav(opus_bytes, ffmpeg=ffmpeg_bin)
 
 def _opus_cache_path(cache_dir: Path, wav_path: str, kbps: int) -> Path:
     h = hashlib.sha1(f"{kbps}|{wav_path}".encode("utf-8", errors="ignore")).hexdigest()

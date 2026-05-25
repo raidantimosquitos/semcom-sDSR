@@ -18,20 +18,28 @@ Example:
   python3 -m scripts.profile_footprint \
     --stage1_ckpt checkpoints/stage1/fan/best.pt \
     --stage2_ckpt checkpoints/stage2/fan/best.pt \
-    --device cuda --batch 1
+    --device cuda \
+    --wav dataset/.../fan/test/normal_id_00_00000000.wav
+
+TX encoder is always profiled on CPU at batch size 1 (edge). RX modules use --device and --batch.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
+import torchaudio
 
+from src.benchmark.pipelines import load_wav, wav_to_mel
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
+from src.utils.audio import amplitude_to_db_power, make_mel_spectrogram
 
 
 @dataclass
@@ -191,6 +199,112 @@ def _measure_flops_with_profiler(fn, *, device: torch.device) -> float | None:
         return None
 
 
+def _resolve_wav_for_mel(
+    wav_arg: str | None,
+    *,
+    sample_rate: int,
+    clip_seconds: float,
+) -> tuple[Path, bool]:
+    """
+    Return (wav_path, is_temporary).
+
+    If ``wav_arg`` is set, use that file. Otherwise create a temporary mono WAV
+    of length ``clip_seconds`` for reproducible load+I/O timing.
+    """
+    if wav_arg:
+        path = Path(wav_arg).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"WAV not found: {path}")
+        return path, False
+
+    n_samples = int(round(sample_rate * clip_seconds))
+    wav = torch.zeros(1, n_samples)
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    torchaudio.save(str(tmp_path), wav, sample_rate)
+    return tmp_path, True
+
+
+def profile_mel_frontend(
+    *,
+    wav_path: Path,
+    target_T: int,
+    sample_rate: int,
+    warmup: int,
+    repeats: int,
+) -> tuple[Footprint, Footprint, Footprint]:
+    """
+    Profile edge mel pipeline on CPU: load wav, mel+db+crop/pad, end-to-end.
+
+    Returns (load_wav, mel_compute, load_plus_mel).
+    """
+    device = torch.device("cpu")
+    mel_transform = make_mel_spectrogram(sample_rate=sample_rate)
+    to_db = amplitude_to_db_power()
+
+    wav_holder: list[torch.Tensor] = []
+
+    def _load() -> None:
+        wav, _sr = load_wav(wav_path, sample_rate=sample_rate)
+        wav_holder.clear()
+        wav_holder.append(wav)
+
+    def _mel_from_holder() -> None:
+        if not wav_holder:
+            _load()
+        _ = wav_to_mel(
+            wav_holder[0],
+            target_T=target_T,
+            mel_transform=mel_transform,
+            to_db=to_db,
+        )
+
+    def _e2e() -> None:
+        wav, _sr = load_wav(wav_path, sample_rate=sample_rate)
+        _ = wav_to_mel(
+            wav,
+            target_T=target_T,
+            mel_transform=mel_transform,
+            to_db=to_db,
+        )
+
+    print("\n=== TX edge frontend (CPU): WAV -> log-mel ===")
+    print(f"  wav_path         : {wav_path}")
+    print(f"  sample_rate      : {sample_rate} Hz")
+    print(f"  target_T (mel)   : {target_T}")
+
+    load_fp = profile_runtime_only(
+        "TX load WAV (mono, resample to 16 kHz if needed)",
+        _load,
+        device=device,
+        warmup=warmup,
+        repeats=repeats,
+    )
+    # Prime wav_holder once before mel-only timings.
+    _load()
+    mel_fp = profile_runtime_only(
+        "TX log-mel (MelSpectrogram + dB + crop/pad)",
+        _mel_from_holder,
+        device=device,
+        warmup=warmup,
+        repeats=repeats,
+    )
+    e2e_fp = profile_runtime_only(
+        "TX load WAV + log-mel (end-to-end frontend)",
+        _e2e,
+        device=device,
+        warmup=warmup,
+        repeats=repeats,
+    )
+    print(
+        f"\n  TX frontend sum (load + mel, approximate): "
+        f"{load_fp.latency_ms + mel_fp.latency_ms:.3f} ms "
+        f"(e2e measured: {e2e_fp.latency_ms:.3f} ms)"
+    )
+    return load_fp, mel_fp, e2e_fp
+
+
 def build_models(args: argparse.Namespace, device: torch.device) -> tuple[sDSR, VQ_VAE_2Layer, int, int]:
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
     n_mels = int(stage1_ckpt["n_mels"])
@@ -221,6 +335,37 @@ def build_models(args: argparse.Namespace, device: torch.device) -> tuple[sDSR, 
     return model, vq_vae, n_mels, target_T
 
 
+def profile_runtime_only(
+    name: str,
+    fn,
+    *,
+    device: torch.device,
+    warmup: int,
+    repeats: int,
+) -> Footprint:
+    """Latency/FLOPs only (no params / state_dict), e.g. mel frontend or load I/O."""
+    peak = _measure_peak_cuda_mb(fn, device=device)
+    lat = _measure_latency(fn, device=device, warmup=warmup, repeats=repeats)
+    flops = _measure_flops_with_profiler(fn, device=device)
+    print(f"\n[{name}]")
+    print(f"  device           : {device}")
+    if peak is not None:
+        print(f"  peak_cuda_mem    : {peak:.2f} MB")
+    print(f"  latency          : {lat:.3f} ms (avg over {repeats}, warmup {warmup})")
+    if flops is not None:
+        print(f"  flops            : {flops:.3e}")
+    else:
+        print("  flops            : (not available in this torch build)")
+    return Footprint(
+        params_total=0,
+        params_trainable=0,
+        state_dict_mb=0.0,
+        peak_cuda_mb=peak,
+        latency_ms=lat,
+        flops=flops,
+    )
+
+
 def profile_module(
     name: str,
     module: torch.nn.Module,
@@ -237,6 +382,7 @@ def profile_module(
     lat = _measure_latency(fn, device=device, warmup=warmup, repeats=repeats)
     flops = _measure_flops_with_profiler(fn, device=device)
     print(f"\n[{name}]")
+    print(f"  device           : {device}")
     print(f"  params_total     : {p_total:,}")
     print(f"  params_trainable : {p_train:,}")
     print(f"  state_dict_size  : {sd_mb:.2f} MB")
@@ -261,10 +407,33 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Profile computational footprint for sDSR TX/RX splits.")
     p.add_argument("--stage1_ckpt", type=str, required=True)
     p.add_argument("--stage2_ckpt", type=str, required=True)
-    p.add_argument("--device", type=str, default="cuda")
-    p.add_argument("--batch", type=int, default=1)
+    p.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        help="Device for RX modules (general/object/detector). TX encoder always uses CPU.",
+    )
+    p.add_argument("--batch", type=int, default=1, help="Batch size for RX profiling only.")
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--repeats", type=int, default=50)
+    p.add_argument(
+        "--wav",
+        type=str,
+        default=None,
+        help="Example 10 s mono WAV for mel frontend timing. If omitted, a synthetic 10 s clip is created.",
+    )
+    p.add_argument("--sample_rate", type=int, default=16_000)
+    p.add_argument(
+        "--clip_seconds",
+        type=float,
+        default=10.0,
+        help="Length of synthetic WAV when --wav is not set.",
+    )
+    p.add_argument(
+        "--skip_mel",
+        action="store_true",
+        help="Skip WAV load + log-mel frontend profiling.",
+    )
     p.add_argument(
         "--include_detector",
         action="store_true",
@@ -275,35 +444,65 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    rx_device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    tx_device = torch.device("cpu")
+    print(f"RX device: {rx_device}")
+    print(f"TX device: {tx_device} (encoder batch size fixed to 1)")
 
-    model, vq_vae, n_mels, target_T = build_models(args, device)
+    model, vq_vae, n_mels, target_T = build_models(args, rx_device)
 
-    B = int(args.batch)
-    x = torch.randn(B, 1, n_mels, target_T, device=device)
+    tmp_wav: Path | None = None
+    if not args.skip_mel:
+        wav_path, is_tmp = _resolve_wav_for_mel(
+            args.wav,
+            sample_rate=int(args.sample_rate),
+            clip_seconds=float(args.clip_seconds),
+        )
+        if is_tmp:
+            tmp_wav = wav_path
+        try:
+            profile_mel_frontend(
+                wav_path=wav_path,
+                target_T=target_T,
+                sample_rate=int(args.sample_rate),
+                warmup=args.warmup,
+                repeats=args.repeats,
+            )
+        finally:
+            if tmp_wav is not None:
+                try:
+                    os.remove(tmp_wav)
+                except OSError:
+                    pass
 
-    # -------- TX: encoder-only (encode_to_indices)
-    vq_tx = VQVAE_TX_Encoder(vq_vae).to(device).eval()
+    # -------- TX: encoder-only on CPU, batch=1 (edge)
+    vq_tx_cpu = VQVAE_TX_Encoder(vq_vae.cpu()).eval()
+    x_tx = torch.randn(1, 1, n_mels, target_T, device=tx_device)
 
-    def tx_fn():
+    def tx_fn_cpu():
         with torch.inference_mode():
-            _ = vq_tx.encode_to_indices(x)
+            _ = vq_tx_cpu.encode_to_indices(x_tx)
 
-    profile_module(
+    print("\n=== TX edge semantic encoder (CPU, batch=1) ===")
+    tx_fp = profile_module(
         "TX encoder-only (VQ encoders + quantizers -> indices)",
-        vq_tx,
-        vq_tx.state_dict(),
-        tx_fn,
-        device=device,
+        vq_tx_cpu,
+        vq_tx_cpu.state_dict(),
+        tx_fn_cpu,
+        device=tx_device,
         warmup=args.warmup,
         repeats=args.repeats,
     )
 
+    B = int(args.batch)
+    x_rx = torch.randn(B, 1, n_mels, target_T, device=rx_device)
+
     # Prepare rx inputs (indices + quantized tensors).
     with torch.inference_mode():
-        idx_c, idx_f = vq_vae.encode_to_indices(x)
+        idx_c, idx_f = vq_vae.encode_to_indices(x_rx)
         q_fine, q_coarse = vq_vae.indices_to_quantized(idx_c, idx_f)
+
+    print(f"\n=== RX modules ({rx_device}, batch={B}) ===")
 
     # -------- RX: general decoder-only
     vq_rx_gen = VQVAE_RX_GeneralDecoder(vq_vae).to(device).eval()
@@ -317,7 +516,7 @@ def main() -> None:
         vq_rx_gen,
         vq_rx_gen.state_dict(),
         rx_general_fn,
-        device=device,
+        device=rx_device,
         warmup=args.warmup,
         repeats=args.repeats,
     )
@@ -334,7 +533,7 @@ def main() -> None:
         obj_dec,
         obj_dec.state_dict(),
         rx_object_fn,
-        device=device,
+        device=rx_device,
         warmup=args.warmup,
         repeats=args.repeats,
     )
@@ -354,9 +553,16 @@ def main() -> None:
             det,
             det.state_dict(),
             rx_det_fn,
-            device=device,
+            device=rx_device,
             warmup=args.warmup,
             repeats=args.repeats,
+        )
+
+    if not args.skip_mel:
+        print(
+            "\n=== TX edge inference budget (CPU, batch=1, approximate) ===\n"
+            f"  Use load+mel e2e + encoder latency from sections above "
+            f"(encoder: {tx_fp.latency_ms:.3f} ms)."
         )
 
 
