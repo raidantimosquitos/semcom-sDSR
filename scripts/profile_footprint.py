@@ -305,7 +305,8 @@ def profile_mel_frontend(
     return load_fp, mel_fp, e2e_fp
 
 
-def build_models(args: argparse.Namespace, device: torch.device) -> tuple[sDSR, VQ_VAE_2Layer, int, int]:
+def build_models(args: argparse.Namespace) -> tuple[sDSR, VQ_VAE_2Layer, int, int]:
+    """Load checkpoints on CPU; caller moves modules to RX device after TX profiling."""
     stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
     n_mels = int(stage1_ckpt["n_mels"])
     target_T = int(stage1_ckpt["target_T"])
@@ -319,7 +320,7 @@ def build_models(args: argparse.Namespace, device: torch.device) -> tuple[sDSR, 
         decay=0.99,
     )
     vq_vae.load_state_dict(dict(stage1_ckpt["model_state_dict"]))
-    vq_vae = vq_vae.to(device).eval()
+    vq_vae.eval()
 
     cfg = sDSRConfig(
         embedding_dim=(stage1_ckpt["embedding_dim_coarse"], stage1_ckpt["embedding_dim_fine"]),
@@ -331,7 +332,7 @@ def build_models(args: argparse.Namespace, device: torch.device) -> tuple[sDSR, 
     model = sDSR(vq_vae, cfg)
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     model.load_state_dict(dict(stage2["model_state_dict"]))
-    model = model.to(device).eval()
+    model.eval()
     return model, vq_vae, n_mels, target_T
 
 
@@ -449,7 +450,7 @@ def main() -> None:
     print(f"RX device: {rx_device}")
     print(f"TX device: {tx_device} (encoder batch size fixed to 1)")
 
-    model, vq_vae, n_mels, target_T = build_models(args, rx_device)
+    model, vq_vae, n_mels, target_T = build_models(args)
 
     tmp_wav: Path | None = None
     if not args.skip_mel:
@@ -475,24 +476,30 @@ def main() -> None:
                 except OSError:
                     pass
 
-    # -------- TX: encoder-only on CPU, batch=1 (edge)
-    vq_tx_cpu = VQVAE_TX_Encoder(vq_vae.cpu()).eval()
+    # -------- TX: encoder-only on CPU, batch=1 (edge) — before moving weights to RX device
+    assert tx_device.type == "cpu"
+    vq_tx = VQVAE_TX_Encoder(vq_vae).eval()
     x_tx = torch.randn(1, 1, n_mels, target_T, device=tx_device)
 
     def tx_fn_cpu():
         with torch.inference_mode():
-            _ = vq_tx_cpu.encode_to_indices(x_tx)
+            _ = vq_tx.encode_to_indices(x_tx)
 
     print("\n=== TX edge semantic encoder (CPU, batch=1) ===")
     tx_fp = profile_module(
         "TX encoder-only (VQ encoders + quantizers -> indices)",
-        vq_tx_cpu,
-        vq_tx_cpu.state_dict(),
+        vq_tx,
+        vq_tx.state_dict(),
         tx_fn_cpu,
         device=tx_device,
         warmup=args.warmup,
         repeats=args.repeats,
     )
+
+    # Move shared VQ-VAE + sDSR to RX device for receiver profiling.
+    if rx_device.type != "cpu":
+        vq_vae = vq_vae.to(rx_device)
+        model = model.to(rx_device)
 
     B = int(args.batch)
     x_rx = torch.randn(B, 1, n_mels, target_T, device=rx_device)
@@ -505,7 +512,7 @@ def main() -> None:
     print(f"\n=== RX modules ({rx_device}, batch={B}) ===")
 
     # -------- RX: general decoder-only
-    vq_rx_gen = VQVAE_RX_GeneralDecoder(vq_vae).to(device).eval()
+    vq_rx_gen = VQVAE_RX_GeneralDecoder(vq_vae).eval()
 
     def rx_general_fn():
         with torch.inference_mode():
