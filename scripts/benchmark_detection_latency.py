@@ -24,7 +24,7 @@ from pathlib import Path
 
 import torch
 
-from src.benchmark.pipelines import load_wav_and_mel, make_pipeline_config, run_pipeline
+from src.benchmark.pipelines import make_pipeline_config, run_pipeline
 from src.benchmark.timing import StageTimes, aggregate_times, sync_device
 from src.models.sDSR.s_dsr import sDSR, sDSRConfig
 from src.models.vq_vae.autoencoders import VQ_VAE_2Layer
@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--repeats", type=int, default=1)
     p.add_argument("--device", type=str, default="cuda")
+    p.add_argument(
+        "--tx_device",
+        type=str,
+        default="cpu",
+        help="TX semantic encoder device (affects latent/VQ encoder). Default: cpu.",
+    )
     p.add_argument("--jpeg_quality", type=int, default=70)
     p.add_argument("--opus_kbps", type=int, default=64)
     p.add_argument("--ffmpeg_bin", type=str, default=None)
@@ -104,11 +110,7 @@ def resolve_wav_paths(args: argparse.Namespace) -> list[Path]:
     return [wavs[0].resolve()]
 
 
-def load_models(args: argparse.Namespace, device: torch.device) -> tuple[sDSR, VQ_VAE_2Layer, int, int]:
-    stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
-    n_mels = int(stage1_ckpt["n_mels"])
-    target_T = int(stage1_ckpt["target_T"])
-
+def _build_vq_vae_from_stage1(stage1_ckpt: dict) -> VQ_VAE_2Layer:
     vq_vae = VQ_VAE_2Layer(
         hidden_channels=(stage1_ckpt["hidden_channels_coarse"], stage1_ckpt["hidden_channels_fine"]),
         num_residual_layers=stage1_ckpt["num_residual_layers"],
@@ -118,20 +120,34 @@ def load_models(args: argparse.Namespace, device: torch.device) -> tuple[sDSR, V
         decay=0.99,
     )
     vq_vae.load_state_dict(dict(stage1_ckpt["model_state_dict"]))
+    return vq_vae
+
+
+def load_models(
+    args: argparse.Namespace, rx_device: torch.device, tx_device: torch.device
+) -> tuple[sDSR, VQ_VAE_2Layer, VQ_VAE_2Layer, int, int]:
+    stage1_ckpt = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=True)
+    n_mels = int(stage1_ckpt["n_mels"])
+    target_T = int(stage1_ckpt["target_T"])
+
+    vq_vae_rx = _build_vq_vae_from_stage1(stage1_ckpt).to(rx_device).eval()
+    if tx_device == rx_device:
+        vq_vae_tx = vq_vae_rx
+    else:
+        vq_vae_tx = _build_vq_vae_from_stage1(stage1_ckpt).to(tx_device).eval()
 
     model = build_s_dsr(
         n_mels,
         target_T,
-        vq_vae=vq_vae,
+        vq_vae=vq_vae_rx,
         embedding_dim=(stage1_ckpt["embedding_dim_coarse"], stage1_ckpt["embedding_dim_fine"]),
         hidden_channels=(stage1_ckpt["hidden_channels_coarse"], stage1_ckpt["hidden_channels_fine"]),
         num_residual_layers=stage1_ckpt["num_residual_layers"],
     )
     stage2 = torch.load(args.stage2_ckpt, map_location="cpu", weights_only=True)
     model.load_state_dict(dict(stage2["model_state_dict"]))
-    model = model.to(device).eval()
-    vq_vae = vq_vae.to(device).eval()
-    return model, vq_vae, n_mels, target_T
+    model = model.to(rx_device).eval()
+    return model, vq_vae_tx, vq_vae_rx, n_mels, target_T
 
 
 def row_from_result(
@@ -168,7 +184,8 @@ def row_from_result(
 
 def main() -> None:
     args = parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    rx_device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    tx_device = torch.device(args.tx_device if (args.tx_device != "cuda" or torch.cuda.is_available()) else "cpu")
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     for m in methods:
         if m not in ("latent", "jpeg", "opus"):
@@ -178,7 +195,7 @@ def main() -> None:
         raise ValueError("--use_channel requires --ber_curve")
 
     wav_paths = resolve_wav_paths(args)
-    model, vq_vae, n_mels, target_T = load_models(args, device)
+    model, vq_vae_tx, vq_vae_rx, n_mels, target_T = load_models(args, rx_device, tx_device)
 
     if "opus" in methods:
         resolve_ffmpeg_bin(args.ffmpeg_bin)
@@ -219,17 +236,10 @@ def main() -> None:
 
     for method in methods:
         for wav_path in wav_paths:
-            preloaded = load_wav_and_mel(
-                wav_path,
-                sample_rate=16_000,
-                target_T=target_T,
-                mel_transform=mel_transform,
-                to_db=to_db,
-            )
-
             for _ in range(args.warmup):
                 cfg = make_pipeline_config(
-                    device=device,
+                    tx_device=tx_device,
+                    device=rx_device,
                     n_mels=n_mels,
                     target_T=target_T,
                     seed=0,
@@ -251,18 +261,19 @@ def main() -> None:
                     method,
                     wav_path,
                     model=model,
-                    vq_vae=vq_vae,
+                    vq_vae_tx=vq_vae_tx,
+                    vq_vae_rx=vq_vae_rx,
                     cfg=cfg,
                     mel_transform=mel_transform,
                     to_db=to_db,
-                    preloaded=preloaded,
                 )
-                sync_device(device)
+                sync_device(rx_device)
 
             for seed in args.seeds:
                 for rep in range(args.repeats):
                     cfg = make_pipeline_config(
-                        device=device,
+                        tx_device=tx_device,
+                        device=rx_device,
                         n_mels=n_mels,
                         target_T=target_T,
                         seed=seed,
@@ -284,13 +295,13 @@ def main() -> None:
                         method,
                         wav_path,
                         model=model,
-                        vq_vae=vq_vae,
+                        vq_vae_tx=vq_vae_tx,
+                        vq_vae_rx=vq_vae_rx,
                         cfg=cfg,
                         mel_transform=mel_transform,
                         to_db=to_db,
-                        preloaded=preloaded,
                     )
-                    sync_device(device)
+                    sync_device(rx_device)
 
                     row = row_from_result(
                         method=method,
@@ -322,7 +333,8 @@ def main() -> None:
         w.writerows(all_rows)
 
     summary: dict = {
-        "device": str(device),
+        "rx_device": str(rx_device),
+        "tx_device": str(tx_device),
         "n_wavs": len(wav_paths),
         "methods": methods,
         "warmup": args.warmup,

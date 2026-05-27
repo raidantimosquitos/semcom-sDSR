@@ -60,6 +60,7 @@ def _unpack_symbols_fixed_lsb(
 
 @dataclass
 class PipelineConfig:
+    tx_device: torch.device
     device: torch.device
     n_mels: int
     target_T: int
@@ -136,14 +137,16 @@ def run_latent_pipeline(
     wav_path: str | Path,
     *,
     model: sDSR,
-    vq_vae: VQ_VAE_2Layer,
+    vq_vae_tx: VQ_VAE_2Layer,
+    vq_vae_rx: VQ_VAE_2Layer,
     cfg: PipelineConfig,
     mel_transform: nn.Module | None = None,
     to_db: nn.Module | None = None,
     preloaded: tuple[torch.Tensor, torch.Tensor, int] | None = None,
 ) -> PipelineResult:
     timer = StageTimer()
-    device = cfg.device
+    tx_device = cfg.tx_device
+    rx_device = cfg.device
 
     mel_transform = mel_transform or make_mel_spectrogram(sample_rate=cfg.sample_rate)
     to_db = to_db or amplitude_to_db_power()
@@ -161,18 +164,18 @@ def run_latent_pipeline(
         mel = wav_to_mel(wav, target_T=cfg.target_T, mel_transform=mel_transform, to_db=to_db)
         timer.stop("t_mel")
 
-    x = mel.unsqueeze(0).to(device)
-    sync_device(device)
+    x_tx = mel.unsqueeze(0).to(tx_device)
+    sync_device(tx_device)
 
-    Kc = int(vq_vae.num_embeddings_coarse)
-    Kf = int(vq_vae.num_embeddings_fine)
+    Kc = int(vq_vae_tx.num_embeddings_coarse)
+    Kf = int(vq_vae_tx.num_embeddings_fine)
     bits_c = int(cfg.bits_coarse) if cfg.bits_coarse is not None else _bits_required(Kc)
     bits_f = int(cfg.bits_fine) if cfg.bits_fine is not None else _bits_required(Kf)
 
     timer.start("t_tx_codec")
     with torch.inference_mode():
-        idx_c_t, idx_f_t = vq_vae.encode_to_indices(x)
-        sync_device(device)
+        idx_c_t, idx_f_t = vq_vae_tx.encode_to_indices(x_tx)
+        sync_device(tx_device)
         idx_c = idx_c_t.detach().cpu().numpy().astype(np.int64).reshape(-1)
         idx_f = idx_f_t.detach().cpu().numpy().astype(np.int64).reshape(-1)
         b_c, nbc = _pack_symbols_fixed_lsb(idx_c, bits_c)
@@ -205,18 +208,18 @@ def run_latent_pipeline(
     dec_f = np.clip(dec_f, 0, Kf - 1)
     Hc, Wc = idx_c_t.shape[1], idx_c_t.shape[2]
     Hf, Wf = idx_f_t.shape[1], idx_f_t.shape[2]
-    rx_idx_c_t = torch.from_numpy(dec_c.reshape(1, Hc, Wc)).long().to(device)
-    rx_idx_f_t = torch.from_numpy(dec_f.reshape(1, Hf, Wf)).long().to(device)
+    rx_idx_c_t = torch.from_numpy(dec_c.reshape(1, Hc, Wc)).long().to(rx_device)
+    rx_idx_f_t = torch.from_numpy(dec_f.reshape(1, Hf, Wf)).long().to(rx_device)
     with torch.inference_mode():
-        q_fine, q_coarse = vq_vae.indices_to_quantized(rx_idx_c_t, rx_idx_f_t)
-    sync_device(device)
+        q_fine, q_coarse = vq_vae_rx.indices_to_quantized(rx_idx_c_t, rx_idx_f_t)
+    sync_device(rx_device)
     timer.stop("t_rx_codec")
 
     timer.start("t_detector")
     with torch.inference_mode():
         out = model.forward_from_quantized(q_fine=q_fine, q_coarse=q_coarse)
         m_out = out[0] if isinstance(out, tuple) else out
-    sync_device(device)
+    sync_device(rx_device)
     timer.stop("t_detector")
 
     timer.start("t_score")
@@ -381,17 +384,18 @@ def run_pipeline(
     wav_path: str | Path,
     *,
     model: sDSR,
-    vq_vae: VQ_VAE_2Layer | None,
+    vq_vae_tx: VQ_VAE_2Layer | None,
+    vq_vae_rx: VQ_VAE_2Layer | None,
     cfg: PipelineConfig,
     mel_transform: nn.Module | None = None,
     to_db: nn.Module | None = None,
     preloaded: tuple[torch.Tensor, torch.Tensor, int] | None = None,
 ) -> PipelineResult:
     if method == "latent":
-        if vq_vae is None:
-            raise ValueError("vq_vae required for latent pipeline")
+        if vq_vae_tx is None or vq_vae_rx is None:
+            raise ValueError("vq_vae_tx and vq_vae_rx required for latent pipeline")
         return run_latent_pipeline(
-            wav_path, model=model, vq_vae=vq_vae, cfg=cfg,
+            wav_path, model=model, vq_vae_tx=vq_vae_tx, vq_vae_rx=vq_vae_rx, cfg=cfg,
             mel_transform=mel_transform, to_db=to_db, preloaded=preloaded,
         )
     if method == "jpeg":
@@ -409,6 +413,7 @@ def run_pipeline(
 
 def make_pipeline_config(
     *,
+    tx_device: torch.device,
     device: torch.device,
     n_mels: int,
     target_T: int,
@@ -429,6 +434,7 @@ def make_pipeline_config(
 ) -> PipelineConfig:
     ber_curve = load_ber_curve_csv(ber_curve_path) if (use_channel and ber_curve_path) else None
     return PipelineConfig(
+        tx_device=tx_device,
         device=device,
         n_mels=n_mels,
         target_T=target_T,
