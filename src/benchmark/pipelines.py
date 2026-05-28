@@ -305,8 +305,15 @@ def run_latent_pipeline(
     timer.stop("t_score")
 
     extra = dict(rx_breakdown)
-    extra["tx_device_is_cuda"] = 1.0 if tx_device.type == "cuda" else 0.0
-    extra["rx_device_is_cuda"] = 1.0 if rx_device.type == "cuda" else 0.0
+    # Definition-aligned keys (seconds):
+    extra["tx_t_load_wav"] = float(timer.times.t_load_wav)
+    extra["tx_t_compute_spectrogram"] = float(timer.times.t_mel)
+    extra["tx_t_to_payload"] = float(timer.times.t_tx_codec)  # encode_to_indices
+    extra["rx_t_decode_to_latents"] = float(timer.times.t_rx_codec)  # unpack + indices_to_quantized
+    extra["rx_t_general_dec"] = float(rx_breakdown.get("t_dec_general", 0.0))
+    extra["rx_t_object_dec"] = float(rx_breakdown.get("t_dec_object", 0.0))
+    extra["rx_t_anom_det"] = float(rx_breakdown.get("t_anom_det", 0.0))
+    extra["rx_t_score"] = float(timer.times.t_score)
     return PipelineResult(
         times=timer.times,
         payload_bytes=payload_bytes,
@@ -375,20 +382,48 @@ def run_jpeg_pipeline(
     x_hat = spec.unsqueeze(0).to(device)
     timer.stop("t_rx_codec")
 
+    # Receiver: match desired chain:
+    # decode_jpeg -> encode_to_indices -> indices_to_quantized -> (general/object/anom) -> score
+    # We implement this as a single t_decode_to_latents bucket and then decoder/anom breakdown.
+    rx_t_decode_to_latents = 0.0
+    with torch.inference_mode():
+        sync_device(device)
+        t0 = time.perf_counter()
+        idx_c, idx_f = model._vq_vae.encode_to_indices(x_hat)  # type: ignore[attr-defined]
+        sync_device(device)
+        rx_t_decode_to_latents += time.perf_counter() - t0
+
+        t1 = time.perf_counter()
+        q_fine, q_coarse = model._vq_vae.indices_to_quantized(idx_c, idx_f)  # type: ignore[attr-defined]
+        sync_device(device)
+        rx_t_decode_to_latents += time.perf_counter() - t1
+
     timer.start("t_detector")
-    m_out, rx_breakdown = _run_sdsr_from_mel_with_breakdown(model, x_hat, device=device)
+    m_out, rx_breakdown = _run_sdsr_from_quantized_with_breakdown(
+        model, q_fine=q_fine, q_coarse=q_coarse, device=device
+    )
     timer.stop("t_detector")
 
     timer.start("t_score")
     score = _anomaly_score(m_out)
     timer.stop("t_score")
 
+    extra = dict(rx_breakdown)
+    extra["tx_t_load_wav"] = float(timer.times.t_load_wav)
+    extra["tx_t_compute_spectrogram"] = float(timer.times.t_mel)
+    extra["tx_t_to_payload"] = float(timer.times.t_tx_codec)  # encode_to_jpeg
+    # decode_jpeg is already in t_rx_codec; add encode_to_indices + indices_to_quantized
+    extra["rx_t_decode_to_latents"] = float(timer.times.t_rx_codec) + float(rx_t_decode_to_latents)
+    extra["rx_t_general_dec"] = float(rx_breakdown.get("t_dec_general", 0.0))
+    extra["rx_t_object_dec"] = float(rx_breakdown.get("t_dec_object", 0.0))
+    extra["rx_t_anom_det"] = float(rx_breakdown.get("t_anom_det", 0.0))
+    extra["rx_t_score"] = float(timer.times.t_score)
     return PipelineResult(
         times=timer.times,
         payload_bytes=payload_bytes,
         decode_ok=decode_ok,
         anomaly_score=score,
-        extra=rx_breakdown,
+        extra=extra,
     )
 
 
@@ -415,6 +450,16 @@ def run_opus_pipeline(
         wav, sr = load_wav(wav_path, sample_rate=cfg.sample_rate)
         timer.stop("t_load_wav")
 
+    # For comparability, we also time a TX spectrogram compute even though OPUS does not need it.
+    t_tx_spec0 = time.perf_counter()
+    _ = wav_to_mel(
+        wav,
+        target_T=cfg.target_T,
+        mel_transform=mel_transform,
+        to_db=to_db,
+    )
+    tx_t_compute_spectrogram = time.perf_counter() - t_tx_spec0
+
     timer.start("t_tx_codec")
     opus_blob = opus_encode_bytes_ffmpeg(wav, sr, kbps=cfg.opus_kbps, ffmpeg_bin=ffmpeg_bin)
     timer.stop("t_tx_codec")
@@ -437,36 +482,72 @@ def run_opus_pipeline(
     timer.stop("t_channel")
 
     decode_ok = True
+    rx_t_decode_to_latents = 0.0
+    rx_t_compute_spectrogram = 0.0
     t_rx0 = time.perf_counter()
     try:
         wav_d, sr_d = opus_decode_bytes_ffmpeg(opus_blob, ffmpeg_bin=ffmpeg_bin)
-        timer.add("t_rx_codec", time.perf_counter() - t_rx0)
+        timer.add("t_rx_codec", time.perf_counter() - t_rx0)  # decode_opus
         t_mel0 = time.perf_counter()
         x_hat = wav_to_logmel(
             wav_d, sr_d, mel_transform, to_db,
             sample_rate=cfg.sample_rate, target_T=cfg.target_T,
         )
-        timer.add("t_mel", time.perf_counter() - t_mel0)
+        rx_t_compute_spectrogram = time.perf_counter() - t_mel0
     except Exception:
         timer.add("t_rx_codec", time.perf_counter() - t_rx0)
         x_hat = torch.zeros((1, cfg.n_mels, cfg.target_T), dtype=torch.float32)
         decode_ok = False
     x_hat = x_hat.unsqueeze(0).to(device)
 
+    if decode_ok:
+        with torch.inference_mode():
+            sync_device(device)
+            t0 = time.perf_counter()
+            idx_c, idx_f = model._vq_vae.encode_to_indices(x_hat)  # type: ignore[attr-defined]
+            sync_device(device)
+            rx_t_decode_to_latents += time.perf_counter() - t0
+
+            t1 = time.perf_counter()
+            q_fine, q_coarse = model._vq_vae.indices_to_quantized(idx_c, idx_f)  # type: ignore[attr-defined]
+            sync_device(device)
+            rx_t_decode_to_latents += time.perf_counter() - t1
+    else:
+        # Silence fallback: still create dummy latents
+        with torch.inference_mode():
+            idx_c, idx_f = model._vq_vae.encode_to_indices(x_hat)  # type: ignore[attr-defined]
+            q_fine, q_coarse = model._vq_vae.indices_to_quantized(idx_c, idx_f)  # type: ignore[attr-defined]
+
     timer.start("t_detector")
-    m_out, rx_breakdown = _run_sdsr_from_mel_with_breakdown(model, x_hat, device=device)
+    m_out, rx_breakdown = _run_sdsr_from_quantized_with_breakdown(
+        model, q_fine=q_fine, q_coarse=q_coarse, device=device
+    )
     timer.stop("t_detector")
 
     timer.start("t_score")
     score = _anomaly_score(m_out)
     timer.stop("t_score")
 
+    extra = dict(rx_breakdown)
+    extra["tx_t_load_wav"] = float(timer.times.t_load_wav)
+    extra["tx_t_compute_spectrogram"] = float(tx_t_compute_spectrogram)
+    extra["tx_t_to_payload"] = float(timer.times.t_tx_codec)  # encode_to_opus
+    # For OPUS, we define decode_to_latents as: decode_opus + rx mel + encode_to_indices + indices_to_quantized
+    # decode_opus is t_rx_codec; rx mel is rx_t_compute_spectrogram.
+    # We store decode_to_latents explicitly as: t_rx_codec + rx_mel + enc_to_indices + indices_to_quantized.
+    # rx_mel is measured via timer.add("t_mel", ...) after decode. TX mel was measured earlier; to keep the CSV
+    # unambiguous, benchmark_detection_latency uses tx_t_compute_spectrogram from its own timing columns.
+    extra["rx_t_decode_to_latents"] = float(timer.times.t_rx_codec) + float(rx_t_compute_spectrogram) + float(rx_t_decode_to_latents)
+    extra["rx_t_general_dec"] = float(rx_breakdown.get("t_dec_general", 0.0))
+    extra["rx_t_object_dec"] = float(rx_breakdown.get("t_dec_object", 0.0))
+    extra["rx_t_anom_det"] = float(rx_breakdown.get("t_anom_det", 0.0))
+    extra["rx_t_score"] = float(timer.times.t_score)
     return PipelineResult(
         times=timer.times,
         payload_bytes=payload_bytes,
         decode_ok=decode_ok,
         anomaly_score=score,
-        extra=rx_breakdown,
+        extra=extra,
     )
 
 

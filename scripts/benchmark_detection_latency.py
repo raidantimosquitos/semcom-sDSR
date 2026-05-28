@@ -160,17 +160,19 @@ def row_from_result(
     use_channel: bool,
     result,
 ) -> dict:
-    ms = result.times.to_ms_dict()
-    # Definition-aligned totals (seconds -> ms):
-    # - For VQ-VAE-2 pipeline: TX includes load+mel+enc_vqvae (t_tx_codec), RX includes rx_codec + detector + score.
-    # - For JPEG pipeline: TX includes load+mel+enc_jpeg (t_tx_codec), RX includes rx_codec + detector + score.
-    # - For OPUS pipeline: TX includes load+enc_opus (t_tx_codec), RX includes rx_codec + mel + detector + score.
-    if method == "opus":
-        tx_total = ms["t_load_wav"] + ms["t_tx_codec"]
-        rx_total = ms["t_rx_codec"] + ms["t_mel"] + ms["t_detector"] + ms["t_score"]
-    else:
-        tx_total = ms["t_load_wav"] + ms["t_mel"] + ms["t_tx_codec"]
-        rx_total = ms["t_rx_codec"] + ms["t_detector"] + ms["t_score"]
+    # Use definition-aligned breakdown emitted by pipelines.py (seconds).
+    tx_load = float(result.extra.get("tx_t_load_wav", 0.0))
+    tx_spec = float(result.extra.get("tx_t_compute_spectrogram", 0.0))
+    tx_payload = float(result.extra.get("tx_t_to_payload", 0.0))
+
+    rx_decode_to_latents = float(result.extra.get("rx_t_decode_to_latents", 0.0))
+    rx_gen = float(result.extra.get("rx_t_general_dec", 0.0))
+    rx_obj = float(result.extra.get("rx_t_object_dec", 0.0))
+    rx_anom = float(result.extra.get("rx_t_anom_det", 0.0))
+    rx_score = float(result.extra.get("rx_t_score", 0.0))
+
+    tx_total = tx_load + tx_spec + tx_payload
+    rx_total = rx_decode_to_latents + max(rx_gen, rx_obj) + rx_anom + rx_score
     return {
         "method": method,
         "wav_path": str(wav_path),
@@ -178,23 +180,19 @@ def row_from_result(
         "repeat": repeat,
         "snr_db": snr_db,
         "use_channel": int(use_channel),
-        "t_load_wav_ms": f"{ms['t_load_wav']:.4f}",
-        "t_mel_ms": f"{ms['t_mel']:.4f}",
-        "t_tx_codec_ms": f"{ms['t_tx_codec']:.4f}",
-        "t_channel_ms": f"{ms['t_channel']:.4f}",
-        "t_rx_codec_ms": f"{ms['t_rx_codec']:.4f}",
-        "t_detector_ms": f"{ms['t_detector']:.4f}",
-        "t_score_ms": f"{ms['t_score']:.4f}",
-        "t_e2e_ms": f"{ms['t_e2e']:.4f}",
-        "tx_total_ms": f"{tx_total:.4f}",
-        "rx_total_ms": f"{rx_total:.4f}",
+        "tx_t_load_wav": f"{tx_load * 1000.0:.4f}",
+        "tx_t_compute_spectrogram": f"{tx_spec * 1000.0:.4f}",
+        "tx_t_to_payload": f"{tx_payload * 1000.0:.4f}",
+        "tx_total": f"{tx_total * 1000.0:.4f}",
+        "t_decode_to_latents": f"{rx_decode_to_latents * 1000.0:.4f}",
+        "t_general_dec": f"{rx_gen * 1000.0:.4f}",
+        "t_object_dec": f"{rx_obj * 1000.0:.4f}",
+        "t_anom_det": f"{rx_anom * 1000.0:.4f}",
+        "t_score_ms": f"{rx_score * 1000.0:.4f}",
+        "rx_total": f"{rx_total * 1000.0:.4f}",
         "payload_bytes": result.payload_bytes,
         "decode_ok": int(result.decode_ok),
         "anomaly_score": f"{result.anomaly_score:.6f}",
-        "rx_t_enc_vqvae_ms": f"{result.extra.get('t_enc_vqvae', 0.0) * 1000.0:.4f}",
-        "rx_t_dec_general_ms": f"{result.extra.get('t_dec_general', 0.0) * 1000.0:.4f}",
-        "rx_t_dec_object_ms": f"{result.extra.get('t_dec_object', 0.0) * 1000.0:.4f}",
-        "rx_t_anom_det_ms": f"{result.extra.get('t_anom_det', 0.0) * 1000.0:.4f}",
     }
 
 
@@ -233,23 +231,19 @@ def main() -> None:
         "repeat",
         "snr_db",
         "use_channel",
-        "t_load_wav_ms",
-        "t_mel_ms",
-        "t_tx_codec_ms",
-        "t_channel_ms",
-        "t_rx_codec_ms",
-        "t_detector_ms",
+        "tx_t_load_wav",
+        "tx_t_compute_spectrogram",
+        "tx_t_to_payload",
+        "tx_total",
+        "t_decode_to_latents",
+        "t_general_dec",
+        "t_object_dec",
+        "t_anom_det",
         "t_score_ms",
-        "t_e2e_ms",
-        "tx_total_ms",
-        "rx_total_ms",
+        "rx_total",
         "payload_bytes",
         "decode_ok",
         "anomaly_score",
-        "rx_t_enc_vqvae_ms",
-        "rx_t_dec_general_ms",
-        "rx_t_dec_object_ms",
-        "rx_t_anom_det_ms",
     ]
 
     all_rows: list[dict] = []
@@ -368,41 +362,14 @@ def main() -> None:
         "per_method": {},
     }
 
-    print("\n=== Latency summary (median ms) ===")
-    for (method, wav_str), samples in sorted(by_method_wav.items()):
-        agg = aggregate_times(samples)
-        summary["per_method_wav"][f"{method}|{wav_str}"] = {
-            k: {stat: v * 1000.0 for stat, v in stats.items()}
-            for k, stats in agg.items()
-        }
-        e2e_med = agg.get("t_e2e", {}).get("median", 0.0) * 1000.0
-        det_med = agg.get("t_detector", {}).get("median", 0.0) * 1000.0
-        tx_med = agg.get("t_tx_codec", {}).get("median", 0.0) * 1000.0
-        print(
-            f"  {method} | {Path(wav_str).name}: e2e={e2e_med:.2f} ms "
-            f"(tx_codec={tx_med:.2f}, detector={det_med:.2f}) n={len(samples)}"
-        )
-
-    for method, samples in sorted(by_method.items()):
-        agg = aggregate_times(samples)
-        summary["per_method"][method] = {
-            k: {stat: v * 1000.0 for stat, v in stats.items()}
-            for k, stats in agg.items()
-        }
-        parts = [f"  {method} (all wavs):"]
-        for stage in ("t_load_wav", "t_mel", "t_tx_codec", "t_rx_codec", "t_detector", "t_e2e"):
-            med = agg.get(stage, {}).get("median", 0.0) * 1000.0
-            parts.append(f"{stage}={med:.2f}")
-        print(" ".join(parts) + f" ms n={len(samples)}")
-
-    print("\n=== TX/RX breakdown (per method, definition-aligned) ===")
+    print("\n=== TX/RX breakdown (definition-aligned; medians over runs) ===")
     print("TX_VQVAE2   : load_wav + mel + enc_vq_vae (encode_to_indices)")
     print("RX_VQVAE2   : indices_to_quantized + decode_vqvae + anomaly_score")
     print("TX_JPEG     : load_wav + mel + enc_to_JPEG")
     print("RX_JPEG     : decode_JPEG + enc_vq_vae + decode_vqvae + anomaly_score")
     print("TX_OPUS     : load_wav + compress_to_OPUS")
     print("RX_OPUS     : decompress_OPUS + mel + enc_vq_vae + decode_vqvae + anomaly_score")
-    print("Note: per-run component columns are in the CSV.\n")
+    print("Totals use max(general_dec, object_dec) to reflect parallel decode.\n")
 
     print(f"\nSaved per-run CSV: {out_path}")
 

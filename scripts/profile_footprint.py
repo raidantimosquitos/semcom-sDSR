@@ -496,6 +496,117 @@ def main() -> None:
         repeats=args.repeats,
     )
 
+    # Definition-aligned TX/RX timing summary (latent only).
+    # TX: t_load_wav, t_spectrogram, t_encode_to_indices
+    # RX: t_decode_to_vq_vae_latents, t_general_dec, t_object_dec, t_anom_det, t_score
+    # Total_RX uses max(general, object) to reflect parallel decode.
+    if not args.skip_mel:
+        wav_path, _is_tmp = _resolve_wav_for_mel(
+            args.wav,
+            sample_rate=int(args.sample_rate),
+            clip_seconds=float(args.clip_seconds),
+        )
+        mel_transform = make_mel_spectrogram(sample_rate=int(args.sample_rate))
+        to_db = amplitude_to_db_power()
+
+        # TX load + spectrogram (CPU)
+        tx_load_ms = _measure_latency(
+            lambda: load_wav(wav_path, sample_rate=int(args.sample_rate)),
+            device=torch.device("cpu"),
+            warmup=args.warmup,
+            repeats=args.repeats,
+        )
+        wav0, _ = load_wav(wav_path, sample_rate=int(args.sample_rate))
+        tx_spec_ms = _measure_latency(
+            lambda: wav_to_mel(
+                wav0, target_T=target_T, mel_transform=mel_transform, to_db=to_db
+            ),
+            device=torch.device("cpu"),
+            warmup=args.warmup,
+            repeats=args.repeats,
+        )
+        mel0 = wav_to_mel(wav0, target_T=target_T, mel_transform=mel_transform, to_db=to_db)
+        x_mel_cpu = mel0.unsqueeze(0).to(torch.device("cpu"))
+        tx_payload_ms = _measure_latency(
+            lambda: vq_tx.encode_to_indices(x_mel_cpu),
+            device=torch.device("cpu"),
+            warmup=args.warmup,
+            repeats=args.repeats,
+        )
+        tx_total_ms = tx_load_ms + tx_spec_ms + tx_payload_ms
+
+        # Move a copy of indices to RX device and time indices_to_quantized (decode_to_latents).
+        if rx_device.type != "cpu":
+            vq_vae = vq_vae.to(rx_device)
+            model = model.to(rx_device)
+        with torch.inference_mode():
+            idx_c, idx_f = vq_tx.encode_to_indices(x_mel_cpu)
+        idx_c_rx = idx_c.to(rx_device)
+        idx_f_rx = idx_f.to(rx_device)
+
+        rx_decode_latents_ms = _measure_latency(
+            lambda: vq_vae.indices_to_quantized(idx_c_rx, idx_f_rx),
+            device=rx_device,
+            warmup=args.warmup,
+            repeats=args.repeats,
+        )
+        with torch.inference_mode():
+            q_fine, q_coarse = vq_vae.indices_to_quantized(idx_c_rx, idx_f_rx)
+
+        # Reuse existing profiled modules for decoder/head timings by measuring runtime only here.
+        vq_rx_gen = VQVAE_RX_GeneralDecoder(vq_vae).eval()
+        obj_dec = model._object_decoder
+        det = model._anomaly_detection
+
+        rx_general_ms = _measure_latency(
+            lambda: vq_rx_gen.decode_general(q_fine, q_coarse),
+            device=rx_device,
+            warmup=args.warmup,
+            repeats=args.repeats,
+        )
+        rx_object_ms = _measure_latency(
+            lambda: obj_dec(q_coarse, q_fine, vq_vae._vq_coarse, vq_vae._vq_fine, return_aux=False),
+            device=rx_device,
+            warmup=args.warmup,
+            repeats=args.repeats,
+        )
+        with torch.inference_mode():
+            x_g = vq_rx_gen.decode_general(q_fine, q_coarse)
+            x_s = obj_dec(q_coarse, q_fine, vq_vae._vq_coarse, vq_vae._vq_fine, return_aux=False)
+
+        rx_anom_ms = _measure_latency(
+            lambda: det(x_s.detach(), x_g.detach()),
+            device=rx_device,
+            warmup=args.warmup,
+            repeats=args.repeats,
+        )
+
+        def _score_fn():
+            with torch.inference_mode():
+                m_out = det(x_s.detach(), x_g.detach())
+                probs = torch.softmax(m_out, dim=1)
+                _ = probs[:, 1].reshape(m_out.shape[0], -1).mean(dim=1).item()
+
+        rx_score_ms = _measure_latency(
+            _score_fn,
+            device=rx_device,
+            warmup=args.warmup,
+            repeats=args.repeats,
+        )
+        rx_total_ms = rx_decode_latents_ms + max(rx_general_ms, rx_object_ms) + rx_anom_ms + rx_score_ms
+
+        print("\n=== Latent TX/RX (definition-aligned) ===")
+        print(f"TX: tx_t_load_wav             : {tx_load_ms:.3f} ms")
+        print(f"TX: tx_t_compute_spectrogram  : {tx_spec_ms:.3f} ms")
+        print(f"TX: tx_t_to_payload           : {tx_payload_ms:.3f} ms  (encode_to_indices)")
+        print(f"TX: tx_total                  : {tx_total_ms:.3f} ms")
+        print(f"RX: t_decode_to_latents       : {rx_decode_latents_ms:.3f} ms  (indices_to_quantized)")
+        print(f"RX: t_general_dec             : {rx_general_ms:.3f} ms")
+        print(f"RX: t_object_dec              : {rx_object_ms:.3f} ms")
+        print(f"RX: t_anom_det                : {rx_anom_ms:.3f} ms")
+        print(f"RX: t_score_ms                : {rx_score_ms:.3f} ms")
+        print(f"RX: rx_total                  : {rx_total_ms:.3f} ms  (uses max(general, object))")
+
     # Move shared VQ-VAE + sDSR to RX device for receiver profiling.
     if rx_device.type != "cpu":
         vq_vae = vq_vae.to(rx_device)
