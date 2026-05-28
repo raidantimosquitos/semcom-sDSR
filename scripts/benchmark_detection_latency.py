@@ -161,6 +161,16 @@ def row_from_result(
     result,
 ) -> dict:
     ms = result.times.to_ms_dict()
+    # Definition-aligned totals (seconds -> ms):
+    # - For VQ-VAE-2 pipeline: TX includes load+mel+enc_vqvae (t_tx_codec), RX includes rx_codec + detector + score.
+    # - For JPEG pipeline: TX includes load+mel+enc_jpeg (t_tx_codec), RX includes rx_codec + detector + score.
+    # - For OPUS pipeline: TX includes load+enc_opus (t_tx_codec), RX includes rx_codec + mel + detector + score.
+    if method == "opus":
+        tx_total = ms["t_load_wav"] + ms["t_tx_codec"]
+        rx_total = ms["t_rx_codec"] + ms["t_mel"] + ms["t_detector"] + ms["t_score"]
+    else:
+        tx_total = ms["t_load_wav"] + ms["t_mel"] + ms["t_tx_codec"]
+        rx_total = ms["t_rx_codec"] + ms["t_detector"] + ms["t_score"]
     return {
         "method": method,
         "wav_path": str(wav_path),
@@ -176,9 +186,15 @@ def row_from_result(
         "t_detector_ms": f"{ms['t_detector']:.4f}",
         "t_score_ms": f"{ms['t_score']:.4f}",
         "t_e2e_ms": f"{ms['t_e2e']:.4f}",
+        "tx_total_ms": f"{tx_total:.4f}",
+        "rx_total_ms": f"{rx_total:.4f}",
         "payload_bytes": result.payload_bytes,
         "decode_ok": int(result.decode_ok),
         "anomaly_score": f"{result.anomaly_score:.6f}",
+        "rx_t_enc_vqvae_ms": f"{result.extra.get('t_enc_vqvae', 0.0) * 1000.0:.4f}",
+        "rx_t_dec_general_ms": f"{result.extra.get('t_dec_general', 0.0) * 1000.0:.4f}",
+        "rx_t_dec_object_ms": f"{result.extra.get('t_dec_object', 0.0) * 1000.0:.4f}",
+        "rx_t_anom_det_ms": f"{result.extra.get('t_anom_det', 0.0) * 1000.0:.4f}",
     }
 
 
@@ -225,9 +241,15 @@ def main() -> None:
         "t_detector_ms",
         "t_score_ms",
         "t_e2e_ms",
+        "tx_total_ms",
+        "rx_total_ms",
         "payload_bytes",
         "decode_ok",
         "anomaly_score",
+        "rx_t_enc_vqvae_ms",
+        "rx_t_dec_general_ms",
+        "rx_t_dec_object_ms",
+        "rx_t_anom_det_ms",
     ]
 
     all_rows: list[dict] = []
@@ -372,6 +394,15 @@ def main() -> None:
             med = agg.get(stage, {}).get("median", 0.0) * 1000.0
             parts.append(f"{stage}={med:.2f}")
         print(" ".join(parts) + f" ms n={len(samples)}")
+
+    print("\n=== TX/RX breakdown (per method, definition-aligned) ===")
+    print("TX_VQVAE2   : load_wav + mel + enc_vq_vae (encode_to_indices)")
+    print("RX_VQVAE2   : indices_to_quantized + decode_vqvae + anomaly_score")
+    print("TX_JPEG     : load_wav + mel + enc_to_JPEG")
+    print("RX_JPEG     : decode_JPEG + enc_vq_vae + decode_vqvae + anomaly_score")
+    print("TX_OPUS     : load_wav + compress_to_OPUS")
+    print("RX_OPUS     : decompress_OPUS + mel + enc_vq_vae + decode_vqvae + anomaly_score")
+    print("Note: per-run component columns are in the CSV.\n")
 
     print(f"\nSaved per-run CSV: {out_path}")
 

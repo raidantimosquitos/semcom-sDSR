@@ -133,6 +133,85 @@ def _anomaly_score(m_out: torch.Tensor) -> float:
     return float(probs[:, 1].reshape(m_out.shape[0], -1).mean(dim=1).item())
 
 
+def _run_sdsr_from_mel_with_breakdown(
+    model: sDSR, x_mel: torch.Tensor, *, device: torch.device
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    Run sDSR forward in the same semantics as model.forward(x), but return a timing breakdown.
+
+    Returns:
+        (m_out, {"t_enc_vqvae":.., "t_dec_general":.., "t_dec_object":.., "t_anom_det":..})
+    """
+    breakdown: dict[str, float] = {}
+    with torch.inference_mode():
+        sync_device(device)
+        t0 = time.perf_counter()
+        q_fine, q_coarse = model._vq_vae.encode(x_mel)  # type: ignore[attr-defined]
+        sync_device(device)
+        breakdown["t_enc_vqvae"] = time.perf_counter() - t0
+
+        t1 = time.perf_counter()
+        x_general = model._vq_vae.decode_general(q_fine, q_coarse)  # type: ignore[attr-defined]
+        sync_device(device)
+        breakdown["t_dec_general"] = time.perf_counter() - t1
+
+        t2 = time.perf_counter()
+        x_specific = model._object_decoder(  # type: ignore[attr-defined]
+            q_coarse,
+            q_fine,
+            model._vq_vae._vq_coarse,  # type: ignore[attr-defined]
+            model._vq_vae._vq_fine,  # type: ignore[attr-defined]
+            return_aux=False,
+        )
+        sync_device(device)
+        breakdown["t_dec_object"] = time.perf_counter() - t2
+
+        t3 = time.perf_counter()
+        m_out = model._anomaly_detection(  # type: ignore[attr-defined]
+            x_specific.detach(), x_general.detach()
+        )
+        sync_device(device)
+        breakdown["t_anom_det"] = time.perf_counter() - t3
+
+    return m_out, breakdown
+
+
+def _run_sdsr_from_quantized_with_breakdown(
+    model: sDSR, *, q_fine: torch.Tensor, q_coarse: torch.Tensor, device: torch.device
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    Run sDSR receiver path from quantized latents (same semantics as forward_from_quantized),
+    but return a timing breakdown.
+    """
+    breakdown: dict[str, float] = {}
+    with torch.inference_mode():
+        sync_device(device)
+        t1 = time.perf_counter()
+        x_general = model._vq_vae.decode_general(q_fine, q_coarse)  # type: ignore[attr-defined]
+        sync_device(device)
+        breakdown["t_dec_general"] = time.perf_counter() - t1
+
+        t2 = time.perf_counter()
+        x_specific = model._object_decoder(  # type: ignore[attr-defined]
+            q_coarse,
+            q_fine,
+            model._vq_vae._vq_coarse,  # type: ignore[attr-defined]
+            model._vq_vae._vq_fine,  # type: ignore[attr-defined]
+            return_aux=False,
+        )
+        sync_device(device)
+        breakdown["t_dec_object"] = time.perf_counter() - t2
+
+        t3 = time.perf_counter()
+        m_out = model._anomaly_detection(  # type: ignore[attr-defined]
+            x_specific.detach(), x_general.detach()
+        )
+        sync_device(device)
+        breakdown["t_anom_det"] = time.perf_counter() - t3
+
+    return m_out, breakdown
+
+
 def run_latent_pipeline(
     wav_path: str | Path,
     *,
@@ -216,17 +295,25 @@ def run_latent_pipeline(
     timer.stop("t_rx_codec")
 
     timer.start("t_detector")
-    with torch.inference_mode():
-        out = model.forward_from_quantized(q_fine=q_fine, q_coarse=q_coarse)
-        m_out = out[0] if isinstance(out, tuple) else out
-    sync_device(rx_device)
+    m_out, rx_breakdown = _run_sdsr_from_quantized_with_breakdown(
+        model, q_fine=q_fine, q_coarse=q_coarse, device=rx_device
+    )
     timer.stop("t_detector")
 
     timer.start("t_score")
     score = _anomaly_score(m_out)
     timer.stop("t_score")
 
-    return PipelineResult(times=timer.times, payload_bytes=payload_bytes, decode_ok=True, anomaly_score=score)
+    extra = dict(rx_breakdown)
+    extra["tx_device_is_cuda"] = 1.0 if tx_device.type == "cuda" else 0.0
+    extra["rx_device_is_cuda"] = 1.0 if rx_device.type == "cuda" else 0.0
+    return PipelineResult(
+        times=timer.times,
+        payload_bytes=payload_bytes,
+        decode_ok=True,
+        anomaly_score=score,
+        extra=extra,
+    )
 
 
 def run_jpeg_pipeline(
@@ -289,18 +376,20 @@ def run_jpeg_pipeline(
     timer.stop("t_rx_codec")
 
     timer.start("t_detector")
-    with torch.inference_mode():
-        m_out = model(x_hat)
-        if isinstance(m_out, tuple):
-            m_out = m_out[0]
-    sync_device(device)
+    m_out, rx_breakdown = _run_sdsr_from_mel_with_breakdown(model, x_hat, device=device)
     timer.stop("t_detector")
 
     timer.start("t_score")
     score = _anomaly_score(m_out)
     timer.stop("t_score")
 
-    return PipelineResult(times=timer.times, payload_bytes=payload_bytes, decode_ok=decode_ok, anomaly_score=score)
+    return PipelineResult(
+        times=timer.times,
+        payload_bytes=payload_bytes,
+        decode_ok=decode_ok,
+        anomaly_score=score,
+        extra=rx_breakdown,
+    )
 
 
 def run_opus_pipeline(
@@ -365,18 +454,20 @@ def run_opus_pipeline(
     x_hat = x_hat.unsqueeze(0).to(device)
 
     timer.start("t_detector")
-    with torch.inference_mode():
-        m_out = model(x_hat)
-        if isinstance(m_out, tuple):
-            m_out = m_out[0]
-    sync_device(device)
+    m_out, rx_breakdown = _run_sdsr_from_mel_with_breakdown(model, x_hat, device=device)
     timer.stop("t_detector")
 
     timer.start("t_score")
     score = _anomaly_score(m_out)
     timer.stop("t_score")
 
-    return PipelineResult(times=timer.times, payload_bytes=payload_bytes, decode_ok=decode_ok, anomaly_score=score)
+    return PipelineResult(
+        times=timer.times,
+        payload_bytes=payload_bytes,
+        decode_ok=decode_ok,
+        anomaly_score=score,
+        extra=rx_breakdown,
+    )
 
 
 def run_pipeline(
