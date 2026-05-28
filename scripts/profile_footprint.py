@@ -535,14 +535,16 @@ def main() -> None:
         )
         tx_total_ms = tx_load_ms + tx_spec_ms + tx_payload_ms
 
-        # Move a copy of indices to RX device and time indices_to_quantized (decode_to_latents).
+        # Encode on CPU before moving vq_vae: VQVAE_TX_Encoder aliases vq_vae submodules.
+        with torch.inference_mode():
+            idx_c_cpu, idx_f_cpu = vq_tx.encode_to_indices(x_mel_cpu)
+
+        # Move shared weights to RX device for receiver profiling.
         if rx_device.type != "cpu":
             vq_vae = vq_vae.to(rx_device)
             model = model.to(rx_device)
-        with torch.inference_mode():
-            idx_c, idx_f = vq_tx.encode_to_indices(x_mel_cpu)
-        idx_c_rx = idx_c.to(rx_device)
-        idx_f_rx = idx_f.to(rx_device)
+        idx_c_rx = idx_c_cpu.to(rx_device)
+        idx_f_rx = idx_f_cpu.to(rx_device)
 
         rx_decode_latents_ms = _measure_latency(
             lambda: vq_vae.indices_to_quantized(idx_c_rx, idx_f_rx),
