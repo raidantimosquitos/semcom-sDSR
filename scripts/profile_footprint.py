@@ -27,6 +27,7 @@ TX encoder is always profiled on CPU at batch size 1 (edge). RX modules use --de
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import tempfile
 import time
@@ -412,7 +413,14 @@ def parse_args() -> argparse.Namespace:
         "--device",
         type=str,
         default="cuda",
-        help="Device for RX modules (general/object/detector). TX encoder always uses CPU.",
+        help="Device for RX modules (general/object/detector).",
+    )
+    p.add_argument(
+        "--tx_device",
+        type=str,
+        default="cpu",
+        choices=["cpu", "cuda"],
+        help="Device for TX semantic encoder (encode_to_indices).",
     )
     p.add_argument("--batch", type=int, default=1, help="Batch size for RX profiling only.")
     p.add_argument("--warmup", type=int, default=20)
@@ -446,7 +454,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     rx_device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    tx_device = torch.device("cpu")
+    tx_device = torch.device(args.tx_device if (args.tx_device != "cuda" or torch.cuda.is_available()) else "cpu")
     print(f"RX device: {rx_device}")
     print(f"TX device: {tx_device} (encoder batch size fixed to 1)")
 
@@ -476,21 +484,23 @@ def main() -> None:
                 except OSError:
                     pass
 
-    # -------- TX: encoder-only on CPU, batch=1 (edge) — before moving weights to RX device
-    assert tx_device.type == "cpu"
-    vq_tx = VQVAE_TX_Encoder(vq_vae).eval()
+    # -------- TX: encoder-only on TX device, batch=1 (edge).
+    # IMPORTANT: VQVAE_TX_Encoder aliases VQ-VAE submodules. We keep TX and RX weights
+    # separate to prevent CPU<->CUDA device-mismatch when RX weights are moved.
+    vq_vae_tx = copy.deepcopy(vq_vae).to(tx_device).eval()
+    vq_tx = VQVAE_TX_Encoder(vq_vae_tx).eval()
     x_tx = torch.randn(1, 1, n_mels, target_T, device=tx_device)
 
-    def tx_fn_cpu():
+    def tx_fn():
         with torch.inference_mode():
             _ = vq_tx.encode_to_indices(x_tx)
 
-    print("\n=== TX edge semantic encoder (CPU, batch=1) ===")
+    print(f"\n=== TX edge semantic encoder ({tx_device}, batch=1) ===")
     tx_fp = profile_module(
         "TX encoder-only (VQ encoders + quantizers -> indices)",
         vq_tx,
         vq_tx.state_dict(),
-        tx_fn_cpu,
+        tx_fn,
         device=tx_device,
         warmup=args.warmup,
         repeats=args.repeats,
@@ -526,25 +536,24 @@ def main() -> None:
             repeats=args.repeats,
         )
         mel0 = wav_to_mel(wav0, target_T=target_T, mel_transform=mel_transform, to_db=to_db)
-        x_mel_cpu = mel0.unsqueeze(0).to(torch.device("cpu"))
+        x_mel_tx = mel0.unsqueeze(0).to(tx_device)
         tx_payload_ms = _measure_latency(
-            lambda: vq_tx.encode_to_indices(x_mel_cpu),
-            device=torch.device("cpu"),
+            lambda: vq_tx.encode_to_indices(x_mel_tx),
+            device=tx_device,
             warmup=args.warmup,
             repeats=args.repeats,
         )
         tx_total_ms = tx_load_ms + tx_spec_ms + tx_payload_ms
 
-        # Encode on CPU before moving vq_vae: VQVAE_TX_Encoder aliases vq_vae submodules.
         with torch.inference_mode():
-            idx_c_cpu, idx_f_cpu = vq_tx.encode_to_indices(x_mel_cpu)
+            idx_c_tx, idx_f_tx = vq_tx.encode_to_indices(x_mel_tx)
 
         # Move shared weights to RX device for receiver profiling.
         if rx_device.type != "cpu":
             vq_vae = vq_vae.to(rx_device)
             model = model.to(rx_device)
-        idx_c_rx = idx_c_cpu.to(rx_device)
-        idx_f_rx = idx_f_cpu.to(rx_device)
+        idx_c_rx = idx_c_tx.to(rx_device)
+        idx_f_rx = idx_f_tx.to(rx_device)
 
         rx_decode_latents_ms = _measure_latency(
             lambda: vq_vae.indices_to_quantized(idx_c_rx, idx_f_rx),
